@@ -315,11 +315,8 @@ async fn detach_inner(
             .iter()
             .any(|t| t.id == id && t.url == original_url)
         {
-            browser::close(&app, &id)?;
-            // Moving is not closing: don't duplicate the moved page in Ctrl+Shift+T.
-            state.session.lock().unwrap().closed.retain(|t| t.id != id);
-            browser::persist(&app)?;
-            browser::emit(&app);
+            // Remove atomically without ever publishing the moved page to Ctrl+Shift+T.
+            browser::close_transferred(&app, &id)?;
         }
         Ok(true)
     }

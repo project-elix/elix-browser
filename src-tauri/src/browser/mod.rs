@@ -343,6 +343,12 @@ pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
     persist(app)
 }
 pub fn close(app: &AppHandle, id: &str) -> Result<(), String> {
+    close_inner(app, id, true)
+}
+pub fn close_transferred(app: &AppHandle, id: &str) -> Result<(), String> {
+    close_inner(app, id, false)
+}
+fn close_inner(app: &AppHandle, id: &str, remember: bool) -> Result<(), String> {
     if app
         .state::<AppState>()
         .downloads
@@ -371,7 +377,7 @@ pub fn close(app: &AppHandle, id: &str) -> Result<(), String> {
             .position(|t| t.id == id)
             .ok_or("Fant ikke fanen")?;
         let closed = s.tabs.remove(index);
-        if !closed.private {
+        if remember && !closed.private {
             s.closed.insert(0, closed);
             s.closed.truncate(20);
         }
