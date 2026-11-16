@@ -96,10 +96,12 @@ there is no in-place downgrade claim. Do not test by deleting application data.
   branch `alpha-6` in [draft PR #1](https://github.com/project-elix/elix-browser/pull/1).
 - [Initial Windows CI](https://github.com/project-elix/elix-browser/actions/runs/43957080849)
   built the installer, launched the installed application and passed the native
-  WebView2 integration suite. Follow-up review fixes and extended window-transfer
-  coverage require a fresh CI run on the updated PR head. The follow-up installer
-  registry assertion caught malformed command quoting, which is corrected in the
-  next commit. Runtime acceptance is tied to the current PR check result.
+  WebView2 integration suite. The expanded suite now also checks Windows registry
+  associations and actual mouse-driven window transfer. Test windows share the same
+  WebView2 environment options as their parent. Runtime acceptance is tied to the
+  current PR check result and its native-smoke.txt artifact.
+- 23 Rust unit tests passed on Windows, including split state and DPAPI credential
+  replacement/recovery. Installed-app startup and default-browser registration passed.
 - No signed release, updater channel change or account-service deployment has occurred.
 
 Before release: run Windows CI; inspect the actual UI; test pointer drag out onto

@@ -216,11 +216,13 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         true
     });
     #[cfg(feature = "smoke-tests")]
-    let builder = if std::env::args().any(|arg| arg == "--self-test") {
-        builder.additional_browser_args("--use-fake-device-for-media-stream")
-    } else {
-        builder
-    };
+    // Windows sharing a profile must use identical WebView2 environment options.
+    let builder =
+        if std::env::args().any(|arg| arg == "--self-test" || arg == "--elix-smoke-window") {
+            builder.additional_browser_args("--use-fake-device-for-media-stream")
+        } else {
+            builder
+        };
     let window = app.get_window("main").ok_or("Fant ikke hovedvinduet")?;
     let view = window
         .add_child(
