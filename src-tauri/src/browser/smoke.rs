@@ -6,6 +6,171 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
+
+/// Detached test processes must share only the parent's disposable profile directory.
+pub fn detached_root() -> Result<std::path::PathBuf, String> {
+    let root = std::env::var_os("ELIX_SMOKE_ROOT").ok_or("Missing smoke root")?;
+    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let temp = std::fs::canonicalize(std::env::temp_dir()).map_err(|e| e.to_string())?;
+    let suffix = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("elix-smoke-"))
+        .ok_or("Invalid smoke root")?;
+    if root.parent() != Some(temp.as_path()) || uuid::Uuid::parse_str(suffix).is_err() {
+        return Err("Detached test refused a non-test profile directory".into());
+    }
+    Ok(root)
+}
+
+pub fn start_detached(app: AppHandle) {
+    std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            let state = app.state::<AppState>();
+            let id = state.session.lock().unwrap().active.clone();
+            wait_title_or_error(&app, &id, "ELIX native two")?;
+            wait(|| shell_bool(&app, "!!document.querySelector('.tab-strip')").unwrap_or(false))?;
+            let view = app
+                .get_webview(&id)
+                .ok_or("Missing transferred native page")?;
+            if !view_bool(&view, "document.cookie.includes('alpha6_handoff=shared')")? {
+                return Err("Transferred window lost profile cookies".into());
+            }
+            let session = state.session.lock().unwrap();
+            let tab = session
+                .tabs
+                .iter()
+                .find(|t| t.id == id)
+                .ok_or("Missing transferred tab")?;
+            if session.tabs.len() != 1 || !tab.pinned || !tab.muted || tab.group != "Handoff test" {
+                return Err("Transferred window lost tab metadata".into());
+            }
+            drop(session);
+            browser::persist(&app)?;
+            Ok(())
+        })();
+        let state = app.state::<AppState>();
+        let message = result
+            .map(|_| "PASS".to_string())
+            .unwrap_or_else(|e| format!("FAIL: {e}"));
+        let _ = state
+            .store
+            .lock()
+            .unwrap()
+            .set(&format!("smoke_window:{}", state.window_id), &message);
+        let _ = crate::window::perform(&app, crate::window::Action::Close);
+    });
+}
+
+#[cfg(windows)]
+fn detached_window_test(app: &AppHandle, origin: &str) -> Result<(), String> {
+    let id = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/two")))?;
+    wait_title_or_error(app, &id, "ELIX native two")?;
+    browser::pin(app, &id, true)?;
+    tauri::async_runtime::block_on(browser::organization::mute(app, &id, true))?;
+    let workspace = app
+        .state::<AppState>()
+        .session
+        .lock()
+        .unwrap()
+        .workspace
+        .clone();
+    browser::organization::group(app, &id, "Handoff test", &workspace)?;
+    if !view_bool(&app.get_webview(&id).ok_or("Missing transfer source")?,
+        "(()=>{document.cookie='alpha6_handoff=shared; Path=/';return document.cookie.includes('alpha6_handoff=shared')})()")? {
+        return Err("Transfer cookie fixture failed".into());
+    }
+    if tauri::async_runtime::block_on(browser::detach::rejected_detach_for_test(
+        app.clone(),
+        id.clone(),
+    ))
+    .is_ok()
+        || !app
+            .state::<AppState>()
+            .session
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == id)
+        || app.get_webview(&id).is_none()
+    {
+        return Err("Failed handoff did not preserve the source tab".into());
+    }
+    if !tauri::async_runtime::block_on(browser::detach::detach(app.clone(), id.clone(), false))? {
+        return Err("New window did not acknowledge transfer".into());
+    }
+    let state = app.state::<AppState>();
+    {
+        let session = state.session.lock().unwrap();
+        if session
+            .tabs
+            .iter()
+            .chain(session.closed.iter())
+            .any(|t| t.id == id)
+        {
+            return Err("Transferred tab remained in source or reopen stack".into());
+        }
+    }
+    let mut report = None;
+    wait(|| {
+        let store = state.store.lock().unwrap();
+        report = store
+            .conn
+            .query_row(
+                "SELECT key,value FROM settings WHERE key LIKE 'smoke_window:%' LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .ok();
+        report.is_some()
+    })?;
+    let (key, message) = report.ok_or("Missing child window report")?;
+    if message != "PASS" {
+        return Err(message);
+    }
+    let child_id = key
+        .strip_prefix("smoke_window:")
+        .ok_or("Invalid child report")?;
+    wait(|| {
+        state
+            .store
+            .lock()
+            .unwrap()
+            .get(&format!("window_pid:{child_id}"))
+            .as_deref()
+            == Some("0")
+    })?;
+    let profile = state.profile.lock().unwrap().clone();
+    let data = state
+        .store
+        .lock()
+        .unwrap()
+        .get(&format!("window_session:{child_id}:{profile}"))
+        .ok_or("Transferred session was not durably saved in the same profile")?;
+    let saved: browser::Session = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    if saved.tabs.len() != 1
+        || saved.tabs[0].url != format!("{origin}/two")
+        || !saved.tabs[0].pinned
+        || !saved.tabs[0].muted
+    {
+        return Err("Saved transferred session lost tab metadata".into());
+    }
+    if browser::detach::recover_windows(app)? != 1 {
+        return Err("Detached session recovery failed".into());
+    }
+    let recovered = state
+        .session
+        .lock()
+        .unwrap()
+        .tabs
+        .iter()
+        .find(|t| t.group == "Handoff test")
+        .map(|t| t.id.clone())
+        .ok_or("Recovered transferred tab missing")?;
+    browser::close(app, &recovered)?;
+    Ok(())
+}
 #[track_caller]
 fn wait(mut condition: impl FnMut() -> bool) -> Result<(), String> {
     let caller = std::panic::Location::caller();
@@ -203,6 +368,9 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
         }
     }
     browser::organization::split(app, Some(a.clone()))?;
+    wait(|| {
+        shell_bool(app, "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.includes('Avslutt delt visning'))").unwrap_or(false)
+    })?;
     let view = app.get_webview(&b).ok_or("Missing split view")?;
     let other = app.get_webview(&a).ok_or("Missing split view")?;
     let scale = app
@@ -280,6 +448,7 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     }
     browser::close(app, &reopened)?;
     browser::close(app, &a)?;
+    detached_window_test(app, origin)?;
     browser::activate(app, &original)?;
     Ok(())
 }
@@ -288,7 +457,7 @@ pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         let result = exercise(&app);
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: Alpha 6 reorder/reopen, native mute, split bounds and cookie deletion; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        let message=match result{Ok(())=>"PASS: Alpha 6 reorder/reopen, native mute, split controls/bounds, cookie deletion, real child-window handoff with shared profile cookies and saved recovery, failed handoff retains source; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         #[cfg(windows)]
         let message = format!(
             "{message}\nDownload native diagnostics: {}",

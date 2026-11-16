@@ -31,21 +31,38 @@ test('sync is account-isolated, encrypted-envelope only, and detects concurrent 
  assert.equal((await f.request('/v1/sync',null,b.token)).value.envelope,null);
  assert.equal((await f.request('/v1/sync',{revision:1,envelope:{items:['plain']}},a.token,'PUT')).status,400);
  assert.equal((await f.request('/v1/sync',{revision:1,envelope:encrypted},a.token,'PUT')).value.revision,2);
- assert.equal((await f.request('/v1/sync',null,a.token,'DELETE')).status,200);
- assert.equal((await f.request('/v1/sync',null,a.token)).value.revision,0);
+ assert.equal((await f.request('/v1/sync',{revision:2},a.token,'DELETE')).status,200);
+ assert.deepEqual((await f.request('/v1/sync',null,a.token)).value,{revision:3,envelope:null});
  }finally{await f.close()}
 });
-test('Discord binds state to browser cookie, consumes callback and completion once',async()=>{
+test('sync deletion keeps monotonic revisions and rejects stale uploads and deletes',async()=>{
  const f=await fixture();try{
- const start=await f.request('/v1/auth/discord/start',{});assert.equal(start.status,200);
- const url=new URL(start.value.authorize_url);const authorization=await f.request(url.pathname+url.search);
- const target=new URL(authorization.response.headers.get('location'));const cookie=authorization.response.headers.get('set-cookie').split(';')[0];
- const callback='/v1/auth/discord/callback?'+new URLSearchParams({state:target.searchParams.get('state'),code:'test-code',iss:'https://discord.com'});
- assert.equal((await f.request(callback)).status,401);assert.equal(f.calls,0);
- assert.equal((await f.request(callback,null,null,'GET',{cookie})).status,200);assert.equal(f.calls,1);
- assert.equal((await f.request(callback,null,null,'GET',{cookie})).status,401);
- const complete=await f.request('/v1/auth/discord/complete',{challenge:start.value.challenge});assert.equal(complete.status,200);assert.equal(complete.value.account.provider,'discord');
- assert.equal((await f.request('/v1/auth/discord/complete',{challenge:start.value.challenge})).status,401);
+ const a=await f.login('a@example.com');
+ const encrypted=n=>({version:1,algorithm:'AES-GCM',iterations:600000,salt:Buffer.alloc(16).toString('base64'),iv:Buffer.alloc(12).toString('base64'),ciphertext:Buffer.alloc(50,n).toString('base64')});
+ assert.equal((await f.request('/v1/sync',{revision:0,envelope:encrypted(1)},a.token,'PUT')).value.revision,1);
+ assert.equal((await f.request('/v1/sync',{revision:1},a.token,'DELETE')).value.revision,2);
+ assert.deepEqual((await f.request('/v1/sync',null,a.token)).value,{revision:2,envelope:null});
+ assert.equal((await f.request('/v1/sync',{revision:0,envelope:encrypted(2)},a.token,'PUT')).status,409);
+ assert.equal((await f.request('/v1/sync',{revision:2,envelope:encrypted(2)},a.token,'PUT')).value.revision,3);
+ assert.equal((await f.request('/v1/sync',{revision:1,envelope:encrypted(1)},a.token,'PUT')).status,409);
+ assert.equal((await f.request('/v1/sync',{revision:2},a.token,'DELETE')).status,409);
+ assert.equal((await f.request('/v1/sync',{},a.token,'DELETE')).status,400);
+ assert.deepEqual((await f.request('/v1/sync',null,a.token)).value,{revision:3,envelope:encrypted(2)});
+ const b=await f.login('b@example.com');
+ assert.equal((await f.request('/v1/sync',{revision:0},b.token,'DELETE')).value.revision,1);
+ assert.equal((await f.request('/v1/sync',{revision:0,envelope:encrypted(1)},b.token,'PUT')).status,409);
+ assert.equal((await f.request('/v1/sync',{revision:1,envelope:encrypted(1)},b.token,'PUT')).value.revision,2);
+ }finally{await f.close()}
+});
+test('Discord stays unavailable even with provider credentials until native callback binding exists',async()=>{
+ const f=await fixture();try{
+ assert.equal((await f.request('/v1/config')).value.discord,false);
+ assert.equal((await f.request('/v1/config')).value.email,true);
+ for(const [path,body] of [['start',{}],['authorize?request=forwarded-challenge',null],['callback?code=victim-code&state=forwarded-state&iss=https://discord.com',null],['complete',{challenge:'forwarded-challenge'}]]){
+  assert.equal((await f.request('/v1/auth/discord/'+path,body)).status,503);
+ }
+ assert.equal(f.calls,0);
+ assert.equal(f.db.prepare('SELECT count(*) AS n FROM sessions').get().n,0);
  }finally{await f.close()}
 });
 test('expired email challenges and foreign browser origins are rejected',async()=>{

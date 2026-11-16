@@ -37,6 +37,12 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $exe = Join-Path $dest 'elix-browser.exe'
           if (!(Test-Path $exe)) { throw 'Installed executable missing' }
+          $capability = Get-ItemPropertyValue 'HKCU:\Software\RegisteredApplications' 'ELIX Browser'
+          if ($capability -ne 'Software\Clients\StartMenuInternet\ELIX Browser\Capabilities') { throw 'Default browser registration missing' }
+          $associations = Get-ItemProperty "HKCU:\$capability\URLAssociations"
+          if ($associations.http -ne 'ELIXBrowserHTML' -or $associations.https -ne 'ELIXBrowserHTML') { throw 'HTTP/HTTPS associations missing' }
+          $openCommand = (Get-Item 'HKCU:\Software\Classes\ELIXBrowserHTML\shell\open\command').GetValue('')
+          if ($openCommand -ne ('"' + $exe + '" --url "%1"')) { throw 'Browser URL launch command differs' }
           $app = Start-Process $exe -PassThru
           Start-Sleep -Seconds 12
           $app.Refresh()
@@ -68,6 +74,7 @@ jobs:
             src-tauri/target/release/bundle/nsis/*-setup.exe
             performance.csv
             windows-start.png
+            native-smoke.txt
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: failure()

@@ -84,7 +84,7 @@ pub struct Session {
     pub workspaces: Vec<String>,
     #[serde(default = "organization::default_workspace")]
     pub workspace: String,
-    #[serde(skip)]
+    #[serde(default, skip_deserializing)]
     pub split: Option<[String; 2]>,
 }
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -499,6 +499,26 @@ pub fn failed(app: &AppHandle, id: &str, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn split_reaches_the_shell_but_is_not_restored_from_disk() {
+        let left = Tab::new("https://example.com/left".into());
+        let right = Tab::new("https://example.com/right".into());
+        let pair = [left.id.clone(), right.id.clone()];
+        let session = Session {
+            active: left.id.clone(),
+            tabs: vec![left, right],
+            split: Some(pair.clone()),
+            ..Default::default()
+        };
+        let snapshot = serde_json::to_value(&session).unwrap();
+        assert_eq!(snapshot["split"], serde_json::json!(pair));
+        let persisted = serde_json::to_value(session.persistent()).unwrap();
+        assert!(persisted["split"].is_null());
+        // Persisted tab IDs are replaced at startup, so even a stale split must
+        // not survive deserialization with references to the old native views.
+        let restored: Session = serde_json::from_value(snapshot).unwrap();
+        assert!(restored.split.is_none());
+    }
     #[test]
     fn private_tabs_and_favicons_never_reach_session_storage() {
         let mut regular = Tab::new("https://example.com/".into());

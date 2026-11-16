@@ -160,6 +160,20 @@ pub fn ready(app: &AppHandle) {
 }
 
 pub async fn detach(app: AppHandle, id: String, outside_only: bool) -> Result<bool, String> {
+    detach_inner(app, id, outside_only, false).await
+}
+
+#[cfg(feature = "smoke-tests")]
+pub async fn rejected_detach_for_test(app: AppHandle, id: String) -> Result<bool, String> {
+    detach_inner(app, id, false, true).await
+}
+
+async fn detach_inner(
+    app: AppHandle,
+    id: String,
+    outside_only: bool,
+    _reject_ready: bool,
+) -> Result<bool, String> {
     #[cfg(not(windows))]
     {
         let _ = (app, id, outside_only);
@@ -212,10 +226,24 @@ pub async fn detach(app: AppHandle, id: String, outside_only: bool) -> Result<bo
         };
         let bytes = serde_json::to_vec(&handoff).map_err(|e| e.to_string())?;
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+        #[cfg(feature = "smoke-tests")]
+        let smoke_root = std::env::args()
+            .any(|a| a == "--self-test")
+            .then(|| state.root.clone());
         tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
             use std::io::{BufRead, BufReader};
             use std::process::{Command, Stdio};
-            let mut child = Command::new(executable)
+            let mut command = Command::new(executable);
+            #[cfg(feature = "smoke-tests")]
+            if let Some(root) = smoke_root {
+                command
+                    .arg("--elix-smoke-window")
+                    .env("ELIX_SMOKE_ROOT", root);
+                if _reject_ready {
+                    command.arg("--elix-smoke-reject-window");
+                }
+            }
+            let mut child = command
                 .arg(format!("--elix-window={}", uuid::Uuid::new_v4()))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -238,8 +266,12 @@ pub async fn detach(app: AppHandle, id: String, outside_only: bool) -> Result<bo
                     }
                 }
             });
-            rx.recv_timeout(std::time::Duration::from_secs(25))
-                .map_err(|_| "Det nye vinduet svarte ikke. Originalfanen er beholdt.".to_string())
+            let ready = rx.recv_timeout(std::time::Duration::from_secs(25));
+            if ready.is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            ready.map_err(|_| "Det nye vinduet svarte ikke. Originalfanen er beholdt.".to_string())
         })
         .await
         .map_err(|e| e.to_string())??;

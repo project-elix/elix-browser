@@ -645,9 +645,17 @@ pub fn run() {
                 std::env::temp_dir().join(format!("elix-smoke-{}", uuid::Uuid::new_v4()))
             } else if std::env::args().any(|a| a == "--upgrade-self-test") {
                 std::env::temp_dir().join("elix-upgrade-self-test")
+            } else if std::env::args().any(|a| a == "--elix-smoke-window") {
+                browser::smoke::detached_root().map_err(std::io::Error::other)?
             } else {
                 root
             };
+            #[cfg(feature = "smoke-tests")]
+            if std::env::args().any(|a| a == "--elix-smoke-reject-window") {
+                return Err(
+                    std::io::Error::other("Deliberate smoke-test startup rejection").into(),
+                );
+            }
             std::fs::create_dir_all(&root)?;
             let store =
                 storage::Store::open(&root.join("elix.sqlite")).map_err(std::io::Error::other)?;
@@ -755,6 +763,10 @@ pub fn run() {
             #[cfg(feature = "smoke-tests")]
             if std::env::args().any(|a| a == "--self-test") {
                 browser::smoke::start(app.handle().clone());
+            }
+            #[cfg(feature = "smoke-tests")]
+            if std::env::args().any(|a| a == "--elix-smoke-window") {
+                browser::smoke::start_detached(app.handle().clone());
             }
             #[cfg(feature = "smoke-tests")]
             if std::env::args().any(|a| a == "--upgrade-self-test") {

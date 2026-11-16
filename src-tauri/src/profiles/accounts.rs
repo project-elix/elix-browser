@@ -79,20 +79,57 @@ fn protect(_: &[u8], _: bool) -> Result<Vec<u8>, String> {
     Err("Sikker kontolagring krever Windows".into())
 }
 fn token(app: &AppHandle, profile: &str, base: &url::Url) -> Result<Option<String>, String> {
-    let path = path(app, profile);
-    if !path.exists() {
+    read_token(&path(app, profile), profile, base)
+}
+fn read_token(
+    path: &std::path::Path,
+    profile: &str,
+    base: &url::Url,
+) -> Result<Option<String>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Kunne ikke lese kontoen".into()),
+    };
+    if bytes.len() > 16000 {
         return Ok(None);
     }
-    let bytes = std::fs::read(path).map_err(|_| "Kunne ikke lese kontoen")?;
-    if bytes.len() > 16000 {
-        return Err("Ugyldig kontolagring".into());
-    }
-    let value: Value =
-        serde_json::from_slice(&protect(&bytes, false)?).map_err(|_| "Ugyldig kontolagring")?;
+    // A damaged credential or one copied from another Windows user must not block signing in again.
+    // Leave other profile data untouched; the next successful login replaces only account.dat.
+    let Some(value) = protect(&bytes, false)
+        .ok()
+        .and_then(|plain| serde_json::from_slice::<Value>(&plain).ok())
+    else {
+        return Ok(None);
+    };
     if value["service"] != base.as_str() || value["profile"] != profile {
         return Ok(None);
     }
-    Ok(value["token"].as_str().map(String::from))
+    Ok(value["token"]
+        .as_str()
+        .filter(|token| (32..=128).contains(&token.len()))
+        .map(String::from))
+}
+fn write_token(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let parent = path.parent().ok_or("Ugyldig kontolagring")?;
+    std::fs::create_dir_all(parent).map_err(|_| "Kunne ikke lagre kontoen")?;
+    let temporary = parent.join(format!("account-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        // Same-directory rename atomically replaces an existing file, including on Windows.
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|_| "Kunne ikke lagre kontoen".into())
 }
 fn save_token(app: &AppHandle, profile: &str, base: &url::Url, token: &str) -> Result<(), String> {
     if token.len() > 128 || token.len() < 32 {
@@ -103,9 +140,7 @@ fn save_token(app: &AppHandle, profile: &str, base: &url::Url, token: &str) -> R
             .unwrap(),
         true,
     )?;
-    let path = path(app, profile);
-    std::fs::create_dir_all(path.parent().unwrap()).map_err(|_| "Kunne ikke lagre kontoen")?;
-    std::fs::write(path, data).map_err(|_| "Kunne ikke lagre kontoen".into())
+    write_token(&path(app, profile), &data)
 }
 
 pub async fn request(
@@ -128,8 +163,6 @@ pub async fn request(
         "status" => (reqwest::Method::GET, "v1/account"),
         "email_start" => (reqwest::Method::POST, "v1/auth/email/start"),
         "email_verify" => (reqwest::Method::POST, "v1/auth/email/verify"),
-        "discord_start" => (reqwest::Method::POST, "v1/auth/discord/start"),
-        "discord_complete" => (reqwest::Method::POST, "v1/auth/discord/complete"),
         "logout" => (reqwest::Method::POST, "v1/auth/logout"),
         "sync_get" => (reqwest::Method::GET, "v1/sync"),
         "sync_put" => (reqwest::Method::PUT, "v1/sync"),
@@ -182,7 +215,7 @@ pub async fn request(
     if *state.profile.lock().unwrap() != profile {
         return Err("Profilen ble endret. Prøv innloggingen igjen i riktig profil.".into());
     }
-    if matches!(operation.as_str(), "email_verify" | "discord_complete") {
+    if operation == "email_verify" {
         if let Some(token) = result
             .get_mut("token")
             .map(Value::take)
@@ -197,19 +230,55 @@ pub async fn request(
             std::fs::remove_file(p).map_err(|_| "Kunne ikke fjerne lokal innlogging")?;
         }
     }
-    if operation == "discord_start" {
-        let target = result["authorize_url"]
-            .as_str()
-            .ok_or("Mangler Discord-adresse")?;
-        let url = url::Url::parse(target).map_err(|_| "Ugyldig Discord-adresse")?;
-        if url.origin() != base.origin() || url.path() != "/v1/auth/discord/authorize" {
-            return Err("Ugyldig Discord-adresse".into());
-        }
-        crate::browser::create(app.clone(), url.to_string()).await?;
-    }
     result
         .as_object_mut()
         .ok_or("Ugyldig kontosvar")?
         .insert("configured".into(), json!(true));
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_credential_save_replaces_existing_file_and_keeps_profile_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("account.dat");
+        let profile_data = directory.path().join("profile-data");
+        std::fs::write(&profile_data, b"keep me").unwrap();
+        write_token(&path, b"old credential").unwrap();
+        write_token(&path, b"new credential").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new credential");
+        assert_eq!(std::fs::read(profile_data).unwrap(), b"keep me");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn invalid_credentials_allow_a_fresh_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("account.dat");
+        let base = url::Url::parse("https://accounts.example/").unwrap();
+        for bytes in [Vec::new(), b"truncated DPAPI data".to_vec(), vec![0; 16001]] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(read_token(&path, "profile", &base).unwrap().is_none());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_credential_can_replace_corrupt_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("account.dat");
+        let base = url::Url::parse("https://accounts.example/").unwrap();
+        std::fs::write(&path, b"corrupt").unwrap();
+        assert!(read_token(&path, "profile", &base).unwrap().is_none());
+        let token = "a".repeat(43);
+        let data =
+            serde_json::to_vec(&json!({"service":base.as_str(),"profile":"profile","token":token}))
+                .unwrap();
+        write_token(&path, &protect(&data, true).unwrap()).unwrap();
+        assert_eq!(read_token(&path, "profile", &base).unwrap(), Some(token));
+        assert!(read_token(&path, "other-profile", &base).unwrap().is_none());
+    }
 }

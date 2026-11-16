@@ -45,16 +45,6 @@ export function createAccounts(config,providers={}){
     const r=await fetch('https://api.brevo.com/v3/smtp/email',{method:'POST',headers:{'api-key':config.brevoKey,'Content-Type':'application/json'},body:JSON.stringify({sender:{email:config.senderEmail,name:'ELIX Browser'},to:[{email}],subject:'Din innloggingskode til ELIX',textContent:`Din innloggingskode er ${code}. Koden er gyldig i 10 minutter. Ikke del den med andre. Hvis du ikke ba om koden, kan du se bort fra e-posten.`}),signal:AbortSignal.timeout(15000)});
     if(!r.ok)throw fault(503,'Kunne ikke sende e-post akkurat nå');
   });
-  const discordIdentity=providers.discordIdentity??(async code=>{
-    const tokenResponse=await fetch('https://discord.com/api/oauth2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:config.discordId,client_secret:config.discordSecret,grant_type:'authorization_code',code,redirect_uri:new URL('/v1/auth/discord/callback',base).href}),signal:AbortSignal.timeout(15000)});
-    if(!tokenResponse.ok)throw fault(401,'Discord-innlogging mislyktes');
-    const token=await tokenResponse.json();
-    const identity=await fetch('https://discord.com/api/v10/users/@me',{headers:{Authorization:`Bearer ${token.access_token}`},signal:AbortSignal.timeout(15000)});
-    if(!identity.ok)throw fault(401,'Kunne ikke bekrefte Discord-kontoen');
-    const value=await identity.json();
-    if(!/^\d{15,22}$/.test(value.id))throw fault(401,'Ugyldig Discord-konto');
-    return {id:value.id,name:value.global_name||value.username};
-  });
   let cleaned=0;
   const server=createServer(async(req,res)=>{
     try{
@@ -64,7 +54,7 @@ export function createAccounts(config,providers={}){
       if(req.headers.origin&&req.headers.origin!==base.origin)throw fault(403,'Ugyldig opprinnelse');
       limit('all:'+ip,1200,600);
       if(path==='/health'&&req.method==='GET')return json(res,200,{ok:true});
-      if(path==='/v1/config'&&req.method==='GET')return json(res,200,{email:!!(providers.sendEmail||(config.brevoKey&&config.senderEmail)),discord:!!(config.discordId&&config.discordSecret),sync:true});
+      if(path==='/v1/config'&&req.method==='GET')return json(res,200,{email:!!(providers.sendEmail||(config.brevoKey&&config.senderEmail)),discord:false,sync:true});
       if(path==='/v1/auth/email/start'&&req.method==='POST'){
         const b=await body(req),email=emailOf(b.email);limit('email:'+email,5);limit('email-ip:'+ip,20);
         const id=random(),code=String(randomInt(10000000,100000000));
@@ -82,37 +72,9 @@ export function createAccounts(config,providers={}){
         q('DELETE FROM challenges WHERE id=?').run(c.id);
         return json(res,200,issue(user('email',c.subject,c.subject)));
       }
-      if(path==='/v1/auth/discord/start'&&req.method==='POST'){
-        await body(req);limit('discord:'+ip,20);
-        if(!config.discordId||!config.discordSecret)throw fault(503,'Discord er ikke konfigurert');
-        const id=random();q('INSERT INTO challenges(id,provider,expires) VALUES(?,?,?)').run(digest(id),'discord',seconds()+600);
-        return json(res,200,{challenge:id,authorize_url:new URL('/v1/auth/discord/authorize?request='+id,base).href});
-      }
-      const cookieName=base.protocol==='https:'?'__Host-elix_oauth':'elix_oauth_dev';
-      const cookieValue=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.slice(cookieName.length+1);
-      if(path==='/v1/auth/discord/authorize'&&req.method==='GET'){
-        const id=url.searchParams.get('request')??'';const c=q('SELECT * FROM challenges WHERE id=? AND provider=? AND expires>?').get(digest(id),'discord',seconds());
-        if(!c||c.status!=='pending')throw fault(400,'Innloggingen er utløpt. Start på nytt i ELIX.');
-        const state=random(),binding=random();q("UPDATE challenges SET state=?,binding=?,status='authorizing' WHERE id=?").run(hash(state),hash(binding),c.id);
-        const target=new URL('https://discord.com/oauth2/authorize');target.search=new URLSearchParams({client_id:config.discordId,response_type:'code',scope:'identify',state,redirect_uri:new URL('/v1/auth/discord/callback',base).href,prompt:'consent'}).toString();
-        res.writeHead(302,{Location:target.href,'Set-Cookie':`${cookieName}=${binding}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600${base.protocol==='https:'?'; Secure':''}`,'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});return res.end();
-      }
-      if(path==='/v1/auth/discord/callback'&&req.method==='GET'){
-        const state=url.searchParams.get('state')??'';const c=q('SELECT * FROM challenges WHERE state=? AND provider=? AND expires>?').get(hash(state),'discord',seconds());
-        if(!c||c.status!=='authorizing'||!cookieValue||!equal(c.binding,hash(cookieValue))||url.searchParams.get('iss')!=='https://discord.com')throw fault(401,'Discord-forespørselen kunne ikke bekreftes');
-        q("UPDATE challenges SET status='processing',state=NULL,binding=NULL WHERE id=?").run(c.id);
-        const code=url.searchParams.get('code');if(!code||code.length>512)throw fault(401,'Innloggingen ble avbrutt');
-        const identity=await discordIdentity(code);const u=user('discord',identity.id,identity.name);
-        q("UPDATE challenges SET user_id=?,status='ready' WHERE id=?").run(u.id,c.id);
-        res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",'Referrer-Policy':'no-referrer','Set-Cookie':`${cookieName}=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/${base.protocol==='https:'?'; Secure':''}`});
-        return res.end('<!doctype html><html lang="nb"><meta charset="utf-8"><title>ELIX – innlogget</title><body style="background:#080b12;color:#edf5ff;font:18px system-ui;padding:8vw"><h1>Du er klar.</h1><p>Gå tilbake til ELIX-profilen og trykk «Fullfør Discord-innlogging».</p></body></html>');
-      }
-      if(path==='/v1/auth/discord/complete'&&req.method==='POST'){
-        limit('poll:'+ip,300,600);const b=await body(req);if(typeof b.challenge!=='string'||b.challenge.length>100)throw fault(400,'Ugyldig forespørsel');
-        const c=q('SELECT * FROM challenges WHERE id=? AND provider=? AND expires>?').get(digest(b.challenge),'discord',seconds());
-        if(!c)throw fault(401,'Innloggingen er utløpt');if(c.status!=='ready')return json(res,202,{pending:true});
-        q('DELETE FROM challenges WHERE id=?').run(c.id);return json(res,200,issue(q('SELECT * FROM users WHERE id=?').get(c.user_id)));
-      }
+      // TODO: enable Discord only after a native callback binds completion to the initiating ELIX instance.
+      // A public polling challenge can be forwarded to another browser to steal its completed login.
+      if(path.startsWith('/v1/auth/discord/'))throw fault(503,'Discord-innlogging er ikke tilgjengelig i denne versjonen');
       const u=authenticate(req);
       if(path==='/v1/account'&&req.method==='GET')return json(res,200,{account:publicUser(u)});
       if(path==='/v1/auth/logout'&&req.method==='POST'){await body(req);q('DELETE FROM sessions WHERE token=?').run(digest(req.headers.authorization.slice(7)));return json(res,200,{ok:true});}
@@ -124,7 +86,13 @@ export function createAccounts(config,providers={}){
         if(!changed)throw fault(409,'En annen enhet har nyere data. Hent dem før du laster opp.');
         return json(res,200,{revision:b.revision+1});
       }
-      if(path==='/v1/sync'&&req.method==='DELETE'){q('DELETE FROM sync WHERE user_id=?').run(u.id);return json(res,200,{ok:true});}
+      if(path==='/v1/sync'&&req.method==='DELETE'){
+        const b=await body(req);if(!Number.isSafeInteger(b.revision)||b.revision<0)throw fault(400,'Ugyldig revisjon');
+        // Keep a tombstone: deleting the row would reuse old revisions and let stale devices overwrite newer data.
+        const changed=b.revision===0?q("INSERT OR IGNORE INTO sync VALUES(?,1,'null')").run(u.id).changes:q("UPDATE sync SET revision=revision+1,envelope='null' WHERE user_id=? AND revision=?").run(u.id,b.revision).changes;
+        if(!changed)throw fault(409,'Synkroniseringskopien er endret. Hent på nytt før du prøver igjen.');
+        return json(res,200,{ok:true,revision:b.revision+1});
+      }
       throw fault(404,'Fant ikke endepunktet');
     }catch(error){if(!res.headersSent)json(res,error.status??500,{error:error.status?error.message:'Tjenesten kunne ikke fullføre forespørselen'});else res.end();}
   });
@@ -132,6 +100,6 @@ export function createAccounts(config,providers={}){
   return {server,db,close:async()=>{await new Promise(r=>server.close(r));db.close();}};
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
-  const {server}=createAccounts({publicUrl:process.env.PUBLIC_URL,pepper:process.env.AUTH_PEPPER,database:process.env.DATABASE_PATH??'./data/accounts.sqlite',brevoKey:process.env.BREVO_API_KEY,senderEmail:process.env.BREVO_SENDER_EMAIL,discordId:process.env.DISCORD_CLIENT_ID,discordSecret:process.env.DISCORD_CLIENT_SECRET,trustProxy:process.env.TRUST_PROXY==='1',development:process.env.NODE_ENV==='development'});
+  const {server}=createAccounts({publicUrl:process.env.PUBLIC_URL,pepper:process.env.AUTH_PEPPER,database:process.env.DATABASE_PATH??'./data/accounts.sqlite',brevoKey:process.env.BREVO_API_KEY,senderEmail:process.env.BREVO_SENDER_EMAIL,trustProxy:process.env.TRUST_PROXY==='1',development:process.env.NODE_ENV==='development'});
   server.listen(Number(process.env.PORT??3210),'127.0.0.1',()=>console.log('ELIX accounts ready'));
 }

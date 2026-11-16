@@ -38,23 +38,29 @@ when a qualified Alpha 6 release is eventually published. Beta 1 remains availab
 
 ## Accounts and sync: code ready for integration, service not deployed
 
-Email one-time-code login uses Brevo's transactional API. Discord uses server-side
-OAuth authorization-code exchange with an expiring state, browser-cookie binding
-and a separate one-use desktop completion challenge. Provider secrets never enter
-React or the Windows executable. A desktop session token is stored with Windows
-DPAPI, bound to its profile and configured service origin.
+Email one-time-code login uses Brevo's transactional API. Provider secrets never
+enter React or the Windows executable. A desktop session token is stored with
+Windows DPAPI, bound to its profile and configured service origin. Credential
+replacement is atomic; damaged credentials allow a fresh login without deleting
+local profile data.
+
+Discord login is disabled in both the desktop and service. Review found that the
+initial polling flow could let someone forward their authorization link to another
+person and collect that person's completed login. It must be replaced by a native
+callback bound to the initiating ELIX instance before Discord can be enabled.
 
 The standalone Node 24 service is in `services/accounts`; see its README for the
 required server configuration. The account UI is explicitly unavailable until a
 real HTTPS `ELIX_ACCOUNTS_URL` is embedded at build time. No Brevo sender, key,
 Discord application, callback registration or production domain was invented or
-changed. Email and Discord are separate identities; account linking is not implemented.
+changed. Account linking is not implemented.
 
 Sync is optional and manual: upload or fetch-and-merge bookmarks and appearance.
 AES-256-GCM, fresh 16-byte salt/12-byte nonce, PBKDF2-SHA256 at 600,000 iterations.
 The passphrase is never sent or saved, and cannot be reset to recover existing data.
 The service stores only an encrypted envelope; compare-and-swap revisions reject
-stale uploads. Downloads merge bookmarks (no deletion propagation) and replace
+stale uploads and deletions. Deletions retain a revision tombstone so an old device
+cannot overwrite a later upload after a delete. Downloads merge bookmarks (no deletion propagation) and replace
 appearance after decryption/validation. Cookies, history, passwords, private tabs
 and account tokens are excluded. This is not automatic continuous synchronization.
 
@@ -63,8 +69,10 @@ and account tokens are excluded. This is not automatic continuous synchronizatio
 Local frontend build, JavaScript unit tests, account API integration tests with
 mock providers, persistence migration/import/checkpoint tests and Windows cross-target
 compilation are used. The native Windows smoke suite additionally exercises reorder,
-reopen, mute, split view bounds and cookie deletion. Its actual CI outcome must be
-recorded before treating those native behaviors as runtime verified.
+reopen, mute, split view bounds, the split controls in the rendered shell and cookie
+deletion. It also launches an actual child window with an isolated test profile,
+checks shared cookies and transferred tab metadata, verifies saved-session recovery,
+and checks that a failed child startup preserves the source tab.
 
 A local Chromium visual-check attempt was blocked by the environment's socket
 restriction. Compilation and unit tests do not establish visual or multi-monitor
@@ -77,14 +85,19 @@ there is no in-place downgrade claim. Do not test by deleting application data.
 ## Local verification — 16 November 2026
 
 - TypeScript and Vite production build passed.
-- 23 frontend/release unit tests and 4 account-service integration tests passed.
+- 23 frontend/release unit tests and 5 account-service integration tests passed.
 - 13 storage/security/download core tests passed, including v1 → v2 migration,
   atomic invalid-import rollback, duplicate suppression, profile isolation and
   bounded session fallback snapshots.
 - Windows GNU target check passed with `--features smoke-tests --tests`.
 - Version consistency and `git diff --check` passed.
-- GitHub upload was blocked by automatic approval review, so no remote branch/PR,
-  Windows CI run, installer build, signed release or deployment is claimed.
+- Upload and Windows testing were explicitly authorized. The implementation is on
+  branch `alpha-6` in [draft PR #1](https://github.com/project-elix/elix-browser/pull/1).
+- [Initial Windows CI](https://github.com/project-elix/elix-browser/actions/runs/43957080849)
+  built the installer, launched the installed application and passed the native
+  WebView2 integration suite. Follow-up review fixes and extended window-transfer
+  coverage require a fresh CI run on the updated PR head.
+- No signed release, updater channel change or account-service deployment has occurred.
 
 Before release: run Windows CI; inspect the actual UI; test pointer drag out onto
   a second monitor (including negative coordinates and mixed DPI), confirm the

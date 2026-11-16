@@ -104,25 +104,43 @@ pub fn workspace(app: &AppHandle, name: &str) -> Result<(), String> {
 }
 
 pub fn group(app: &AppHandle, id: &str, group: &str, workspace: &str) -> Result<(), String> {
-    if group.chars().count() > 40 {
-        return Err("Gruppenavnet er for langt".into());
-    }
     {
         let state = app.state::<AppState>();
         let mut s = state.session.lock().unwrap();
-        if !s.workspaces.iter().any(|w| w == workspace) {
-            return Err("Ukjent arbeidsområde".into());
-        }
-        let tab = s
-            .tabs
-            .iter_mut()
-            .find(|t| t.id == id)
-            .ok_or("Ukjent fane")?;
-        tab.group = group.trim().into();
-        tab.workspace = workspace.into();
+        update_group(&mut s, id, group, workspace)?;
     }
     super::activate(app, id)?;
     super::persist(app)
+}
+
+fn update_group(
+    s: &mut super::Session,
+    id: &str,
+    group: &str,
+    workspace: &str,
+) -> Result<(), String> {
+    if group.chars().count() > 40 {
+        return Err("Gruppenavnet er for langt".into());
+    }
+    if !s.workspaces.iter().any(|w| w == workspace) {
+        return Err("Ukjent arbeidsområde".into());
+    }
+    let tab = s
+        .tabs
+        .iter_mut()
+        .find(|t| t.id == id)
+        .ok_or("Ukjent fane")?;
+    let moved = tab.workspace != workspace;
+    tab.group = group.trim().into();
+    tab.workspace = workspace.into();
+    if moved
+        && s.split
+            .as_ref()
+            .is_some_and(|pair| pair.iter().any(|member| member == id))
+    {
+        s.split = None;
+    }
+    Ok(())
 }
 
 pub fn reorder(app: &AppHandle, id: &str, before: &str) -> Result<(), String> {
@@ -233,4 +251,31 @@ pub fn recover(app: &AppHandle, id: &str) -> Result<(), String> {
         t.crashed = false;
     }
     super::activate(app, id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moving_a_split_tab_to_another_workspace_ends_the_split() {
+        let left = Tab::new("https://example.com/left".into());
+        let right = Tab::new("https://example.com/right".into());
+        let id = left.id.clone();
+        let pair = [id.clone(), right.id.clone()];
+        let mut session = super::super::Session {
+            tabs: vec![left, right],
+            active: id.clone(),
+            workspaces: vec![default_workspace(), "Jobb".into()],
+            split: Some(pair.clone()),
+            ..Default::default()
+        };
+        update_group(&mut session, &id, "Lesing", &default_workspace()).unwrap();
+        assert_eq!(session.split, Some(pair));
+        update_group(&mut session, &id, "Prosjekt", "Jobb").unwrap();
+        assert!(session.split.is_none());
+        assert_eq!(session.tabs[0].workspace, "Jobb");
+        assert_eq!(session.tabs[0].group, "Prosjekt");
+        assert_eq!(session.tabs[1].workspace, default_workspace());
+    }
 }
