@@ -1,9 +1,18 @@
 import{describe,it,expect}from'vitest';
+import{releaseLabel}from'../src/browser/version';
 // @ts-expect-error Plain JS release utility is exercised as used by CI.
 import{validateVersion,makeManifest,isNewer,findDraft,verifiedReleaseSource,findVerifiedRelease,publishedInstallerUrl}from'../scripts/release-lib.mjs';
 describe('release channel safety',()=>{it('rejects cross-channel versions and shell input',()=>{for(const [v,c]of[['0.1.0-beta.1','stable'],['0.1.0','beta'],['0.1.0-beta.1','developer'],['0.1.0;whoami','stable'],['01.1.0','stable']])expect(()=>validateVersion(v,c)).toThrow()});it('accepts only defined channel versions',()=>{expect(validateVersion('0.1.0','stable')).toBe('0.1.0');expect(validateVersion('0.2.0-beta.1','beta')).toBe('0.2.0-beta.1');expect(validateVersion('0.2.0-dev.1','developer')).toBe('0.2.0-dev.1')});it('never creates unsigned or HTTP manifests',()=>{expect(()=>makeManifest({version:'0.1.0',channel:'stable',url:'http://example.com/a.exe',signature:'x'})).toThrow();expect(()=>makeManifest({version:'0.1.0',channel:'stable',url:'https://example.com/a.exe',signature:''})).toThrow()});it('rejects a signature bound to another version',()=>{expect(()=>makeManifest({version:'0.1.1',channel:'stable',url:'https://example.com/a.exe',signature:btoa('trusted comment: version:0.1.0')})).toThrow()})});
 
 it('requires monotonically increasing channel versions',()=>{expect(isNewer('0.1.1','0.1.0')).toBe(true);expect(isNewer('0.1.0','0.1.1')).toBe(false);expect(isNewer('0.2.0','0.2.0-beta.3')).toBe(true);expect(isNewer('0.2.0-beta.1','0.2.0')).toBe(false);});
+
+it('promotes Alpha 5 to a newer Beta 1 without permitting a downgrade',()=>{
+ expect(isNewer('0.1.1-beta.1','0.1.0-dev.5')).toBe(true);
+ expect(isNewer('0.1.0-beta.1','0.1.0-dev.5')).toBe(false);
+ expect(isNewer('0.1.0-dev.5','0.1.1-beta.1')).toBe(false);
+ expect(releaseLabel('0.1.1-beta.1')).toBe('Beta 1 · 0.1.1-beta.1');
+ expect(releaseLabel('0.1.0-dev.5')).toBe('Alpha 5 · 0.1.0-dev.5');
+});
 
 const source='a'.repeat(40);
 it('finds only the unpublished draft built from the verified source',()=>{
