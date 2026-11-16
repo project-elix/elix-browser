@@ -282,6 +282,10 @@ pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
     persist(app)
 }
 pub fn close(app: &AppHandle, id: &str) -> Result<(), String> {
+    if app.state::<AppState>().downloads.lock().unwrap().iter().any(|d| d.view_id == id && (d.can_resume || matches!(d.status.as_str(), "downloading" | "paused"))) {
+        return Err("Fanen har en aktiv nedlasting. Fullfør eller avbryt den i Nedlastinger (Ctrl+J) før du lukker fanen.".into());
+    }
+
     #[cfg(windows)]
     crate::security::permissions::cancel(app, id);
     if let Some(v) = app.get_webview(id) {

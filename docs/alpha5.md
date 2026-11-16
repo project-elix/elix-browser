@@ -11,7 +11,7 @@
 ## Downloads and privacy
 
 - Download metadata is stored locally per profile and shown after restart. Saved files remain on disk.
-- Actual byte progress, pause, resume (when the engine permits it) and cancel operate on the native download object.
+- Actual byte progress, pause, resume (when the engine permits it) and cancel operate on the native download object. Internal panels open separately while a transfer is active. Finish or cancel the transfer before closing its source tab.
 - WebView2 cannot restore live download objects after the browser exits. Incomplete downloads are shown as interrupted after restart and can be started again from the site; no nonfunctional resume button is offered.
 - Private tabs use an actual InPrivate controller and a separate disposable data directory. They are excluded from saved sessions and history. Their downloaded files and explicitly saved bookmarks remain.
 - Camera and microphone requests show the requesting origin and require an explicit decision for each request. Grants are not saved. Navigation, closure and timeout deny unresolved requests. Other permissions remain blocked.

@@ -120,6 +120,20 @@ pub async fn smoke(app: AppHandle) -> Result<(), String> {
     native::smoke(app).await
 }
 
+/// Fail closed before the first private navigation if the runtime did not apply
+/// the profile isolation and autofill restrictions requested by ELIX.
+#[cfg(windows)]
+pub unsafe fn ensure_private_preferences(
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+) -> windows::core::Result<()> {
+    native::ensure_private_preferences(core)
+}
+
+#[cfg(all(windows, feature = "smoke-tests"))]
+pub async fn verify_private_preferences(view: &Webview) -> Result<(), String> {
+    native::verify_private_preferences(view).await
+}
+
 #[cfg(windows)]
 mod native {
     use super::*;
@@ -137,9 +151,68 @@ mod native {
         autofill: bool,
         private: bool,
     ) -> windows::core::Result<()> {
+        // These two settings belong to the profile, not to an individual tab.
+        // Use the profile API directly and derive privacy from the actual native
+        // profile as well as the caller, so opt-in never enables a private view.
+        let profile = core.cast::<ICoreWebView2_13>()?.Profile()?;
+        let mut native_private = windows::core::BOOL(0);
+        profile.IsInPrivateModeEnabled(&mut native_private)?;
+        let profile = profile.cast::<ICoreWebView2Profile6>()?;
+        let allow = !private && !native_private.as_bool();
+        profile.SetIsPasswordAutosaveEnabled(autosave && allow)?;
+        profile.SetIsGeneralAutofillEnabled(autofill && allow)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct PreferencesSnapshot {
+        in_private: bool,
+        settings_autosave: bool,
+        settings_autofill: bool,
+        profile_autosave: bool,
+        profile_autofill: bool,
+    }
+
+    impl PreferencesSnapshot {
+        fn matches(&self, autosave: bool, autofill: bool) -> bool {
+            self.settings_autosave == autosave
+                && self.settings_autofill == autofill
+                && self.profile_autosave == autosave
+                && self.profile_autofill == autofill
+        }
+    }
+
+    unsafe fn snapshot(core: &ICoreWebView2) -> windows::core::Result<PreferencesSnapshot> {
+        let profile = core.cast::<ICoreWebView2_13>()?.Profile()?;
+        let mut in_private = windows::core::BOOL(0);
+        profile.IsInPrivateModeEnabled(&mut in_private)?;
+        let profile = profile.cast::<ICoreWebView2Profile6>()?;
         let settings = core.Settings()?.cast::<ICoreWebView2Settings4>()?;
-        settings.SetIsPasswordAutosaveEnabled(autosave && !private)?;
-        settings.SetIsGeneralAutofillEnabled(autofill && !private)
+        let mut settings_autosave = windows::core::BOOL(0);
+        let mut settings_autofill = windows::core::BOOL(0);
+        let mut profile_autosave = windows::core::BOOL(0);
+        let mut profile_autofill = windows::core::BOOL(0);
+        settings.IsPasswordAutosaveEnabled(&mut settings_autosave)?;
+        settings.IsGeneralAutofillEnabled(&mut settings_autofill)?;
+        profile.IsPasswordAutosaveEnabled(&mut profile_autosave)?;
+        profile.IsGeneralAutofillEnabled(&mut profile_autofill)?;
+        Ok(PreferencesSnapshot {
+            in_private: in_private.as_bool(),
+            settings_autosave: settings_autosave.as_bool(),
+            settings_autofill: settings_autofill.as_bool(),
+            profile_autosave: profile_autosave.as_bool(),
+            profile_autofill: profile_autofill.as_bool(),
+        })
+    }
+
+    pub unsafe fn ensure_private_preferences(core: &ICoreWebView2) -> windows::core::Result<()> {
+        let observed = snapshot(core)?;
+        if !observed.in_private || !observed.matches(false, false) {
+            return Err(windows::core::Error::new(
+                windows::core::HRESULT(0x80004005u32 as i32),
+                format!("Private profile protection unavailable: {observed:?}"),
+            ));
+        }
+        Ok(())
     }
 
     unsafe fn take_string(raw: PWSTR) -> String {
@@ -307,22 +380,11 @@ mod native {
     }
 
     #[cfg(feature = "smoke-tests")]
-    async fn preferences_snapshot(view: &Webview) -> Result<(bool, bool), String> {
+    async fn preferences_snapshot(view: &Webview) -> Result<PreferencesSnapshot, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         view.with_webview(move |platform| {
-            let result = (|| -> windows::core::Result<(bool, bool)> {
-                unsafe {
-                    let settings = platform
-                        .controller()
-                        .CoreWebView2()?
-                        .Settings()?
-                        .cast::<ICoreWebView2Settings4>()?;
-                    let mut autosave = windows::core::BOOL(0);
-                    let mut autofill = windows::core::BOOL(0);
-                    settings.IsPasswordAutosaveEnabled(&mut autosave)?;
-                    settings.IsGeneralAutofillEnabled(&mut autofill)?;
-                    Ok((autosave.as_bool(), autofill.as_bool()))
-                }
+            let result = (|| -> windows::core::Result<PreferencesSnapshot> {
+                unsafe { snapshot(&platform.controller().CoreWebView2()?) }
             })();
             let _ = tx.send(result.map_err(|e| e.to_string()));
         })
@@ -336,22 +398,75 @@ mod native {
     }
 
     #[cfg(feature = "smoke-tests")]
+    async fn expect_preferences(
+        view: &Webview,
+        autosave: bool,
+        autofill: bool,
+        phase: &str,
+    ) -> Result<(), String> {
+        let first = preferences_snapshot(view).await?;
+        let mut observed = first;
+        // Do not write repeatedly or navigate to make this pass. Read both APIs
+        // through a few event-loop turns; report every final value if they do not
+        // converge to the requested profile state.
+        for _ in 0..20 {
+            if observed.matches(autosave, autofill) {
+                return Ok(());
+            }
+            tauri::async_runtime::spawn_blocking(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100))
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            observed = preferences_snapshot(view).await?;
+        }
+        Err(format!("{phase}: expected autosave={autosave}, autofill={autofill}; initial={first:?}; final={observed:?}"))
+    }
+
+    #[cfg(feature = "smoke-tests")]
+    pub async fn verify_private_preferences(view: &Webview) -> Result<(), String> {
+        let before = preferences_snapshot(view).await?;
+        if !before.in_private || !before.matches(false, false) {
+            return Err(format!(
+                "Actual private view not protected before use: {before:?}"
+            ));
+        }
+        // Try the user's opt-ins on a real private profile. Native privacy wins.
+        apply_preferences(view.clone(), true, true, true).await?;
+        let after = preferences_snapshot(view).await?;
+        if !after.in_private || !after.matches(false, false) {
+            return Err(format!(
+                "Actual private view accepted autofill opt-in: before={before:?}; after={after:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "smoke-tests")]
     pub async fn smoke(app: AppHandle) -> Result<(), String> {
         let (view, temporary) = profile_view(&app)?;
         let before = preferences_snapshot(&view).await?;
         let preferences_result = async {
             apply_preferences(view.clone(), true, true, false).await?;
-            if preferences_snapshot(&view).await? != (true, true) {
-                return Err("native autofill opt-in failed".into());
-            }
-            apply_preferences(view.clone(), true, true, true).await?;
-            if preferences_snapshot(&view).await? != (false, false) {
-                return Err("private autofill override failed".into());
-            }
+            expect_preferences(&view, true, true, "Regular profile autofill opt-in failed").await?;
+            apply_preferences(view.clone(), false, false, false).await?;
+            expect_preferences(
+                &view,
+                false,
+                false,
+                "Regular profile autofill opt-out failed",
+            )
+            .await?;
             Ok::<(), String>(())
         }
         .await;
-        let restore = apply_preferences(view.clone(), before.0, before.1, false).await;
+        let restore = apply_preferences(
+            view.clone(),
+            before.profile_autosave,
+            before.profile_autofill,
+            false,
+        )
+        .await;
         if temporary {
             let _ = view.close();
         }

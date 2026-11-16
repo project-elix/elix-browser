@@ -31,6 +31,33 @@ fn title(app: &AppHandle, id: &str, expected: &str) -> bool {
         .iter()
         .any(|t| t.id == id && t.title == expected && !t.loading)
 }
+fn wait_title_or_error(app: &AppHandle, id: &str, expected: &str) -> Result<(), String> {
+    wait(|| {
+        app.state::<AppState>()
+            .session
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|tab| {
+                tab.id == id
+                    && ((!tab.loading && tab.title == expected) || tab.navigation_error.is_some())
+            })
+    })?;
+    let error = app
+        .state::<AppState>()
+        .session
+        .lock()
+        .unwrap()
+        .tabs
+        .iter()
+        .find(|tab| tab.id == id)
+        .and_then(|tab| tab.navigation_error.clone());
+    if let Some(error) = error {
+        return Err(format!("Native navigation failed: {error}"));
+    }
+    Ok(())
+}
 fn shell_bool(app: &AppHandle, script: &str) -> Result<bool, String> {
     view_bool(&app.get_webview("shell").ok_or("Missing shell")?, script)
 }
@@ -248,7 +275,7 @@ fn private_test(app: &AppHandle, regular_id: &str, origin: &str) -> Result<(), S
         private_url.clone(),
         true,
     ))?;
-    wait(|| title(app, &private_id, "ELIX private fixture"))?;
+    wait_title_or_error(app, &private_id, "ELIX private fixture")?;
     let private = app.get_webview(&private_id).ok_or("Missing private view")?;
     #[cfg(windows)]
     if !tauri::async_runtime::block_on(browser::private::is_in_private(&private))?
@@ -256,6 +283,8 @@ fn private_test(app: &AppHandle, regular_id: &str, origin: &str) -> Result<(), S
     {
         return Err("WebView2 native InPrivate profile flag is incorrect".into());
     }
+    #[cfg(windows)]
+    tauri::async_runtime::block_on(browser::extensions::verify_private_preferences(&private))?;
     if !view_bool(&private, "(()=>{if(document.cookie.includes('elix_regular='))return false;document.cookie='elix_private=1; Path=/';return document.cookie.includes('elix_private=1')})()")? {
         return Err("Private profile reused regular cookies or cannot store session cookie".into());
     }
@@ -287,10 +316,12 @@ fn private_test(app: &AppHandle, regular_id: &str, origin: &str) -> Result<(), S
     browser::close(app, &private_id)?;
     let fresh_id =
         tauri::async_runtime::block_on(browser::create_with_mode(app.clone(), private_url, true))?;
-    wait(|| title(app, &fresh_id, "ELIX private fixture"))?;
+    wait_title_or_error(app, &fresh_id, "ELIX private fixture")?;
     let fresh = app
         .get_webview(&fresh_id)
         .ok_or("Missing new private view")?;
+    #[cfg(windows)]
+    tauri::async_runtime::block_on(browser::extensions::verify_private_preferences(&fresh))?;
     if !view_bool(
         &fresh,
         "!document.cookie.includes('elix_private=') && !document.cookie.includes('elix_regular=')",
@@ -348,6 +379,9 @@ fn resumable_download_test(app: &AppHandle, tab_id: &str, origin: &str) -> Resul
     })?;
     if browser::suspend(app, tab_id).is_ok() {
         return Err("Suspension accepted a tab owning a paused download".into());
+    }
+    if browser::close(app, tab_id).is_ok() || app.get_webview(tab_id).is_none() {
+        return Err("Closing the owner interrupted a paused download".into());
     }
     wait(|| {
         shell_bool(app, "Array.from(document.querySelectorAll('.download-entry')).some(entry=>entry.querySelector('strong')?.textContent==='elix-resume.bin' && Array.from(entry.querySelectorAll('button')).some(button=>button.textContent==='Fortsett' && !button.disabled))").unwrap_or(false)

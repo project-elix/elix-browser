@@ -71,12 +71,22 @@ pub fn launch(view: &Webview, url: &str) -> Result<(), String> {
                 if !private.as_bool() {
                     return Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32)));
                 }
+                super::extensions::ensure_private_preferences(&core)?;
                 core.Navigate(&HSTRING::from(url))?;
             }
             Ok(())
         })();
-        if result.is_err() {
-            browser::failed(&app, &id, "Privatmodus kunne ikke startes. Oppdater Microsoft Edge WebView2 Runtime og prøv igjen.");
+        if let Err(error) = result {
+            #[cfg(feature = "smoke-tests")]
+            {
+                eprintln!("Private navigation guard failed: {error}");
+                browser::failed(&app, &id, &format!("Private navigation guard failed: {error}"));
+            }
+            #[cfg(not(feature = "smoke-tests"))]
+            {
+                let _ = error;
+                browser::failed(&app, &id, "Privatmodus kunne ikke startes. Oppdater Microsoft Edge WebView2 Runtime og prøv igjen.");
+            }
         }
     }).map_err(|e| e.to_string())
 }
