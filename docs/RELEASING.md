@@ -24,7 +24,7 @@ No keys are included in this source. Ordinary development builds use an empty up
 1. Update version on a branch: `npm run version:set -- 0.1.1 stable`. Beta example `0.2.0-beta.1 beta`; Developer example `0.2.0-dev.1 developer`.
 2. Refresh lockfile package versions (`npm install --package-lock-only`, `cargo update --manifest-path src-tauri/Cargo.toml --workspace`). Review the diff, test, merge.
 3. Run **Build and publish signed release** from `main`, enter exact committed version, channel and plain-text notes. Inputs are passed as environment variables, never interpolated into shell code.
-4. CI validates versions and required keys, tests, builds a signed NSIS installer and creates a **draft** GitHub Release. Existing published versions are never overwritten.
+4. Release qualification first runs the complete native Windows workflow and the disposable-key signed upgrade round trip on the release source. Only after both pass does the protected signing job validate versions/required keys and build a signed NSIS installer and creates a **draft** GitHub Release. Existing published versions are never overwritten.
 5. The `release-publication` job waits for configured environment approval. After acceptance, it publishes the immutable version assets, then updates the selected channel metadata. Only then does the application offer the release.
 6. Inspect the Actions result, release assets and channel JSON. Test on a separate installed client. The website enables the download only from the official Stable channel metadata.
 

@@ -2,8 +2,10 @@ name: Windows verification
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', 'website/**', 'README.md']
   pull_request:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:

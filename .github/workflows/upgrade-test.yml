@@ -1,6 +1,7 @@
 name: Signed Windows upgrade round trip
 on:
   workflow_dispatch:
+  workflow_call:
   push:
     branches: [main]
     paths:
