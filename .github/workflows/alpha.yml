@@ -10,7 +10,7 @@ concurrency:
   group: elix-alpha
   cancel-in-progress: false
 jobs:
-  # Requires initial download state and future native state events to be tested.
+  # Requires retained native download operations to survive automatic retries.
   verify:
     uses: ./.github/workflows/ci.yml
   publish:

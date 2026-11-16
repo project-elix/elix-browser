@@ -29,6 +29,12 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                 // ResultFilePath from the real operation to identify the failed item,
                 // including concurrent downloads of the same URL.
                 let download_app = app.clone();
+                // Keep each COM operation alive until its terminal state. A local
+                // DownloadOperation() temporary is insufficient during automatic retries.
+                let operations = std::rc::Rc::new(std::cell::RefCell::new(Vec::<
+                    ICoreWebView2DownloadOperation,
+                >::new(
+                )));
                 let mut download_token = 0;
                 core.cast::<ICoreWebView2_4>()?.add_DownloadStarting(
                     &DownloadStartingEventHandler::create(Box::new(move |_, args| {
@@ -36,11 +42,20 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                             let app = download_app.clone();
                             let mut token = 0;
                             let operation = args.DownloadOperation()?;
+                            operations.borrow_mut().push(operation.clone());
+                            let callback_operations = std::rc::Rc::downgrade(&operations);
                             let callback_app = app.clone();
                             operation.add_StateChanged(
                                 &StateChangedEventHandler::create(Box::new(move |operation, _| {
                                     if let Some(operation) = operation {
-                                        update_download_state(&callback_app, &operation)?;
+                                        if update_download_state(&callback_app, &operation)? {
+                                            if let Some(operations) = callback_operations.upgrade()
+                                            {
+                                                operations
+                                                    .borrow_mut()
+                                                    .retain(|item| item != &operation);
+                                            }
+                                        }
                                     }
                                     Ok(())
                                 })),
@@ -62,7 +77,9 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                                     _ => "download_started_in_progress",
                                 },
                             );
-                            update_download_state(&app, &operation)?;
+                            if update_download_state(&app, &operation)? {
+                                operations.borrow_mut().retain(|item| item != &operation);
+                            }
                         }
                         Ok(())
                     })),
@@ -245,11 +262,11 @@ pub async fn action(view: Webview, action: String, enabled: bool) -> Result<(), 
 unsafe fn update_download_state(
     app: &tauri::AppHandle,
     operation: &ICoreWebView2DownloadOperation,
-) -> windows::core::Result<()> {
+) -> windows::core::Result<bool> {
     let mut status = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
     operation.State(&mut status)?;
     if status == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
-        return Ok(());
+        return Ok(false);
     }
     let mut raw = PWSTR::null();
     operation.ResultFilePath(&mut raw)?;
@@ -273,5 +290,5 @@ unsafe fn update_download_state(
         };
     }
     let _ = app.emit_to("shell", "downloads-changed", ());
-    Ok(())
+    Ok(true)
 }
