@@ -1,5 +1,3 @@
-# ELIX Browser
-
 <img src="public/elix-mark.png" width="120" alt="ELIX Browser logo">
 
 Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript and SQLite. Norwegian interface; dark blue/cyan ELIX identity.
