@@ -33,3 +33,7 @@ Logs contain fixed event codes, not arbitrary URLs, error bodies, passwords or f
 - https://docs.rs/tauri/2.12.5/tauri/ (unstable feature)
 - https://v2.tauri.app/plugin/updater/
 - The locked Tauri/Wry/WebView2/Updater crate sources were inspected, and the Windows target is type-checked.
+
+## Native download lifetime
+
+The Windows adapter retains COM download operations until completion/interruption, reads their initial state, and observes future state changes. It identifies concurrent downloads by the engine result path, not just URL. This avoids relying solely on a temporary operation reference. Context: https://github.com/MicrosoftEdge/WebView2Feedback/issues/2180. Navigation failure is not treated as proof of download failure.

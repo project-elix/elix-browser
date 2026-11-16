@@ -5,7 +5,7 @@ Alpha 1 is version **0.1.0-dev.1**, distributed as a public GitHub prerelease. I
 ## Install
 
 1. Open the repository's Releases page and choose **ELIX Browser Alpha 1 — Windows**.
-2. Download `ELIX Browser_0.1.0-dev.1_x64-setup.exe` from Assets. The source ZIP is not the installer.
+2. Download `ELIX.Browser_0.1.0-dev.1_x64-setup.exe` from Assets. The source ZIP is not the installer.
 3. Run the installer on Windows 11 x64. It installs for your Windows user and fetches Microsoft WebView2 Runtime if needed. Internet access is required for the runtime download and browsing.
 4. Launch ELIX Browser from the Start menu.
 
@@ -29,3 +29,11 @@ Bookmarks, history, settings and profile browser data are local. A later install
 ## Reporting a problem
 
 Create a repository issue with the ELIX version, Windows version, the steps and what happened. Developer Mode can export a local diagnostic JSON after consent. Inspect it before choosing to attach it; nothing is submitted automatically. Do not include passwords, cookies or private browsing content in reports.
+
+## Published artifact
+
+Released 2026-11-16: https://github.com/project-elix/elix-browser/releases/download/v0.1.0-dev.1/ELIX.Browser_0.1.0-dev.1_x64-setup.exe
+
+SHA-256: `374e255adff69498678afc49b4ef1b80f67d3332e10dbd9f0f619ff2e437798f`
+
+GitHub normalizes spaces in the uploaded installer filename to dots. The checksum file records the original build filename; compare the hash or rename the local file before using filename-based checksum tools. The public bytes were downloaded and matched both GitHub's digest and the CI checksum.

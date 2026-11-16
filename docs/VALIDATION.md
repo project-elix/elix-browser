@@ -6,7 +6,7 @@
 - Vitest release-channel/input/progress tests: 8 passed.
 - Actual Rust storage and URL-security modules, headless Linux harness: 4 passed.
 - Windows GNU target type-check (Tauri, WebView2 COM hooks, updater, SQLite): passed using x86_64-pc-windows-gnu. This checks Windows-only COM calls; it does not run Windows.
-- Start-page visual inspection: passed in Chromium frontend preview. This validates layout, not WebView2 behavior. The screenshot on the public page is labeled accordingly.
+- Start-page visual inspection: passed in Chromium frontend preview. This validates layout, not WebView2 behavior. The public page now uses an actual Windows CI desktop capture, explicitly labeled.
 
 ## Windows CI evidence
 
@@ -51,3 +51,11 @@ The Windows CI `smoke-tests` feature launches an actual WebView2 page against a 
 `upgrade-test.yml` builds actual 0.1.0 and 0.1.1 NSIS packages using a disposable signing key, serves them on loopback HTTPS with a certificate trusted only in the disposable Windows runner, and invokes the production updater check/download/install code. A feature-gated post-upgrade test verifies the new executable plus seeded profiles/bookmarks/history/settings/profile files and persistent cookies in two isolated WebView2 profiles. It also rejects modified bytes and a signed old installer falsely described as 0.1.1. Test keys and test installers are never published. Real third-party login sessions, visual update interaction, interruptions, cancellation and power loss still require the manual acceptance steps above.
 
 The native smoke test also exercises denial of remote privileged IPC, an interrupted download, and restoration of the active tab after session reload. The CI desktop screenshot is captured from the installed Windows app, not a web preview.
+
+## Alpha distribution scope
+
+Alpha 1 uses the native verification workflow and then builds a separate installer without the `smoke-tests` feature. The distributable itself is silently installed and launched before publication. Automatic ELIX updates are intentionally unconfigured, so an unfinished signed-upgrade test cannot deliver an unverified update to an alpha user. This is not a stable release qualification.
+
+The native download lifetime regression was reproduced on Windows and fixed by retaining each COM download operation until its terminal state. Run [43886856083](https://github.com/project-elix/elix-browser/actions/runs/43886856083) passed the expanded native test, including interrupted download status, remote IPC denial and active-session restoration. The assertion was retained; navigation errors are not substituted for download state.
+
+Alpha 1 (`0.1.0-dev.1`) was built without test features, silently installed, launched successfully and published by the same run on 2026-11-16. The public installer download was independently hashed and matched the CI checksum and GitHub asset digest. Automatic ELIX updates remain disabled; the signed 0.1.0 → 0.1.1 round trip is **not yet qualified**.
