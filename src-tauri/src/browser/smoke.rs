@@ -7,6 +7,23 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
+pub fn boot_stage(app: &AppHandle, stage: &str) {
+    let state = app.state::<AppState>();
+    if state.window_id == "main" || !std::env::args().any(|a| a == "--elix-smoke-window") {
+        return;
+    }
+    let path = state
+        .root
+        .join(format!("window-boot-{}.log", state.window_id));
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{} {stage}", chrono::Utc::now().to_rfc3339());
+    }
+}
+
 /// Detached test processes must share only the parent's disposable profile directory.
 pub fn detached_root() -> Result<std::path::PathBuf, String> {
     let requested =
@@ -27,6 +44,7 @@ pub fn detached_root() -> Result<std::path::PathBuf, String> {
 }
 
 pub fn start_detached(app: AppHandle) {
+    boot_stage(&app, "detached_test_started");
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
             let state = app.state::<AppState>();
@@ -363,8 +381,26 @@ fn drag_diagnostics(app: &AppHandle, id: &str) -> serde_json::Value {
             .map_err(|e| e.to_string())?;
         Ok(rows)
     })();
+    let boot = std::fs::read_dir(&state.root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("window-boot-")
+        })
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                std::fs::read_to_string(entry.path()).unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
         "shell": shell,
+        "child_boot": boot,
         "windows": windows,
         "source": state.session.lock().unwrap().tabs.iter().find(|tab| tab.id == id).cloned(),
         "logs": state.logs.list(),

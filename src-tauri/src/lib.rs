@@ -257,6 +257,8 @@ async fn dispatch(
         }
         Request::Window { operation } => window::perform(&app, operation),
         Request::WindowReady => {
+            #[cfg(feature = "smoke-tests")]
+            browser::smoke::boot_stage(&app, "window_ready");
             browser::detach::ready(&app);
             Ok(Value::Null)
         }
@@ -337,6 +339,8 @@ async fn dispatch(
             Ok(json!(count))
         }
         Request::Snapshot => {
+            #[cfg(feature = "smoke-tests")]
+            browser::smoke::boot_stage(&app, "snapshot");
             let store = state.store.lock().unwrap();
             Ok(
                 json!({"session":state.session.lock().unwrap().clone(),"profiles":store.profiles()?,"profile":state.profile.lock().unwrap().clone(),"settings":store.settings(),"version":env!("CARGO_PKG_VERSION"),"updater_configured":updater::configured(),"recovered":state.recovered}),
@@ -350,7 +354,12 @@ async fn dispatch(
             Ok(Value::Null)
         }
         Request::Activate { id } => {
-            browser::activate(&app, &id)?;
+            #[cfg(feature = "smoke-tests")]
+            browser::smoke::boot_stage(&app, "activate_start");
+            let result = browser::activate(&app, &id);
+            #[cfg(feature = "smoke-tests")]
+            browser::smoke::boot_stage(&app, &format!("activate_result: {result:?}"));
+            result?;
             browser::persist(&app)?;
             Ok(Value::Null)
         }
@@ -722,27 +731,7 @@ pub fn run() {
                 .min_inner_size(900., 600.)
                 .maximized(true)
                 .build()?;
-            let shell = tauri::webview::WebviewBuilder::new(
-                "shell",
-                tauri::WebviewUrl::App("index.html".into()),
-            )
-            .devtools(cfg!(debug_assertions))
-            .on_navigation(|url| {
-                matches!(
-                    (url.scheme(), url.host_str()),
-                    ("tauri", Some("localhost"))
-                        | ("http", Some("tauri.localhost"))
-                        | ("https", Some("tauri.localhost"))
-                ) || (cfg!(debug_assertions)
-                    && url.host_str() == Some("127.0.0.1")
-                    && url.port() == Some(1420))
-            });
-            let shell = window.add_child(
-                shell,
-                tauri::LogicalPosition::new(0., 0.),
-                window.inner_size()?,
-            )?;
-            shell.set_auto_resize(true)?;
+            // Initialize the final session before the shell can run its first snapshot/activate RPC.
             browser::restore(app.handle());
             if let Some(mut handoff) = handoff {
                 handoff.tab.id = format!("tab-{}", uuid::Uuid::new_v4());
@@ -760,6 +749,31 @@ pub fn run() {
                 window.unmaximize()?;
                 window.set_position(tauri::PhysicalPosition::new(handoff.x, handoff.y))?;
             }
+            let shell = tauri::webview::WebviewBuilder::new(
+                "shell",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .devtools(cfg!(debug_assertions))
+            .on_navigation(|url| {
+                matches!(
+                    (url.scheme(), url.host_str()),
+                    ("tauri", Some("localhost"))
+                        | ("http", Some("tauri.localhost"))
+                        | ("https", Some("tauri.localhost"))
+                ) || (cfg!(debug_assertions)
+                    && url.host_str() == Some("127.0.0.1")
+                    && url.port() == Some(1420))
+            });
+            #[cfg(feature = "smoke-tests")]
+            browser::smoke::boot_stage(app.handle(), "shell_create_start");
+            let shell = window.add_child(
+                shell,
+                tauri::LogicalPosition::new(0., 0.),
+                window.inner_size()?,
+            )?;
+            shell.set_auto_resize(true)?;
+            #[cfg(feature = "smoke-tests")]
+            browser::smoke::boot_stage(app.handle(), "shell_created");
             #[cfg(feature = "smoke-tests")]
             if std::env::args().any(|a| a == "--self-test") {
                 browser::smoke::start(app.handle().clone());
