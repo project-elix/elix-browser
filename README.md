@@ -10,7 +10,7 @@ Product site: https://elix-browser-download.andreasdan04.chatgpt.site
 
 ## Alpha test for Windows
 
-**[Download Alpha 3 for Windows x64](https://github.com/project-elix/elix-browser/releases/download/v0.1.0-dev.3/ELIX.Browser_0.1.0-dev.3_x64-setup.exe)** — version 0.1.0-dev.3, published 16 November 2026 after Windows verification and a separate installed-launch check. It needs no personal server. Install this version manually once over Alpha 1/2, then choose **Innstillinger → Motta alpha-oppdateringer** to receive future signed Developer updates. The installer has no Windows Authenticode publisher certificate. See [alpha installation and testing](docs/ALPHA-3.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
+**[Download Alpha 5 for Windows x64](https://github.com/project-elix/elix-browser/releases/download/v0.1.0-dev.5/ELIX.Browser_0.1.0-dev.5_x64-setup.exe)** — version 0.1.0-dev.5. It needs no personal server. Alpha 3/4 users can choose **Innstillinger → Oppdateringer → Developer → Se etter oppdateringer**. Install manually over Alpha 1/2 without deleting application data, then select Developer for future signed updates. The updater signature is separate from Windows Authenticode; the installer has no Authenticode publisher certificate. See [Alpha 5 changes and limitations](docs/alpha5.md), [validation evidence](docs/VALIDATION.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
 
 ## Run on Windows
 
