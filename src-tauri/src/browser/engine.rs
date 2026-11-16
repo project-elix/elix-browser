@@ -3,12 +3,11 @@ use crate::{
     browser::{self, Bounds, Tab},
     security, AppState,
 };
-use tauri::webview::{
-    DownloadEvent, NewWindowResponse, PageLoadEvent, PermissionResponse, WebviewBuilder,
-};
+use tauri::webview::{NewWindowResponse, PageLoadEvent, PermissionResponse, WebviewBuilder};
+#[cfg(not(windows))]
+use tauri::{webview::DownloadEvent, Emitter};
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Rect, Size, Webview,
-    WebviewUrl,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Position, Rect, Size, Webview, WebviewUrl,
 };
 pub fn bounds(view: &Webview, b: Bounds) -> Result<(), String> {
     if ![b.x, b.y, b.width, b.height].iter().all(|n| n.is_finite())
@@ -37,6 +36,7 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         crate::profiles::directory(&state.root, &profile)?
     };
     let settings = state.store.lock().unwrap().settings();
+    #[cfg(not(windows))]
     let profile_download = profile.clone();
     let nav_app = app.clone();
     let nav_id = tab.id.clone();
@@ -158,61 +158,69 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         let _ = browser::persist(app);
     })
     .on_download(move |view, event| {
-        let app = view.app_handle();
-        let state = app.state::<AppState>();
-        match event {
-            DownloadEvent::Requested {
-                destination, url, ..
-            } => {
-                let Ok(root) = app.path().download_dir() else {
-                    return false;
-                };
-                let Ok((id, path)) = crate::downloads::destination(root, destination) else {
-                    return false;
-                };
-                *destination = path.clone();
-                state
-                    .downloads
-                    .lock()
-                    .unwrap()
-                    .push(crate::downloads::Download::new(
-                        id,
-                        path,
-                        profile_download.clone(),
-                        private,
-                        url.to_string(),
-                        view.label().to_string(),
-                    ));
-                let _ = crate::downloads::persist(app);
-            }
-            DownloadEvent::Finished { path, success, .. } => {
-                #[cfg(not(windows))]
-                if let Some(path) = path {
-                    if let Some(d) = state
+        // Windows owns destination and metadata in the native DownloadStarting
+        // handler. Wry emits Requested again on automatic retries and cannot
+        // identify the native operation; allocating here would create phantom rows.
+        #[cfg(windows)]
+        {
+            let _ = (view, event);
+            true
+        }
+        #[cfg(not(windows))]
+        {
+            let app = view.app_handle();
+            let state = app.state::<AppState>();
+            match event {
+                DownloadEvent::Requested {
+                    destination, url, ..
+                } => {
+                    let Ok(root) = app.path().download_dir() else {
+                        return false;
+                    };
+                    let Ok((id, path)) = crate::downloads::destination(root, destination) else {
+                        return false;
+                    };
+                    *destination = path.clone();
+                    state
                         .downloads
                         .lock()
                         .unwrap()
-                        .iter_mut()
-                        .find(|d| d.path == path)
-                    {
-                        d.status = if success { "complete" } else { "failed" }.into();
-                    }
+                        .push(crate::downloads::Download::new(
+                            id,
+                            path,
+                            profile_download.clone(),
+                            private,
+                            url.to_string(),
+                            view.label().to_string(),
+                        ));
+                    let _ = crate::downloads::persist(app);
                 }
-                #[cfg(windows)]
-                let _ = path;
-                state.logs.add(
-                    if success { "info" } else { "warn" },
-                    if success {
-                        "download_complete"
-                    } else {
-                        "download_failed"
-                    },
-                );
+                DownloadEvent::Finished { path, success, .. } => {
+                    if let Some(path) = path {
+                        if let Some(d) = state
+                            .downloads
+                            .lock()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|d| d.path == path)
+                        {
+                            d.status = if success { "complete" } else { "failed" }.into();
+                        }
+                    }
+                    state.logs.add(
+                        if success { "info" } else { "warn" },
+                        if success {
+                            "download_complete"
+                        } else {
+                            "download_failed"
+                        },
+                    );
+                }
+                _ => {}
             }
-            _ => {}
+            let _ = app.emit_to("shell", "downloads-changed", ());
+            true
         }
-        let _ = app.emit_to("shell", "downloads-changed", ());
-        true
     });
     #[cfg(feature = "smoke-tests")]
     let builder = if std::env::args().any(|arg| arg == "--self-test") {

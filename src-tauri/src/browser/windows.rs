@@ -24,7 +24,7 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                 *app.state::<AppState>().runtime_version.lock().unwrap() = value;
                 let settings = core.Settings()?;
                 settings.SetAreDefaultContextMenusEnabled(true)?;
-                crate::downloads::windows::attach(&core, app.clone())?;
+                crate::downloads::windows::attach(&core, app.clone(), id.clone())?;
                 let keyboard_app = app.clone();
                 let keyboard_id = id.clone();
                 let mut token = 0;

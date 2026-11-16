@@ -1,5 +1,6 @@
 //! COM download operations stay on the WebView2 UI thread for their full lifetime.
-//! In particular, an interrupted download may be paused or automatically retried.
+//! WebView2 can raise DownloadStarting again when the same operation retries. Its
+//! COM identity, not the mutable result path or URL, identifies one logical transfer.
 use crate::AppState;
 use std::{cell::RefCell, collections::HashMap, path::PathBuf};
 use tauri::{Emitter, Manager};
@@ -7,73 +8,142 @@ use webview2_com::{
     BytesReceivedChangedEventHandler, DownloadStartingEventHandler,
     Microsoft::Web::WebView2::Win32::*, StateChangedEventHandler,
 };
-use windows::core::{Interface, PWSTR};
+use windows::core::{IUnknown, Interface, HSTRING, PWSTR};
 
+#[derive(Clone)]
+struct ActiveDownload {
+    id: String,
+    path: PathBuf,
+    operation: ICoreWebView2DownloadOperation,
+}
 thread_local! {
-    static OPERATIONS: RefCell<HashMap<PathBuf, ICoreWebView2DownloadOperation>> = RefCell::new(HashMap::new());
+    static OPERATIONS: RefCell<HashMap<usize, ActiveDownload>> = RefCell::new(HashMap::new());
 }
 
-pub unsafe fn attach(core: &ICoreWebView2, app: tauri::AppHandle) -> windows::core::Result<()> {
+pub unsafe fn attach(
+    core: &ICoreWebView2,
+    app: tauri::AppHandle,
+    view_id: String,
+) -> windows::core::Result<()> {
+    let state = app.state::<AppState>();
+    let profile = state.profile.lock().unwrap().clone();
+    let private = state
+        .session
+        .lock()
+        .unwrap()
+        .tabs
+        .iter()
+        .find(|tab| tab.id == view_id)
+        .map(|tab| tab.private);
     let mut token = 0;
     core.cast::<ICoreWebView2_4>()?.add_DownloadStarting(
         &DownloadStartingEventHandler::create(Box::new(move |_, args| {
-            if let Some(args) = args {
-                // ELIX presents its own download list and controls.
-                args.SetHandled(true)?;
+            let Some(args) = args else { return Ok(()) };
+            args.SetHandled(true)?;
+            let mut created: Option<(usize, String)> = None;
+            let result = (|| -> windows::core::Result<()> {
+                let Some(private) = private else {
+                    args.SetCancel(true)?;
+                    return Ok(());
+                };
                 let operation = args.DownloadOperation()?;
-                let path = result_path(&operation)?;
-                OPERATIONS.with(|items| items.borrow_mut().insert(path.clone(), operation.clone()));
+                // Querying IUnknown gives the stable identity even if an event
+                // supplies a different interface pointer for the same operation.
+                let identity = operation.cast::<IUnknown>()?.as_raw() as usize;
+                let existing = OPERATIONS.with(|items| items.borrow().get(&identity).cloned());
+                if let Some(existing) = existing {
+                    // Reuse the original destination and handlers. A retry must
+                    // never create a second row or strand the first row in progress.
+                    args.SetResultFilePath(&HSTRING::from(existing.path.as_os_str()))?;
+                    app.state::<AppState>().logs.add("info", "download_native_retry");
+                    if update(&app, &existing.id, &operation, true)? {
+                        OPERATIONS.with(|items| items.borrow_mut().remove(&identity));
+                    }
+                    return Ok(());
+                }
+                let mut suggested = PWSTR::null();
+                args.ResultFilePath(&mut suggested)?;
+                let suggested = take_string(suggested)?;
+                let root = app.path().download_dir().map_err(|_| windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32)))?;
+                let (id, path) = super::destination(root, std::path::Path::new(&suggested)).map_err(|_| windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32)))?;
+                args.SetResultFilePath(&HSTRING::from(path.as_os_str()))?;
+                let mut uri = PWSTR::null();
+                operation.Uri(&mut uri)?;
+                let uri = take_string(uri)?;
+                app.state::<AppState>().downloads.lock().unwrap().push(super::Download::new(
+                    id.clone(), path.clone(), profile.clone(), private, uri, view_id.clone(),
+                ));
+                OPERATIONS.with(|items| items.borrow_mut().insert(identity, ActiveDownload {
+                    id: id.clone(), path, operation: operation.clone(),
+                }));
+                created = Some((identity, id.clone()));
                 let event_app = app.clone();
+                let event_id = id.clone();
                 let mut token = 0;
                 operation.add_StateChanged(
                     &StateChangedEventHandler::create(Box::new(move |operation, _| {
                         if let Some(operation) = operation {
-                            if update(&event_app, &operation, true)? {
-                                let path = result_path(&operation)?;
-                                OPERATIONS.with(|items| items.borrow_mut().remove(&path));
+                            if update(&event_app, &event_id, &operation, true)? {
+                                OPERATIONS.with(|items| items.borrow_mut().remove(&identity));
                             }
                         }
                         Ok(())
-                    })),
-                    &mut token,
+                    })), &mut token,
                 )?;
                 let progress_app = app.clone();
+                let progress_id = id.clone();
                 operation.add_BytesReceivedChanged(
                     &BytesReceivedChangedEventHandler::create(Box::new(move |operation, _| {
-                        if let Some(operation) = operation {
-                            update(&progress_app, &operation, false)?;
-                        }
+                        if let Some(operation) = operation { update(&progress_app, &progress_id, &operation, false)?; }
                         Ok(())
-                    })),
-                    &mut token,
+                    })), &mut token,
                 )?;
                 // A small response can finish before handlers are registered.
-                if update(&app, &operation, true)? {
-                    OPERATIONS.with(|items| items.borrow_mut().remove(&path));
+                // Capture the stable record id: ResultFilePath can lag behind the
+                // DownloadStarting args until that event has returned.
+                if update(&app, &id, &operation, true)? {
+                    OPERATIONS.with(|items| items.borrow_mut().remove(&identity));
                 }
+                Ok(())
+            })();
+            if result.is_err() {
+                // Cancellation is requested even if native handler registration
+                // failed; finish the new record ourselves because no callback may exist.
+                let canceled = args.SetCancel(true);
+                if let Some((identity, id)) = created {
+                    OPERATIONS.with(|items| items.borrow_mut().remove(&identity));
+                    {
+                        let state = app.state::<AppState>();
+                        let mut downloads = state.downloads.lock().unwrap();
+                        if let Some(download) = downloads.iter_mut().find(|download| download.id == id) {
+                            download.status = "failed".into();
+                            download.can_resume = false;
+                        }
+                    }
+                    super::persist(&app);
+                    let _ = app.emit_to("shell", "downloads-changed", ());
+                }
+                app.state::<AppState>().logs.add("warn", "download_start_failed");
+                canceled?;
+                let _ = app.emit_to("shell", "notice", "Nedlastingen kunne ikke startes. Kontroller at nedlastingsmappen er tilgjengelig, og prøv igjen.");
             }
             Ok(())
-        })),
-        &mut token,
+        })), &mut token,
     )
 }
 
-unsafe fn result_path(
-    operation: &ICoreWebView2DownloadOperation,
-) -> windows::core::Result<PathBuf> {
-    let mut raw = PWSTR::null();
-    operation.ResultFilePath(&mut raw)?;
+unsafe fn take_string(raw: PWSTR) -> windows::core::Result<String> {
     let value = raw.to_string();
     windows::Win32::System::Com::CoTaskMemFree(Some(raw.0.cast()));
-    Ok(value.map(PathBuf::from)?)
+    Ok(value?)
 }
 
 unsafe fn update(
     app: &tauri::AppHandle,
+    id: &str,
     operation: &ICoreWebView2DownloadOperation,
     persist: bool,
 ) -> windows::core::Result<bool> {
-    let path = result_path(operation)?;
     let mut native_state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
     let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE;
     let mut received = 0;
@@ -100,7 +170,7 @@ unsafe fn update(
     {
         let state = app.state::<AppState>();
         let mut downloads = state.downloads.lock().unwrap();
-        if let Some(download) = downloads.iter_mut().find(|d| d.path == path) {
+        if let Some(download) = downloads.iter_mut().find(|d| d.id == id) {
             download.status = status.into();
             download.bytes_received = received.max(0) as u64;
             download.total_bytes = (total >= 0).then_some(total as u64);
@@ -122,10 +192,17 @@ pub async fn action(app: &tauri::AppHandle, path: PathBuf, action: String) -> Re
     app.run_on_main_thread(move || {
         // Drop the registry borrow before invoking COM: it can synchronously
         // raise StateChanged, which in turn removes a completed operation.
-        let operation = OPERATIONS.with(|items| items.borrow().get(&path).cloned());
+        let active = OPERATIONS.with(|items| {
+            items
+                .borrow()
+                .iter()
+                .find(|(_, active)| active.path == path)
+                .map(|(key, active)| (*key, active.clone()))
+        });
         let result = (|| -> Result<(), String> {
-            let operation = operation
+            let (identity, active) = active
                 .ok_or("Nedlastingen er ikke lenger aktiv. Start den på nytt fra nettstedet.")?;
+            let operation = active.operation;
             unsafe {
                 match action.as_str() {
                     "pause" => operation.Pause().map_err(|e| e.to_string())?,
@@ -145,8 +222,8 @@ pub async fn action(app: &tauri::AppHandle, path: PathBuf, action: String) -> Re
                     "cancel" => operation.Cancel().map_err(|e| e.to_string())?,
                     _ => return Err("Ukjent nedlastingshandling".into()),
                 }
-                if update(&callback_app, &operation, true).map_err(|e| e.to_string())? {
-                    OPERATIONS.with(|items| items.borrow_mut().remove(&path));
+                if update(&callback_app, &active.id, &operation, true).map_err(|e| e.to_string())? {
+                    OPERATIONS.with(|items| items.borrow_mut().remove(&identity));
                 }
             }
             Ok(())

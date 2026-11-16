@@ -183,7 +183,7 @@ pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         let result = exercise(&app);
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, failed download, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        let message=match result{Ok(())=>"PASS: sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, one logical record across failed-download retries, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         println!("{message}");
         if let Some(path) = std::env::var_os("ELIX_SMOKE_RESULT") {
             let _ = std::fs::write(path, &message);
@@ -418,6 +418,53 @@ fn resumable_download_test(app: &AppHandle, tab_id: &str, origin: &str) -> Resul
     }) {
         return Err("Complete download was not persisted for app restart".into());
     }
+    Ok(())
+}
+fn concurrent_download_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), String> {
+    // The retry fix must key by native operation identity, never by filename or
+    // URL: two deliberate downloads of the same resource must remain distinct.
+    let url = format!("{origin}/slow");
+    let first = tauri::async_runtime::block_on(browser::create(app.clone(), url.clone()))?;
+    let second = tauri::async_runtime::block_on(browser::create(app.clone(), url))?;
+    wait(|| {
+        let state = app.state::<AppState>();
+        let downloads = state.downloads.lock().unwrap();
+        [first.as_str(), second.as_str()].iter().all(|view_id| {
+            downloads
+                .iter()
+                .any(|download| download.view_id == *view_id && download.status == "downloading")
+        })
+    })?;
+    wait(|| {
+        let state = app.state::<AppState>();
+        let downloads = state.downloads.lock().unwrap();
+        [first.as_str(), second.as_str()].iter().all(|view_id| {
+            downloads
+                .iter()
+                .any(|download| download.view_id == *view_id && download.status == "complete")
+        })
+    })?;
+    let items = app
+        .state::<AppState>()
+        .downloads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|download| download.view_id == first || download.view_id == second)
+        .cloned()
+        .collect::<Vec<_>>();
+    if items.len() != 2 || items[0].id == items[1].id || items[0].path == items[1].path {
+        return Err("Concurrent same-URL downloads were merged or duplicated".into());
+    }
+    for item in &items {
+        let bytes = std::fs::read(&item.path).map_err(|e| e.to_string())?;
+        if bytes.len() != SLOW_DOWNLOAD_BYTES || bytes.iter().any(|byte| *byte != b'E') {
+            return Err("Concurrent download bytes differ".into());
+        }
+    }
+    browser::close(app, &first)?;
+    browser::close(app, &second)?;
+    browser::activate(app, return_tab)?;
     Ok(())
 }
 fn permission_test(app: &AppHandle, origin: &str) -> Result<(), String> {
@@ -710,28 +757,69 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         return Err("Downloaded bytes differ".into());
     }
     resumable_download_test(app, &second, &origin)?;
-    browser::navigate(app, &second, &format!("{origin}/broken"))?;
+    concurrent_download_test(app, &origin, &second)?;
+    let broken_url = format!("{origin}/broken");
+    browser::navigate(app, &second, &broken_url)?;
     wait(|| {
         app.state::<AppState>()
             .downloads
             .lock()
             .unwrap()
             .iter()
-            .any(|d| d.status == "failed")
+            .any(|d| d.view_id == second && d.url == broken_url && d.status == "failed")
     })?;
-    // A resumable interrupted transfer legitimately keeps its source alive.
-    // Explicitly cancel it before testing ordinary inactive-tab suspension.
-    let resumable = app
+    let retry_items = app
         .state::<AppState>()
         .downloads
         .lock()
         .unwrap()
         .iter()
-        .filter(|download| download.view_id == second && download.can_resume)
+        .filter(|download| download.view_id == second && download.url == broken_url)
+        .cloned()
+        .collect::<Vec<_>>();
+    if retry_items.len() != 1 {
+        return Err(format!(
+            "Automatic retries created {} records for one logical download: {}",
+            retry_items.len(),
+            serde_json::to_string(&retry_items).map_err(|e| e.to_string())?
+        ));
+    }
+    // A resumable interruption may already be retrying when cleanup runs.
+    // Explicitly cancel the live operation before testing tab suspension.
+    let live = app
+        .state::<AppState>()
+        .downloads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|download| {
+            download.view_id == second
+                && (download.can_resume
+                    || matches!(download.status.as_str(), "downloading" | "paused"))
+        })
         .map(|download| download.id.clone())
         .collect::<Vec<_>>();
-    for id in resumable {
+    for id in live {
         tauri::async_runtime::block_on(crate::downloads::action(app, &id, "cancel"))?;
+    }
+    let phantom = app
+        .state::<AppState>()
+        .downloads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|download| {
+            download.view_id == second
+                && (download.can_resume
+                    || matches!(download.status.as_str(), "downloading" | "paused"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !phantom.is_empty() {
+        return Err(format!(
+            "Canceled transfer left active retry records: {}",
+            serde_json::to_string(&phantom).map_err(|e| e.to_string())?
+        ));
     }
     browser::activate(app, &first)?;
     browser::suspend(app, &second)?;
