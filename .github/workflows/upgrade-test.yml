@@ -60,7 +60,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'HTTPS preparation failed' }
           $cert = Import-Certificate -FilePath "$root/tls.cer" -CertStoreLocation Cert:\CurrentUser\Root
           New-Item -ItemType Directory "$root/public" | Out-Null
-          Get-ChildItem "$root/*.exe", "$root/*.json" | Move-Item -Destination "$root/public"
+          Get-ChildItem "$root/*.exe", "$root/*.json", "$root/*.html" | Move-Item -Destination "$root/public"
           $server = Start-Process python -ArgumentList @('scripts/upgrade-fixture.py','serve', $root) -PassThru
           try {
             Start-Sleep -Seconds 2

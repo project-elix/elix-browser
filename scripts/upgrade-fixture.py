@@ -29,6 +29,12 @@ if args.mode == 'prepare':
         data = {'version':'0.1.1', 'notes':'Disposable CI upgrade', 'pub_date':now.isoformat().replace('+00:00','Z'),
                 'platforms':{'windows-x86_64':{'url':f'https://127.0.0.1:44335/{artifact}', 'signature':(root/signature).read_text().strip()}}}
         (root/f'{case}.json').write_text(json.dumps(data))
+    (root/'cookie.html').write_text("""<!doctype html><title>cookie pending</title><script>
+const seed = new URL(location.href).searchParams.get('seed');
+if(seed) document.cookie = 'elix_upgrade_cookie='+encodeURIComponent(seed)+'; Max-Age=3600; Path=/; Secure; SameSite=Lax';
+const match = document.cookie.split('; ').find(c=>c.startsWith('elix_upgrade_cookie='));
+document.title = 'cookie:'+(match ? decodeURIComponent(match.split('=')[1]) : 'missing');
+</script>ELIX cookie persistence fixture""")
     raw = bytearray((root/'new.exe').read_bytes())
     raw[-1] ^= 1
     (root/'corrupt.exe').write_bytes(raw)

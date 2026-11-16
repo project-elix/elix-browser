@@ -39,6 +39,14 @@ jobs:
           Start-Sleep -Seconds 12
           $app.Refresh()
           if ($app.HasExited) { throw 'Application exited during startup' }
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $screen = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $image = [Drawing.Bitmap]::new($screen.Width,$screen.Height)
+          $graphics = [Drawing.Graphics]::FromImage($image)
+          try {
+            $graphics.CopyFromScreen($screen.Location,[Drawing.Point]::Empty,$screen.Size)
+            $image.Save((Join-Path $PWD 'windows-start.png'),[Drawing.Imaging.ImageFormat]::Png)
+          } finally { $graphics.Dispose(); $image.Dispose() }
           Stop-Process -Id $app.Id
       - name: Native WebView2 integration test
         shell: pwsh
@@ -57,4 +65,5 @@ jobs:
           path: |
             src-tauri/target/release/bundle/nsis/*-setup.exe
             performance.csv
+            windows-start.png
           if-no-files-found: error

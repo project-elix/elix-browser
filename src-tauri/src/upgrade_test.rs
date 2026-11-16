@@ -6,10 +6,10 @@ use tauri_plugin_updater::UpdaterExt;
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         // Let the shell finish its normal initial update check first.
-        std::thread::sleep(std::time::Duration::from_secs(8));
+        std::thread::sleep(std::time::Duration::from_secs(12));
         let result = tauri::async_runtime::block_on(exercise(&app));
         let (code, message) = match result {
-            Ok(()) => (0, "PASS: signed 0.1.0 -> 0.1.1 install; profiles, bookmarks, history, settings and profile files preserved; tampered/replayed artifacts rejected".to_string()),
+            Ok(()) => (0, "PASS: signed 0.1.0 -> 0.1.1 install; profiles, bookmarks, history, settings, cookies and profile files preserved; tampered/replayed artifacts rejected".to_string()),
             Err(e) => (1, format!("FAIL: {e}")),
         };
         let root = &app.state::<AppState>().root;
@@ -22,31 +22,37 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let version = app.package_info().version.to_string();
     if version == "0.1.1" {
-        let store = state.store.lock().unwrap();
-        let profiles = store.profiles()?;
-        if profiles.len() != 2 || !store.settings().gaming || !store.settings().developer {
-            return Err("Profiles/preferences did not survive upgrade".into());
-        }
-        for p in &profiles {
-            if store
-                .entries(&p.id, "bookmarks")?
-                .iter()
-                .all(|e| e.title != p.name)
-                || store
-                    .entries(&p.id, "history")?
+        {
+            let store = state.store.lock().unwrap();
+            let profiles = store.profiles()?;
+            if profiles.len() != 2 || !store.settings().gaming || !store.settings().developer {
+                return Err("Profiles/preferences did not survive upgrade".into());
+            }
+            for p in &profiles {
+                if store
+                    .entries(&p.id, "bookmarks")?
                     .iter()
                     .all(|e| e.title != p.name)
-                || std::fs::read_to_string(state.root.join(&p.id).join("preserve.txt"))
+                    || store
+                        .entries(&p.id, "history")?
+                        .iter()
+                        .all(|e| e.title != p.name)
+                    || std::fs::read_to_string(
+                        crate::profiles::directory(&state.root, &p.id)?
+                            .join("elix-preserve-test.txt"),
+                    )
                     .ok()
                     .as_deref()
-                    != Some(&p.name)
-            {
-                return Err("Profile data missing after upgrade".into());
+                        != Some(&p.name)
+                {
+                    return Err("Profile data missing after upgrade".into());
+                }
+            }
+            if store.get("upgrade_seed_version").as_deref() != Some("0.1.0") {
+                return Err("Missing original version marker".into());
             }
         }
-        if store.get("upgrade_seed_version").as_deref() != Some("0.1.0") {
-            return Err("Missing original version marker".into());
-        }
+        check_cookies(app, false).await?;
         return Ok(());
     }
     if version != "0.1.0" {
@@ -61,9 +67,10 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
         for p in store.profiles()? {
             store.bookmark(&p.id, "https://example.com/upgrade", &p.name)?;
             store.visit(&p.id, "https://example.com/upgrade", &p.name)?;
-            let dir = state.root.join(&p.id);
+            let dir = crate::profiles::directory(&state.root, &p.id)?;
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            std::fs::write(dir.join("preserve.txt"), &p.name).map_err(|e| e.to_string())?;
+            std::fs::write(dir.join("elix-preserve-test.txt"), &p.name)
+                .map_err(|e| e.to_string())?;
         }
         store.set(
             "preferences",
@@ -76,6 +83,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
         )?;
         store.set("upgrade_seed_version", "0.1.0")?;
     }
+    check_cookies(app, true).await?;
     let base = option_env!("ELIX_UPDATE_BASE").ok_or("Missing HTTPS fixture")?;
     if base != "https://127.0.0.1:44335" {
         return Err("Upgrade self-test requires loopback fixture".into());
@@ -116,4 +124,48 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     // The real NSIS updater exits this process and restarts with the original argument.
     crate::updater::install(app)?;
     Err("Installer unexpectedly returned without restarting".into())
+}
+
+async fn check_cookies(app: &AppHandle, seed: bool) -> Result<(), String> {
+    let profiles = app.state::<AppState>().store.lock().unwrap().profiles()?;
+    for p in profiles {
+        let shell = app.get_webview("shell").ok_or("Missing shell")?;
+        crate::dispatch(
+            app.clone(),
+            shell,
+            crate::Request::SwitchProfile { id: p.id.clone() },
+        )
+        .await?;
+        let url = if seed {
+            format!("https://127.0.0.1:44335/cookie.html?seed={}", p.id)
+        } else {
+            "https://127.0.0.1:44335/cookie.html".to_owned()
+        };
+        let id = crate::browser::create(app.clone(), url).await?;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        loop {
+            let found = app
+                .state::<AppState>()
+                .session
+                .lock()
+                .unwrap()
+                .tabs
+                .iter()
+                .any(|t| t.id == id && t.title == format!("cookie:{}", p.id) && !t.loading);
+            if found {
+                break;
+            }
+            if std::time::Instant::now() > until {
+                return Err(format!(
+                    "Cookie persistence/isolation failed for profile {}",
+                    p.name
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        crate::browser::close(app, &id)?;
+    }
+    // Allow the real browser process to flush persistent cookies before installation exits it.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    Ok(())
 }

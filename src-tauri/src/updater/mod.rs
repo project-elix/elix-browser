@@ -59,6 +59,8 @@ pub async fn check(app: &AppHandle) -> Result<Value, String> {
         .endpoints(vec![url])
         .map_err(|e| e.to_string())?
         .timeout(std::time::Duration::from_secs(20))
+        // Enforce HTTPS on redirected requests as well as the initial URLs.
+        .configure_client(|client| client.https_only(true))
         .build()
         .map_err(|e| e.to_string())?
         .check()
