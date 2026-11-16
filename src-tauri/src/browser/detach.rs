@@ -199,9 +199,13 @@ async fn detach_inner(
             && point.y >= rect.top
             && point.y < rect.bottom
         {
+            app.state::<AppState>()
+                .logs
+                .add("info", "window_transfer_drop_inside");
             return Ok(false);
         }
         let state = app.state::<AppState>();
+        state.logs.add("info", "window_transfer_requested");
         if state.downloads.lock().unwrap().iter().any(|d| {
             d.view_id == id
                 && (d.can_resume || matches!(d.status.as_str(), "paused" | "downloading"))
@@ -230,10 +234,20 @@ async fn detach_inner(
         let smoke_root = std::env::args()
             .any(|a| a == "--self-test")
             .then(|| state.root.clone());
-        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let outcome = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
             use std::io::{BufRead, BufReader};
             use std::process::{Command, Stdio};
             let mut command = Command::new(executable);
+            let stderr = Stdio::null();
+            #[cfg(feature = "smoke-tests")]
+            let error_log = smoke_root
+                .as_ref()
+                .map(|root| root.join(format!("handoff-{}.log", uuid::Uuid::new_v4())));
+            #[cfg(feature = "smoke-tests")]
+            let stderr = match &error_log {
+                Some(path) => Stdio::from(std::fs::File::create(path).map_err(|e| e.to_string())?),
+                None => stderr,
+            };
             #[cfg(feature = "smoke-tests")]
             if let Some(root) = smoke_root {
                 command
@@ -247,34 +261,52 @@ async fn detach_inner(
                 .arg(format!("--elix-window={}", uuid::Uuid::new_v4()))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(stderr)
                 .spawn()
                 .map_err(|e| e.to_string())?;
-            child
-                .stdin
-                .take()
-                .ok_or("Kunne ikke overføre fanen")?
-                .write_all(&bytes)
-                .map_err(|e| e.to_string())?;
-            let output = child.stdout.take().ok_or("Kunne ikke bekrefte vinduet")?;
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                for line in BufReader::new(output).lines().take(100).flatten() {
-                    if line == "ELIX_WINDOW_READY" {
-                        let _ = tx.send(());
-                        break;
+            let result = (|| -> Result<(), String> {
+                child
+                    .stdin
+                    .take()
+                    .ok_or("Kunne ikke overføre fanen")?
+                    .write_all(&bytes)
+                    .map_err(|e| e.to_string())?;
+                let output = child.stdout.take().ok_or("Kunne ikke bekrefte vinduet")?;
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    for line in BufReader::new(output).lines().take(100).flatten() {
+                        if line == "ELIX_WINDOW_READY" {
+                            let _ = tx.send(());
+                            break;
+                        }
                     }
-                }
-            });
-            let ready = rx.recv_timeout(std::time::Duration::from_secs(25));
-            if ready.is_err() {
+                });
+                let ready = rx.recv_timeout(std::time::Duration::from_secs(25));
+                ready.map_err(|_| {
+                    "Det nye vinduet svarte ikke. Originalfanen er beholdt.".to_string()
+                })
+            })();
+            if result.is_err() {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-            ready.map_err(|_| "Det nye vinduet svarte ikke. Originalfanen er beholdt.".to_string())
+            #[cfg(feature = "smoke-tests")]
+            if let (Err(error), Some(path)) = (&result, error_log) {
+                let detail = std::fs::read_to_string(path).unwrap_or_default();
+                return Err(format!(
+                    "{error} Child diagnostics: {}",
+                    detail.chars().take(4000).collect::<String>()
+                ));
+            }
+            result
         })
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| e.to_string())?;
+        if let Err(error) = outcome {
+            state.logs.add("error", "window_transfer_startup_failed");
+            return Err(error);
+        }
+        state.logs.add("info", "window_transfer_ready");
         if state
             .session
             .lock()

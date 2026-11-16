@@ -9,8 +9,9 @@ use tauri::{AppHandle, Manager};
 
 /// Detached test processes must share only the parent's disposable profile directory.
 pub fn detached_root() -> Result<std::path::PathBuf, String> {
-    let root = std::env::var_os("ELIX_SMOKE_ROOT").ok_or("Missing smoke root")?;
-    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let requested =
+        std::path::PathBuf::from(std::env::var_os("ELIX_SMOKE_ROOT").ok_or("Missing smoke root")?);
+    let root = std::fs::canonicalize(&requested).map_err(|e| e.to_string())?;
     let temp = std::fs::canonicalize(std::env::temp_dir()).map_err(|e| e.to_string())?;
     let suffix = root
         .file_name()
@@ -20,7 +21,9 @@ pub fn detached_root() -> Result<std::path::PathBuf, String> {
     if root.parent() != Some(temp.as_path()) || uuid::Uuid::parse_str(suffix).is_err() {
         return Err("Detached test refused a non-test profile directory".into());
     }
-    Ok(root)
+    // Validate canonically, but keep the parent's identical WebView2 data-directory
+    // spelling. Windows canonicalization adds a verbatim-path prefix.
+    Ok(requested)
 }
 
 pub fn start_detached(app: AppHandle) {
@@ -174,8 +177,8 @@ fn detached_window_test(app: &AppHandle, origin: &str) -> Result<(), String> {
 fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
     use windows::Win32::UI::{
         Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN,
-            MOUSEEVENTF_LEFTUP, MOUSE_EVENT_FLAGS,
+            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+            MOUSEINPUT, MOUSE_EVENT_FLAGS,
         },
         WindowsAndMessaging::{GetSystemMetrics, SetCursorPos, SM_CXSCREEN},
     };
@@ -222,25 +225,59 @@ fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
         window: window.clone(),
     };
     window.unmaximize().map_err(|e| e.to_string())?;
-    window.set_size(tauri::PhysicalSize::new(900, 600)).map_err(|e| e.to_string())?;
-    window.set_position(tauri::PhysicalPosition::new(0, 0)).map_err(|e| e.to_string())?;
-    let shell = app.get_webview("shell").ok_or("Missing drag source shell")?;
+    window
+        .set_size(tauri::PhysicalSize::new(900, 600))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_position(tauri::PhysicalPosition::new(0, 0))
+        .map_err(|e| e.to_string())?;
+    let shell = app
+        .get_webview("shell")
+        .ok_or("Missing drag source shell")?;
     window.set_focus().map_err(|e| e.to_string())?;
     shell.set_focus().map_err(|e| e.to_string())?;
     wait(|| {
         !window.is_maximized().unwrap_or(true)
-            && window.inner_size().is_ok_and(|s| s.width == 900 && s.height == 600)
-            && shell_bool(app, "document.hasFocus() && Math.abs(innerWidth * devicePixelRatio - 900) < 2").unwrap_or(false)
+            && window
+                .inner_size()
+                .is_ok_and(|s| s.width == 900 && s.height == 600)
+            && shell_bool(
+                app,
+                "document.hasFocus() && Math.abs(innerWidth * devicePixelRatio - 900) < 2",
+            )
+            .unwrap_or(false)
     })?;
     let selector = format!("[data-tab-id=\"{id}\"]");
+    shell.eval(r#"(()=>{
+        window.__elixDragCleanup?.();
+        window.__elixDragEvents=[];
+        window.__elixDragNotices=[];
+        const record=e=>{
+            window.__elixDragEvents.push({type:e.type,x:e.clientX,y:e.clientY,screenX:e.screenX,screenY:e.screenY,buttons:e.buttons,pointerId:e.pointerId,target:e.target?.closest?.('[data-tab-id]')?.getAttribute('data-tab-id'),tag:e.target?.tagName,captured:e.target?.hasPointerCapture?.(e.pointerId),width:innerWidth,height:innerHeight});
+            if(window.__elixDragEvents.length>60)window.__elixDragEvents.shift();
+        };
+        const types=['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','dragstart','drop'];
+        types.forEach(type=>window.addEventListener(type,record,true));
+        const notices=()=>{
+            const text=Array.from(document.querySelectorAll('.notice,.boot-screen')).map(e=>e.innerText).join('\n');
+            const previous=window.__elixDragNotices.at(-1);
+            if(text!==previous?.text){window.__elixDragNotices.push({ms:performance.now(),text});if(window.__elixDragNotices.length>30)window.__elixDragNotices.shift();}
+        };
+        const observer=new MutationObserver(notices);
+        observer.observe(document.body,{subtree:true,childList:true,characterData:true});
+        notices();
+        window.__elixDragCleanup=()=>{types.forEach(type=>window.removeEventListener(type,record,true));observer.disconnect();};
+    })()"#).map_err(|e| e.to_string())?;
     let (tx, rx) = std::sync::mpsc::channel();
     shell.eval_with_callback(
         format!("(()=>{{const tab=document.querySelector('{selector}');const button=tab?.querySelector('[role=tab]');if(!button)return null;button.scrollIntoView({{block:'nearest',inline:'nearest'}});const r=button.getBoundingClientRect();window.__elixDragProbe=null;tab.addEventListener('pointerdown',e=>{{window.__elixDragProbe={{target:e.target,id:e.pointerId}}}},{{once:true}});return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()"),
         move |value| { let _ = tx.send(value); },
     ).map_err(|e| e.to_string())?;
     let point: serde_json::Value = serde_json::from_str(
-        &rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?,
-    ).map_err(|e| e.to_string())?;
+        &rx.recv_timeout(Duration::from_secs(5))
+            .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let client = window.inner_position().map_err(|e| e.to_string())?;
     let x = client.x + (point["x"].as_f64().ok_or("Missing drag source X")? * scale).round() as i32;
@@ -248,7 +285,9 @@ fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
     let outer = window.outer_position().map_err(|e| e.to_string())?;
     let drop_x = outer.x + window.outer_size().map_err(|e| e.to_string())?.width as i32 + 24;
     if drop_x >= unsafe { GetSystemMetrics(SM_CXSCREEN) } {
-        return Err("Native drag fixture needs screen space to the right of the 900px window".into());
+        return Err(
+            "Native drag fixture needs screen space to the right of the 900px window".into(),
+        );
     }
     unsafe { SetCursorPos(x, y) }.map_err(|e| e.to_string())?;
     // Release the physical button before restoring geometry, including on failures.
@@ -256,16 +295,80 @@ fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
     if !mouse_button(MOUSEEVENTF_LEFTDOWN) {
         return Err("Could not press native mouse button".into());
     }
-    wait(|| shell_bool(app, "!!window.__elixDragProbe && window.__elixDragProbe.target.hasPointerCapture(window.__elixDragProbe.id)").unwrap_or(false))?;
+    wait(|| {
+        shell_bool(app, "!!window.__elixDragProbe && window.__elixDragProbe.target.hasPointerCapture(window.__elixDragProbe.id)").unwrap_or(false)
+    }).map_err(|e| format!("{e}\n{}", drag_diagnostics(app, id)))?;
     // First move leaves the tab and window entirely: delayed pointer capture loses it.
     unsafe { SetCursorPos(drop_x, y) }.map_err(|e| e.to_string())?;
-    wait(|| shell_bool(app, &format!("document.querySelector('{selector}')?.classList.contains('dragging')===true")).unwrap_or(false))?;
+    wait(|| {
+        shell_bool(
+            app,
+            &format!("document.querySelector('{selector}')?.classList.contains('dragging')===true"),
+        )
+        .unwrap_or(false)
+    })
+    .map_err(|e| format!("{e}\n{}", drag_diagnostics(app, id)))?;
     if !mouse_button(MOUSEEVENTF_LEFTUP) {
         return Err("Could not release native mouse button".into());
     }
     held_mouse.0 = false;
     drop(held_mouse);
-    wait(|| !app.state::<AppState>().session.lock().unwrap().tabs.iter().any(|t| t.id == id))
+    // The child has a 25-second ACK timeout after spawn/write. Give that existing
+    // failure time to reach the shell before collecting the diagnostic snapshot.
+    let until = Instant::now() + Duration::from_secs(35);
+    while Instant::now() < until {
+        if !app
+            .state::<AppState>()
+            .session
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == id)
+        {
+            let _ = shell.eval("window.__elixDragCleanup?.()");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let diagnostics = drag_diagnostics(app, id);
+    let _ = shell.eval("window.__elixDragCleanup?.()");
+    Err(format!(
+        "Native drag did not remove the source tab after 35 seconds\n{diagnostics}"
+    ))
+}
+
+#[cfg(windows)]
+fn drag_diagnostics(app: &AppHandle, id: &str) -> serde_json::Value {
+    let shell = (|| -> Result<serde_json::Value, String> {
+        let view = app.get_webview("shell").ok_or("Missing shell")?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        view.eval_with_callback(
+            "({events:window.__elixDragEvents,notices:window.__elixDragNotices,focused:document.hasFocus(),text:document.body.innerText.slice(0,4000)})",
+            move |value| { let _ = tx.send(value); },
+        ).map_err(|e| e.to_string())?;
+        serde_json::from_str(&rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())
+    })().unwrap_or_else(|e| serde_json::json!({"error": e}));
+    let state = app.state::<AppState>();
+    let windows = (|| -> Result<Vec<(String, String)>, String> {
+        let store = state.store.lock().unwrap();
+        let mut query = store.conn.prepare(
+            "SELECT key,value FROM settings WHERE key LIKE 'window_pid:%' OR key LIKE 'window_session:%' OR key LIKE 'smoke_window:%' OR key LIKE 'dirty:%' ORDER BY key",
+        ).map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    })();
+    serde_json::json!({
+        "shell": shell,
+        "windows": windows,
+        "source": state.session.lock().unwrap().tabs.iter().find(|tab| tab.id == id).cloned(),
+        "logs": state.logs.list(),
+    })
 }
 #[track_caller]
 fn wait(mut condition: impl FnMut() -> bool) -> Result<(), String> {
