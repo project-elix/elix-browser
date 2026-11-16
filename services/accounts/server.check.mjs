@@ -1,9 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createAccounts} from './server.mjs';
-const fixture=async()=>{
+const fixture=async(overrides={})=>{
  const emails=[];let calls=0;
- const app=createAccounts({publicUrl:'http://127.0.0.1',development:true,database:':memory:',pepper:'test-only-pepper-not-for-production-123',discordId:'123',discordSecret:'test-secret'},{sendEmail:async(email,code)=>emails.push({email,code}),discordIdentity:async()=>{calls++;return {id:'123456789012345678',name:'Discord tester'}}});
+ const app=createAccounts({publicUrl:'http://127.0.0.1',development:true,database:':memory:',pepper:'test-only-pepper-not-for-production-123',discordId:'123',discordSecret:'test-secret'},{sendEmail:async(email,code)=>emails.push({email,code}),discordIdentity:async()=>{calls++;return {id:'123456789012345678',name:'Discord tester'}},...overrides});
  await new Promise(r=>app.server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${app.server.address().port}`;
  const request=async(path,body,token,method=body?'POST':'GET',headers={})=>{const response=await fetch(origin+path,{method,headers:{...(body?{'content-type':'application/json'}:{}),...(token?{authorization:'Bearer '+token}:{}),...headers},body:body?JSON.stringify(body):undefined,redirect:'manual'});let value;try{value=await response.json()}catch{}return {status:response.status,value,response}};
  const login=async email=>{const started=await request('/v1/auth/email/start',{email});assert.equal(started.status,200);const result=await request('/v1/auth/email/verify',{challenge:started.value.challenge,code:emails.at(-1).code});assert.equal(result.status,200);return result.value};
@@ -70,5 +70,25 @@ test('expired email challenges and foreign browser origins are rejected',async()
  const start=await f.request('/v1/auth/email/start',{email:'a@example.com'});f.db.exec('UPDATE challenges SET expires=0');
  assert.equal((await f.request('/v1/auth/email/verify',{challenge:start.value.challenge,code:f.emails.at(-1).code})).status,401);
  assert.equal((await f.request('/v1/auth/email/start',{email:'b@example.com'},null,'POST',{origin:'https://evil.example'})).status,403);
+ }finally{await f.close()}
+});
+test('failed email delivery deletes the challenge and never creates an account or session',async()=>{
+ const f=await fixture({sendEmail:async()=>{throw new Error('Provider detail that must not escape')}});try{
+ const result=await f.request('/v1/auth/email/start',{email:'person@example.com'});
+ assert.equal(result.status,500);
+ assert.equal(JSON.stringify(result.value).includes('Provider detail'),false);
+ for(const table of ['challenges','users','sessions'])assert.equal(f.db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n,0);
+ }finally{await f.close()}
+});
+test('email spelling is normalized, login responses never contain the code, and email flood limits apply',async()=>{
+ const f=await fixture();try{
+ const first=await f.request('/v1/auth/email/start',{email:'  Person@EXAMPLE.com  '});
+ assert.equal(first.status,200);assert.equal(f.emails[0].email,'person@example.com');
+ assert.equal(JSON.stringify(first.value).includes(f.emails[0].code),false);
+ const challenge=f.db.prepare('SELECT subject,code FROM challenges').get();
+ assert.equal(challenge.subject,'person@example.com');assert.notEqual(challenge.code,f.emails[0].code);
+ for(let i=0;i<4;i++)assert.equal((await f.request('/v1/auth/email/start',{email:'person@example.com'})).status,200);
+ assert.equal((await f.request('/v1/auth/email/start',{email:'PERSON@example.com'})).status,429);
+ assert.equal(f.emails.length,5);
  }finally{await f.close()}
 });

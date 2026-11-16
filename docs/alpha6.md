@@ -55,6 +55,14 @@ real HTTPS `ELIX_ACCOUNTS_URL` is embedded at build time. No Brevo sender, key,
 Discord application, callback registration or production domain was invented or
 changed. Account linking is not implemented.
 
+Brevo activation preparation now includes Norwegian HTML/plain-text login mail,
+sanitized provider errors, rejected redirects, a sender/API check with optional
+non-delivering sandbox mode, and systemd/Nginx examples for the existing ELIX server.
+Production fails startup on missing email configuration or placeholder secrets.
+The Windows CI and release jobs accept the public `ELIX_ACCOUNTS_URL` repository
+variable. The live server, Brevo key, verified sender and DNS are still pending;
+mock tests and sandbox acceptance do not prove actual inbox delivery.
+
 Sync is optional and manual: upload or fetch-and-merge bookmarks and appearance.
 AES-256-GCM, fresh 16-byte salt/12-byte nonce, PBKDF2-SHA256 at 600,000 iterations.
 The passphrase is never sent or saved, and cannot be reset to recover existing data.
@@ -86,7 +94,11 @@ there is no in-place downgrade claim. Do not test by deleting application data.
 ## Local verification — 16 November 2026
 
 - TypeScript and Vite production build passed.
-- 23 frontend/release unit tests and 5 account-service integration tests passed.
+- 23 frontend/release tests and 11 account/Brevo tests passed (mock mail only).
+- Brevo preparation: real local service startup, `/health` and `/v1/config`, private
+  SQLite/WAL permissions and graceful shutdown passed without requesting mail.
+  The systemd unit syntax passed with the local Node executable path substituted;
+  `/usr/bin/node` and the Nginx template still require validation on the actual server.
 - 13 storage/security/download core tests passed, including v1 → v2 migration,
   atomic invalid-import rollback, duplicate suppression, profile isolation and
   bounded session fallback snapshots.

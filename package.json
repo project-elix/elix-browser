@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "test": "vitest run && node --test services/accounts/server.check.mjs",
+    "test": "vitest run && npm run test:accounts",
+    "test:accounts": "node --test services/accounts/server.check.mjs services/accounts/brevo.check.mjs",
     "tauri": "tauri",
     "desktop": "tauri dev",
     "check:release": "node scripts/validate-release.mjs",

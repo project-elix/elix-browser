@@ -1,0 +1,32 @@
+[Unit]
+Description=ELIX Browser account service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=elix-accounts
+Group=elix-accounts
+WorkingDirectory=/opt/elix-accounts
+EnvironmentFile=/etc/elix-accounts.env
+Environment=NODE_ENV=production
+Environment=DATABASE_PATH=/var/lib/elix-accounts/accounts.sqlite
+ExecStart=/usr/bin/node /opt/elix-accounts/server.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StateDirectory=elix-accounts
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

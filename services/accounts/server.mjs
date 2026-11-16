@@ -4,12 +4,14 @@ import {randomBytes,randomInt,createHash,createHmac,timingSafeEqual} from 'node:
 import {mkdirSync} from 'node:fs';
 import {dirname,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {BrevoError,sendLoginEmail,validEmail} from './brevo.mjs';
+import {readConfig,validateOrigin} from './config.mjs';
 const digest=s=>createHash('sha256').update(s).digest('hex');
 const random=()=>randomBytes(32).toString('base64url');
 const seconds=()=>Math.floor(Date.now()/1000);
 const equal=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.length===b.length&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const fault=(status,message)=>Object.assign(new Error(message),{status});
-const emailOf=v=>{if(typeof v!=='string'||v.length>254||!/^\S+@[^\s@]+\.[^\s@]+$/.test(v))throw fault(400,'Skriv en gyldig e-postadresse');return v.trim().toLowerCase();};
+const emailOf=v=>{const value=typeof v==='string'?v.trim().toLowerCase():v;if(!validEmail(value))throw fault(400,'Skriv en gyldig e-postadresse');return value;};
 function envelope(v){
   if(!v||v.version!==1||v.algorithm!=='AES-GCM'||v.iterations!==600000||typeof v.salt!=='string'||typeof v.iv!=='string'||typeof v.ciphertext!=='string')throw fault(400,'Ugyldig kryptert innhold');
   for(const [key,length,max] of [['salt',16,16],['iv',12,12],['ciphertext',16,4_000_000]]){
@@ -20,8 +22,7 @@ function envelope(v){
 }
 
 export function createAccounts(config,providers={}){
-  const base=new URL(config.publicUrl);
-  if(base.protocol!=='https:'&&!(config.development&&base.hostname==='127.0.0.1'))throw new Error('PUBLIC_URL requires HTTPS');
+  const base=validateOrigin(config.publicUrl,config.development);
   if(!config.pepper||config.pepper.length<32)throw new Error('AUTH_PEPPER must contain at least 32 random characters');
   const hash=s=>createHmac('sha256',config.pepper).update(s).digest('hex');
   if(config.database!==':memory:')mkdirSync(dirname(resolve(config.database)),{recursive:true,mode:0o700});
@@ -40,11 +41,7 @@ export function createAccounts(config,providers={}){
   const publicUser=u=>({id:u.id,provider:u.provider,name:u.name});
   const issue=u=>{const token=random();q('INSERT INTO sessions VALUES(?,?,?)').run(digest(token),u.id,seconds()+30*86400);return {token,account:publicUser(u)};};
   const authenticate=req=>{const token=req.headers.authorization?.replace(/^Bearer /,'');if(!token||token.length>100)throw fault(401,'Logg inn på nytt');const u=q('SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?').get(digest(token),seconds());if(!u)throw fault(401,'Logg inn på nytt');return u;};
-  const sendEmail=providers.sendEmail??(async(email,code)=>{
-    if(!config.brevoKey||!config.senderEmail)throw fault(503,'E-postinnlogging er ikke konfigurert');
-    const r=await fetch('https://api.brevo.com/v3/smtp/email',{method:'POST',headers:{'api-key':config.brevoKey,'Content-Type':'application/json'},body:JSON.stringify({sender:{email:config.senderEmail,name:'ELIX Browser'},to:[{email}],subject:'Din innloggingskode til ELIX',textContent:`Din innloggingskode er ${code}. Koden er gyldig i 10 minutter. Ikke del den med andre. Hvis du ikke ba om koden, kan du se bort fra e-posten.`}),signal:AbortSignal.timeout(15000)});
-    if(!r.ok)throw fault(503,'Kunne ikke sende e-post akkurat nå');
-  });
+  const sendEmail=providers.sendEmail??((email,code)=>sendLoginEmail(config,email,code));
   let cleaned=0;
   const server=createServer(async(req,res)=>{
     try{
@@ -94,12 +91,18 @@ export function createAccounts(config,providers={}){
         return json(res,200,{ok:true,revision:b.revision+1});
       }
       throw fault(404,'Fant ikke endepunktet');
-    }catch(error){if(!res.headersSent)json(res,error.status??500,{error:error.status?error.message:'Tjenesten kunne ikke fullføre forespørselen'});else res.end();}
+    }catch(error){if(error instanceof BrevoError)console.error('ELIX mail provider:',error.reason);if(!res.headersSent)json(res,error.status??500,{error:error.status?error.message:'Tjenesten kunne ikke fullføre forespørselen'});else res.end();}
   });
   server.requestTimeout=20000;server.headersTimeout=15000;
   return {server,db,close:async()=>{await new Promise(r=>server.close(r));db.close();}};
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
-  const {server}=createAccounts({publicUrl:process.env.PUBLIC_URL,pepper:process.env.AUTH_PEPPER,database:process.env.DATABASE_PATH??'./data/accounts.sqlite',brevoKey:process.env.BREVO_API_KEY,senderEmail:process.env.BREVO_SENDER_EMAIL,trustProxy:process.env.TRUST_PROXY==='1',development:process.env.NODE_ENV==='development'});
-  server.listen(Number(process.env.PORT??3210),'127.0.0.1',()=>console.log('ELIX accounts ready'));
+  process.umask(0o077);
+  try{
+    const config=readConfig(),app=createAccounts(config);
+    app.server.listen(config.port,'127.0.0.1',()=>console.log('ELIX accounts ready'));
+    let stopping=false;
+    const stop=async()=>{if(stopping)return;stopping=true;const deadline=setTimeout(()=>process.exit(1),25000);deadline.unref();await app.close();clearTimeout(deadline);};
+    process.once('SIGTERM',stop);process.once('SIGINT',stop);
+  }catch(error){console.error(error instanceof BrevoError?`ELIX accounts configuration: ${error.reason}`:error.message);process.exitCode=1;}
 }
