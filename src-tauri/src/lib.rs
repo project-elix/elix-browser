@@ -6,6 +6,8 @@ mod profiles;
 mod security;
 mod storage;
 mod updater;
+#[cfg(feature = "smoke-tests")]
+mod upgrade_test;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Mutex};
@@ -293,6 +295,8 @@ pub fn run() {
             #[cfg(feature = "smoke-tests")]
             let root = if std::env::args().any(|a| a == "--self-test") {
                 std::env::temp_dir().join(format!("elix-smoke-{}", uuid::Uuid::new_v4()))
+            } else if std::env::args().any(|a| a == "--upgrade-self-test") {
+                std::env::temp_dir().join("elix-upgrade-self-test")
             } else {
                 root
             };
@@ -353,6 +357,10 @@ pub fn run() {
             #[cfg(feature = "smoke-tests")]
             if std::env::args().any(|a| a == "--self-test") {
                 browser::smoke::start(app.handle().clone());
+            }
+            #[cfg(feature = "smoke-tests")]
+            if std::env::args().any(|a| a == "--upgrade-self-test") {
+                upgrade_test::start(app.handle().clone());
             }
             app.state::<AppState>()
                 .logs

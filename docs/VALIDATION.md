@@ -8,6 +8,10 @@
 - Windows GNU target type-check (Tauri, WebView2 COM hooks, updater, SQLite): passed using x86_64-pc-windows-gnu. This checks Windows-only COM calls; it does not run Windows.
 - Start-page visual inspection: passed in Chromium frontend preview. This validates layout, not WebView2 behavior. The screenshot on the public page is labeled accordingly.
 
+## Windows CI evidence
+
+Run [43874918397](https://github.com/project-elix/elix-browser/actions/runs/43874918397) passed the React tests/build, Windows Rust tests, NSIS build, silent installation and installed application startup. The newer native WebView2 and signed-upgrade jobs must also pass before their coverage is claimed.
+
 ## Required Windows release acceptance (not passed by a cross-compile)
 
 Use a disposable Windows 11 x64 VM and record runtime version, app commit, installer hash, results and screenshots.
@@ -43,3 +47,5 @@ Use a separate staging repository and owner-controlled test key. Do not reuse th
 `scripts/measure-performance.ps1` collects process-tree CPU and summed working set to CSV and enforces explicit resource budgets. Use the same VM, runtime versions, power mode, profile state, pages, extensions, warm/cold cache and duration for ELIX/Edge/Chrome. Record at least five repetitions for blank/idle, ten fixed pages and active workload. No comparative results have been collected, so no faster/lighter claim is made.
 
 The Windows CI `smoke-tests` feature launches an actual WebView2 page against a loopback HTTP fixture and checks title, load timing, HTTP status, back/forward, native DevTools open-call acceptance (visual tool inspection remains manual), separate tabs, downloaded file bytes, suspension and profile bookmark isolation. It uses a temporary profile root and exits nonzero on failure. This feature is not included in the official release workflow. The installed-launch and native smoke checks must pass in Actions before they are treated as verified.
+
+`upgrade-test.yml` builds actual 0.1.0 and 0.1.1 NSIS packages using a disposable signing key, serves them on loopback HTTPS with a certificate trusted only in the disposable Windows runner, and invokes the production updater check/download/install code. A feature-gated post-upgrade test verifies the new executable plus seeded profiles/bookmarks/history/settings/profile files. It also rejects modified bytes and a signed old installer falsely described as 0.1.1. Test keys and test installers are never published. Cookie/login survival, visual update interaction, interruptions, cancellation and power loss still require the manual acceptance steps above.

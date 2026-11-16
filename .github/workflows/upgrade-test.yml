@@ -1,0 +1,94 @@
+name: Signed Windows upgrade round trip
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/upgrade-test.yml'
+      - 'src-tauri/src/upgrade_test.rs'
+      - 'scripts/upgrade-fixture.py'
+permissions:
+  contents: read
+jobs:
+  upgrade:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: python -m pip install cryptography
+      - name: Build two versions with disposable signing key
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'elix-upgrade-origin'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+          npx tauri signer generate --ci --password '' --write-keys "$root/test.key" *> "$root/key-generation.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Ephemeral key generation failed' }
+          $private = (Get-Content "$root/test.key" -Raw).Trim()
+          Write-Output "::add-mask::$private"
+          $env:TAURI_SIGNING_PRIVATE_KEY = $private
+          $env:ELIX_UPDATE_PUBLIC_KEY = (Get-Content "$root/test.key.pub" -Raw).Trim()
+          $env:ELIX_UPDATE_BASE = 'https://127.0.0.1:44335'
+          '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"windows":{"installMode":"quiet"}}}}' | Set-Content src-tauri/tauri.release.json
+          foreach ($version in @('0.1.0','0.1.1')) {
+            node scripts/set-version.mjs $version stable
+            npm install --package-lock-only --ignore-scripts
+            cargo update --manifest-path src-tauri/Cargo.toml --workspace
+            npm run tauri build -- --features smoke-tests --config src-tauri/tauri.release.json --bundles nsis -- --locked
+            if ($LASTEXITCODE -ne 0) { throw "Build failed: $version" }
+            $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis/*_${version}_*-setup.exe" | Select-Object -First 1
+            if (!$installer) { throw "Installer not found: $version" }
+            $name = if ($version -eq '0.1.0') { 'old' } else { 'new' }
+            Copy-Item $installer.FullName "$root/$name.exe"
+            Copy-Item "$($installer.FullName).sig" "$root/$name.exe.sig"
+          }
+          Remove-Item "$root/test.key", "$root/key-generation.log"
+      - name: Install 0.1.0 and verify real signed upgrade to 0.1.1
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'elix-upgrade-origin'
+          python scripts/upgrade-fixture.py prepare $root
+          if ($LASTEXITCODE -ne 0) { throw 'HTTPS preparation failed' }
+          $cert = Import-Certificate -FilePath "$root/tls.cer" -CertStoreLocation Cert:\CurrentUser\Root
+          New-Item -ItemType Directory "$root/public" | Out-Null
+          Get-ChildItem "$root/*.exe", "$root/*.json" | Move-Item -Destination "$root/public"
+          $server = Start-Process python -ArgumentList @('scripts/upgrade-fixture.py','serve', $root) -PassThru
+          try {
+            Start-Sleep -Seconds 2
+            Invoke-WebRequest 'https://127.0.0.1:44335/stable.json' | Out-Null
+            $dest = Join-Path $env:RUNNER_TEMP 'ELIX-upgrade-install'
+            $installer = Start-Process "$root/public/old.exe" -ArgumentList @('/S', "/D=$dest") -PassThru -Wait
+            if ($installer.ExitCode -ne 0) { throw '0.1.0 install failed' }
+            $resultRoot = Join-Path ([IO.Path]::GetTempPath()) 'elix-upgrade-self-test'
+            if (Test-Path $resultRoot) { Remove-Item -Recurse -Force $resultRoot }
+            $app = Start-Process "$dest/elix-browser.exe" -ArgumentList '--upgrade-self-test' -PassThru
+            $deadline = (Get-Date).AddMinutes(4)
+            while (!(Test-Path "$resultRoot/result.txt") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            if (Test-Path "$resultRoot/verified.txt") { Get-Content "$resultRoot/verified.txt" }
+            if (!(Test-Path "$resultRoot/result.txt")) { throw 'Upgrade/restart verification timed out' }
+            $result = Get-Content "$resultRoot/result.txt" -Raw
+            Write-Output $result
+            if (!$result.StartsWith('PASS:')) { throw 'Upgrade acceptance failed' }
+            $installedVersion = (Get-Item "$dest/elix-browser.exe").VersionInfo.ProductVersion
+            if (!$installedVersion.StartsWith('0.1.1')) { throw "Unexpected installed version: $installedVersion" }
+            Copy-Item "$resultRoot/result.txt" upgrade-result.txt
+          } finally {
+            Stop-Process -Id $server.Id -ErrorAction SilentlyContinue
+            Remove-Item "Cert:\CurrentUser\Root\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
+            Remove-Item "$root/tls.key" -ErrorAction SilentlyContinue
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: signed-upgrade-test-result
+          path: upgrade-result.txt
+          if-no-files-found: warn

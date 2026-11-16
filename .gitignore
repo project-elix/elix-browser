@@ -13,3 +13,5 @@ channel-output/
 release-notes.txt
 
 src-tauri/gen/
+
+__pycache__/
