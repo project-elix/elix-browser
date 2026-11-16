@@ -15,11 +15,13 @@ pub struct Entry {
     pub time: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub developer: bool,
     pub gaming: bool,
     pub channel: String,
     pub suspend_minutes: u32,
+    pub appearance: Appearance,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -28,7 +30,45 @@ impl Default for Settings {
             gaming: false,
             channel: "stable".into(),
             suspend_minutes: 0,
+            appearance: Appearance::default(),
         }
+    }
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+pub struct Appearance {
+    pub accent: String,
+    pub background: String,
+    pub density: String,
+    pub radius: u8,
+    pub reduce_motion: bool,
+    pub gradient: bool,
+}
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            accent: "#43d3e8".into(),
+            background: "#080b12".into(),
+            density: "comfortable".into(),
+            radius: 12,
+            reduce_motion: false,
+            gradient: true,
+        }
+    }
+}
+impl Settings {
+    pub fn valid(&self) -> bool {
+        let color = |s: &str| {
+            s.len() == 7
+                && s.starts_with('#')
+                && s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+        };
+        ["stable", "beta", "developer"].contains(&self.channel.as_str())
+            && self.suspend_minutes <= 1440
+            && color(&self.appearance.accent)
+            && color(&self.appearance.background)
+            && ["comfortable", "compact"].contains(&self.appearance.density.as_str())
+            && self.appearance.radius <= 20
     }
 }
 pub struct Store {
@@ -206,6 +246,43 @@ mod tests {
         assert_eq!(s.entries(&p, "bookmarks").unwrap().len(), 1);
         assert_eq!(s.entries(&p, "history").unwrap().len(), 1);
         assert!(s.settings().developer);
+    }
+    #[test]
+    fn alpha_one_preferences_gain_theme_defaults_without_losing_values() {
+        let old: Settings = serde_json::from_str(
+            r##"{"developer":true,"gaming":true,"channel":"beta","suspend_minutes":30}"##,
+        )
+        .unwrap();
+        assert!(old.developer && old.gaming);
+        assert_eq!(old.channel, "beta");
+        assert_eq!(old.suspend_minutes, 30);
+        assert_eq!(old.appearance, Appearance::default());
+        assert!(old.valid());
+    }
+    #[test]
+    fn appearance_survives_reopen_and_rejects_css_injection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.sqlite");
+        let mut settings = Settings::default();
+        settings.appearance.background = "#f4f7fb".into();
+        settings.appearance.accent = "#1768cf".into();
+        settings.appearance.radius = 0;
+        settings.appearance.density = "compact".into();
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .set("preferences", &serde_json::to_string(&settings).unwrap())
+                .unwrap();
+        }
+        assert_eq!(
+            Store::open(&path).unwrap().settings().appearance,
+            settings.appearance
+        );
+        settings.appearance.accent = "red; background:url(https://example.com)".into();
+        assert!(!settings.valid());
+        settings.appearance.accent = "#ffffff".into();
+        settings.appearance.radius = 21;
+        assert!(!settings.valid());
     }
     #[test]
     fn newer_database_is_not_modified() {

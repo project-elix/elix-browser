@@ -1,6 +1,32 @@
 {
-  "name": "elix-browser", "version": "0.1.0", "private": true, "type": "module",
-  "scripts": {"dev":"vite --host 127.0.0.1", "build":"tsc --noEmit && vite build", "test":"vitest run", "tauri":"tauri", "desktop":"tauri dev", "check:release":"node scripts/validate-release.mjs", "version:set":"node scripts/set-version.mjs"},
-  "dependencies": {"@tauri-apps/api":"2.12.5","react":"19.2.0","react-dom":"19.2.0","lucide-react":"^0.468.0"},
-  "devDependencies": {"@tauri-apps/cli":"^2.10.0","@types/react":"^19.2.0","@types/react-dom":"^19.2.0","@vitejs/plugin-react":"^5.0.0","typescript":"^5.9.0","vite":"^7.2.0","vitest":"^4.0.0","tailwindcss":"^4.1.0","@tailwindcss/vite":"^4.1.0"}
+  "name": "elix-browser",
+  "version": "0.1.0-dev.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "tauri": "tauri",
+    "desktop": "tauri dev",
+    "check:release": "node scripts/validate-release.mjs",
+    "version:set": "node scripts/set-version.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.5",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.2.0",
+    "vitest": "^4.0.0",
+    "tailwindcss": "^4.1.0",
+    "@tailwindcss/vite": "^4.1.0"
+  }
 }

@@ -100,7 +100,23 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                             {
                                 let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                                 let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
-                                if key == 123 || (ctrl && shift && key == 73) {
+                                if key == 122
+                                    || (key == 27
+                                        && keyboard_app
+                                            .get_window("main")
+                                            .is_some_and(|w| w.is_fullscreen().unwrap_or(false)))
+                                {
+                                    args.SetHandled(true)?;
+                                    let app = keyboard_app.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        let action = if key == 122 {
+                                            crate::window::Action::ToggleFullscreen
+                                        } else {
+                                            crate::window::Action::ExitFullscreen
+                                        };
+                                        let _ = crate::window::perform(&app, action);
+                                    });
+                                } else if key == 123 || (ctrl && shift && key == 73) {
                                     args.SetHandled(true)?;
                                     let app = keyboard_app.clone();
                                     let id = keyboard_id.clone();

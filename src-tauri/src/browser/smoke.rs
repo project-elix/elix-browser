@@ -35,12 +35,19 @@ pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         let result = exercise(&app);
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: native HTTP navigation, title/status, tab switching, back/forward, DevTools, download bytes/failure, suspension, profile storage isolation, active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        let message=match result{Ok(())=>"PASS: native minimize/maximize/restore/fullscreen; native HTTP navigation, title/status, tab switching, back/forward, DevTools, download bytes/failure, suspension, profile storage isolation, active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         println!("{message}");
         if let Some(path) = std::env::var_os("ELIX_SMOKE_RESULT") {
             let _ = std::fs::write(path, &message);
         }
-        app.exit(code);
+        if code == 0 {
+            // Exercise the same persisted close path as the visible close button.
+            if crate::window::perform(&app, crate::window::Action::Close).is_err() {
+                app.exit(1);
+            }
+        } else {
+            app.exit(code);
+        }
     });
 }
 fn exercise(app: &AppHandle) -> Result<(), String> {
@@ -87,6 +94,22 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         }
     });
     std::thread::sleep(Duration::from_secs(2));
+    let main = app.get_window("main").ok_or("Missing main window")?;
+    crate::window::perform(app, crate::window::Action::Minimize)?;
+    wait(|| main.is_minimized().unwrap_or(false))?;
+    main.unminimize().map_err(|e| e.to_string())?;
+    wait(|| !main.is_minimized().unwrap_or(true))?;
+    main.unmaximize().map_err(|e| e.to_string())?;
+    wait(|| !main.is_maximized().unwrap_or(true))?;
+    crate::window::perform(app, crate::window::Action::ToggleMaximize)?;
+    wait(|| main.is_maximized().unwrap_or(false))?;
+    crate::window::perform(app, crate::window::Action::ToggleMaximize)?;
+    wait(|| !main.is_maximized().unwrap_or(true))?;
+    crate::window::perform(app, crate::window::Action::ToggleFullscreen)?;
+    wait(|| main.is_fullscreen().unwrap_or(false))?;
+    crate::window::perform(app, crate::window::Action::ExitFullscreen)?;
+    wait(|| !main.is_fullscreen().unwrap_or(true))?;
+    main.maximize().map_err(|e| e.to_string())?;
     let first =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
     wait(|| title(app, &first, "ELIX native one"))?;

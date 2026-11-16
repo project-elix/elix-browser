@@ -63,7 +63,9 @@ jobs:
           python scripts/upgrade-fixture.py prepare $root
           if ($LASTEXITCODE -ne 0) { throw 'HTTPS preparation failed' }
           Write-Output 'Trusting disposable CI certificate'
-          $cert = Import-Certificate -FilePath "$root/tls.cer" -CertStoreLocation Cert:\CurrentUser\Root
+          # Disposable hosted runner only: CurrentUser Root invokes an interactive trust dialog.
+          # Machine store avoids that dialog; TLS verification stays enabled throughout.
+          $cert = Import-Certificate -FilePath "$root/tls.cer" -CertStoreLocation Cert:\LocalMachine\Root
           New-Item -ItemType Directory "$root/public" | Out-Null
           Get-ChildItem "$root/*.exe", "$root/*.json", "$root/*.html" | Move-Item -Destination "$root/public"
           Write-Output 'Starting HTTPS fixture process'
@@ -98,7 +100,7 @@ jobs:
             if ($resultRoot -and (Test-Path "$resultRoot/progress.log")) { Copy-Item "$resultRoot/progress.log" upgrade-progress.txt; Get-Content upgrade-progress.txt }
             if ($resultRoot -and (Test-Path "$resultRoot/result.txt")) { Copy-Item "$resultRoot/result.txt" upgrade-result.txt }
             Stop-Process -Id $server.Id -ErrorAction SilentlyContinue
-            Remove-Item "Cert:\CurrentUser\Root\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
+            Remove-Item "Cert:\LocalMachine\Root\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
             Remove-Item "$root/tls.key" -ErrorAction SilentlyContinue
           }
       - uses: actions/upload-artifact@v4

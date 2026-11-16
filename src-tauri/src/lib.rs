@@ -8,6 +8,7 @@ mod storage;
 mod updater;
 #[cfg(feature = "smoke-tests")]
 mod upgrade_test;
+mod window;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Mutex};
@@ -30,6 +31,7 @@ pub struct AppState {
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Request {
     Snapshot,
+    Window { operation: window::Action },
     NewTab { url: String },
     Activate { id: String },
     Navigate { id: String, url: String },
@@ -85,6 +87,7 @@ async fn dispatch(
     authorize(&webview)?;
     let state = app.state::<AppState>();
     match request {
+        Request::Window { operation } => window::perform(&app, operation),
         Request::Snapshot => {
             let store = state.store.lock().unwrap();
             Ok(
@@ -169,9 +172,7 @@ async fn dispatch(
             Ok(Value::Null)
         }
         Request::Settings { settings } => {
-            if !["stable", "beta", "developer"].contains(&settings.channel.as_str())
-                || settings.suspend_minutes > 1440
-            {
+            if !settings.valid() {
                 return Err("Ugyldige innstillinger".into());
             }
             if state.updates.busy.load(std::sync::atomic::Ordering::SeqCst) {
@@ -330,8 +331,10 @@ pub fn run() {
             });
             let window = tauri::window::WindowBuilder::new(app, "main")
                 .title("ELIX Browser")
+                .decorations(false)
+                .shadow(true)
                 .theme(Some(tauri::Theme::Dark))
-                .inner_size(1380., 900.)
+                .inner_size(1000., 700.)
                 .min_inner_size(900., 600.)
                 .maximized(true)
                 .build()?;
@@ -398,6 +401,9 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Resized(_)) {
+                window::emit(window.app_handle());
+            }
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                 let _ = browser::persist(window.app_handle());
             }
