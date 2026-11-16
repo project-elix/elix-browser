@@ -28,8 +28,10 @@ jobs:
         run: |
           if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+-(beta|dev)\.\d+$') { throw 'Invalid version' }
           if ($env:SOURCE_SHA -notmatch '^[a-f0-9]{40}$') { throw 'Invalid source SHA' }
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/v$env:RELEASE_VERSION" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or !$release.draft -or $release.target_commitish -ne $env:SOURCE_SHA) { throw 'Draft source mismatch' }
+          $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
+          $matches = @($releases | Where-Object { $_.tag_name -eq "v$env:RELEASE_VERSION" -and $_.draft })
+          if ($LASTEXITCODE -ne 0 -or $matches.Count -ne 1 -or $matches[0].target_commitish -ne $env:SOURCE_SHA) { throw 'Draft source mismatch' }
+          $release = $matches[0]
           gh release download "v$env:RELEASE_VERSION" --repo $env:GITHUB_REPOSITORY --pattern '*.exe' --pattern '*.sig' --dir signed-input
           if ($LASTEXITCODE -ne 0) { throw 'Draft download failed' }
           $files = @(Get-ChildItem signed-input/*.exe)

@@ -22,7 +22,7 @@ $clock = [Diagnostics.Stopwatch]::StartNew()
 $ready = $false
 try {
   $addressCondition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'Adressefelt')
-  $searchCondition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'Søk fra startsiden')
+  $searchCondition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,('S'+[char]0x00f8+'k fra startsiden'))
   while ($clock.Elapsed.TotalSeconds -lt 120) {
     $app.Refresh()
     if ($app.HasExited) { throw 'Production browser exited during startup' }
