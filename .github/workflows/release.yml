@@ -63,6 +63,30 @@ jobs:
         run: |
           @{bundle=@{createUpdaterArtifacts=$true};plugins=@{updater=@{pubkey=$env:ELIX_UPDATE_PUBLIC_KEY}}} | ConvertTo-Json -Depth 6 | Set-Content src-tauri/tauri.release.json
       - run: npm run tauri build -- --config src-tauri/tauri.release.json --bundles nsis -- --locked
+      - name: Verify the signed distributable installs and starts
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $dest = Join-Path $env:RUNNER_TEMP 'ELIX-signed-install'
+          $p = Start-Process $installer.FullName -ArgumentList @('/S', "/D=$dest") -PassThru
+          if (!$p.WaitForExit(120000) -or $p.ExitCode -ne 0) { throw 'Signed installer failed' }
+          $app = Start-Process "$dest/elix-browser.exe" -PassThru
+          Start-Sleep -Seconds 12
+          $app.Refresh()
+          if ($app.HasExited) { throw 'Signed release exited at startup' }
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $screen = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $image = [Drawing.Bitmap]::new($screen.Width,$screen.Height)
+          $graphics = [Drawing.Graphics]::FromImage($image)
+          try {
+            $graphics.CopyFromScreen($screen.Location,[Drawing.Point]::Empty,$screen.Size)
+            $image.Save((Join-Path $PWD 'signed-release.png'),[Drawing.Imaging.ImageFormat]::Png)
+          } finally { $graphics.Dispose(); $image.Dispose() }
+          Stop-Process -Id $app.Id
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-release-screenshot
+          path: signed-release.png
       - name: Create immutable draft with installer and signature
         shell: pwsh
         env:

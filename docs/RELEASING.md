@@ -2,7 +2,7 @@
 
 ## Repository configuration
 
-The `release-signing` and `release-publication` environments have been created in `project-elix/elix-browser`, restricted to the `main` branch, with `andreasdan04` as required reviewer and administrator bypass disabled. Self-review remains permitted so the sole owner can approve a manually started release. No permanent signing secret or public-key variable has been configured.
+The `release-signing` and `release-publication` environments have been created in `project-elix/elix-browser`, restricted to the `main` branch, with `andreasdan04` as required reviewer and administrator bypass disabled. Self-review remains permitted so the sole owner can approve a manually started release. Permanent encrypted updater key and password are configured as environment secrets in `release-signing`, together with the `ELIX_UPDATE_PUBLIC_KEY` environment variable. Public-key SHA-256 fingerprint: `515739145370edcde3ba17444835187376930f98e2e182d2f0023535c24ca847`. No Windows Authenticode publisher certificate is configured.
 
 ## One-time owner setup
 
@@ -14,7 +14,7 @@ The `release-signing` and `release-publication` environments have been created i
    ```
 
    Keep an encrypted offline backup. Do not commit the key or paste it in chat.
-3. Store the private-key contents in GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY`, and its password in `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, scoped to `release-signing`. Put the public-key contents in repository variable `ELIX_UPDATE_PUBLIC_KEY`. CI embeds the public key and HTTPS channel base into the Rust binary.
+3. Store the private-key contents in GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY`, and its password in `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, scoped to `release-signing`. Put the public-key contents in environment variable `ELIX_UPDATE_PUBLIC_KEY` in `release-signing`. CI embeds the public key and HTTPS channel base into the Rust binary.
 4. Verify the CI installer smoke test, run the Windows acceptance checklist and the signed updater round trip. Complete publisher details/privacy contact; decide and configure Authenticode signing before broad public distribution. Tauri signing does not establish SmartScreen reputation.
 
 No keys are included in this source. Ordinary development builds use an empty updater configuration and report `unconfigured`; they cannot silently accept unsigned updates.
