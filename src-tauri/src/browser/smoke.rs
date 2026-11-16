@@ -56,7 +56,14 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             let size = stream.read(&mut request).unwrap_or(0);
             let request = String::from_utf8_lossy(&request[..size]);
             if request.starts_with("GET /broken ") {
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=broken.txt\r\nConnection: close\r\n\r\npartial");
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=broken.txt\r\nConnection: close\r\n\r\n");
+                // Commit the download before disconnecting mid-transfer. An already
+                // truncated response can be retried as a failed navigation instead.
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(500));
+                let _ = stream.write_all(b"partial");
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(500));
                 continue;
             }
             let download = request.starts_with("GET /download ");

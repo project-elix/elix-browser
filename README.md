@@ -6,6 +6,10 @@ Product site: https://elix-browser-download.andreasdan04.chatgpt.site
 
 **Version 0.1.0 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
 
+## Alpha test for Windows
+
+A standalone **Alpha 1 (0.1.0-dev.1)** installer is built and published by the `Publish Windows Alpha` workflow after Windows verification. It needs no personal server. Automatic ELIX updates are disabled and the installer is not Authenticode-signed. See [alpha installation and testing](docs/ALPHA.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
+
 ## Run on Windows
 
 Install Node.js 24 LTS, stable Rust (MSVC), Visual Studio 2022 Build Tools with **Desktop development with C++**, and Microsoft Edge WebView2 Evergreen Runtime.

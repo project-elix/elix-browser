@@ -10,6 +10,7 @@ concurrency:
   group: elix-alpha
   cancel-in-progress: false
 jobs:
+  # Includes a real mid-transfer disconnect after the download has started.
   verify:
     uses: ./.github/workflows/ci.yml
   publish:
