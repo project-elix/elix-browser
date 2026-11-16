@@ -2,9 +2,23 @@
 use crate::{storage::Settings, AppState};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::UpdaterExt;
+fn stage(app: &AppHandle, value: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(app.state::<AppState>().root.join("progress.log"))
+    {
+        let _ = writeln!(file, "{} {value}", chrono::Utc::now());
+    }
+}
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
+        stage(
+            &app,
+            "Application started; waiting for shell initialization",
+        );
         // Let the shell finish its normal initial update check first.
         std::thread::sleep(std::time::Duration::from_secs(12));
         let result = tauri::async_runtime::block_on(exercise(&app));
@@ -20,6 +34,7 @@ pub fn start(app: AppHandle) {
 
 async fn exercise(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
+    stage(app, "Beginning version/data verification");
     let version = app.package_info().version.to_string();
     if version == "0.1.1" {
         {
@@ -52,6 +67,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
                 return Err("Missing original version marker".into());
             }
         }
+        stage(app, "Checking persisted cookies after upgrade");
         check_cookies(app, false).await?;
         return Ok(());
     }
@@ -83,6 +99,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
         )?;
         store.set("upgrade_seed_version", "0.1.0")?;
     }
+    stage(app, "Seeding real profile cookies");
     check_cookies(app, true).await?;
     let base = option_env!("ELIX_UPDATE_BASE").ok_or("Missing HTTPS fixture")?;
     if base != "https://127.0.0.1:44335" {
@@ -91,6 +108,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     // Real Tauri verification must reject both modified bytes and a valid OLD signature
     // whose unsigned metadata lies about the version. No installer is called here.
     for case in ["corrupt", "replay"] {
+        stage(app, &format!("Rejecting {case} artifact"));
         let candidate = app
             .updater_builder()
             .pubkey(option_env!("ELIX_UPDATE_PUBLIC_KEY").unwrap_or_default())
@@ -98,6 +116,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
                 url::Url::parse(&format!("{base}/{case}.json")).unwrap()
             ])
             .map_err(|e| e.to_string())?
+            .timeout(std::time::Duration::from_secs(20))
             .build()
             .map_err(|e| e.to_string())?
             .check()
@@ -108,10 +127,12 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
             return Err(format!("Security failure: {case} artifact accepted"));
         }
     }
+    stage(app, "Checking real signed update");
     let offered = crate::updater::check(app).await?;
     if offered["version"] != "0.1.1" {
         return Err("0.1.1 not detected".into());
     }
+    stage(app, "Downloading and verifying signed update");
     let ready = crate::updater::download(app).await?;
     if ready["state"] != "ready" {
         return Err("Signed download not ready".into());
@@ -122,6 +143,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     // The real NSIS updater exits this process and restarts with the original argument.
+    stage(app, "Starting signed NSIS installation");
     crate::updater::install(app)?;
     Err("Installer unexpectedly returned without restarting".into())
 }
