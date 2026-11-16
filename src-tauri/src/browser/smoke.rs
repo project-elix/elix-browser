@@ -6,7 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
+#[track_caller]
 fn wait(mut condition: impl FnMut() -> bool) -> Result<(), String> {
+    let caller = std::panic::Location::caller();
     let until = Instant::now() + Duration::from_secs(25);
     while Instant::now() < until {
         if condition() {
@@ -14,7 +16,11 @@ fn wait(mut condition: impl FnMut() -> bool) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err("Native test condition timed out".into())
+    Err(format!(
+        "Native test condition timed out at {}:{}",
+        caller.file(),
+        caller.line()
+    ))
 }
 fn title(app: &AppHandle, id: &str, expected: &str) -> bool {
     app.state::<AppState>()
@@ -29,7 +35,7 @@ pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         let result = exercise(&app);
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: native HTTP navigation, title/status, tab switching, back/forward, DevTools, download bytes/failure, suspension, profile storage isolation, active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}")};
+        let message=match result{Ok(())=>"PASS: native HTTP navigation, title/status, tab switching, back/forward, DevTools, download bytes/failure, suspension, profile storage isolation, active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         println!("{message}");
         if let Some(path) = std::env::var_os("ELIX_SMOKE_RESULT") {
             let _ = std::fs::write(path, &message);
@@ -109,9 +115,14 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         "devtools".into(),
         true,
     ))?;
-    view.eval("(async()=>{if(!window.__TAURI_INTERNALS__?.invoke){document.title='ELIX IPC denied';return}try{await window.__TAURI_INTERNALS__.invoke('dispatch',{request:{action:'snapshot'}});document.title='ELIX IPC allowed'}catch{document.title='ELIX IPC denied'}})()")
+    if crate::authorize(&view).is_ok() {
+        return Err("Remote native view passed IPC authorization".into());
+    }
+    // An inaccessible IPC transport may never settle its Promise. Distinguish that
+    // from an accepted call; the backend authorization is independently asserted above.
+    view.eval("(async()=>{document.title='ELIX IPC pending';if(!window.__TAURI_INTERNALS__?.invoke){document.title='ELIX IPC denied';return}const result=await Promise.race([window.__TAURI_INTERNALS__.invoke('dispatch',{request:{action:'snapshot'}}).then(()=> 'allowed',()=> 'denied'),new Promise(resolve=>setTimeout(()=>resolve('unreachable'),2000))]);document.title='ELIX IPC '+result})()")
         .map_err(|e| e.to_string())?;
-    wait(|| title(app, &first, "ELIX IPC denied"))?;
+    wait(|| title(app, &first, "ELIX IPC denied") || title(app, &first, "ELIX IPC unreachable"))?;
     let second =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
     wait(|| title(app, &second, "ELIX native one"))?;

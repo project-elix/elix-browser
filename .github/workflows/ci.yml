@@ -53,7 +53,7 @@ jobs:
       - name: Native WebView2 integration test
         shell: pwsh
         run: |
-          $env:ELIX_SMOKE_RESULT = Join-Path $env:RUNNER_TEMP "native-smoke.txt"
+          $env:ELIX_SMOKE_RESULT = Join-Path $PWD "native-smoke.txt"
           $test = Start-Process "$env:RUNNER_TEMP/ELIX-smoke/elix-browser.exe" -ArgumentList "--self-test" -PassThru
           if (!$test.WaitForExit(180000)) { Stop-Process -Id $test.Id; throw "Native smoke test timed out" }
           if (Test-Path $env:ELIX_SMOKE_RESULT) { Get-Content $env:ELIX_SMOKE_RESULT }
@@ -69,3 +69,11 @@ jobs:
             performance.csv
             windows-start.png
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ELIX-Windows-test-diagnostics
+          path: |
+            windows-start.png
+            native-smoke.txt
+          if-no-files-found: warn
