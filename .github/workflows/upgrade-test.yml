@@ -23,6 +23,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
       - run: npm ci
       - run: python -m pip install cryptography
       - name: Build two versions with disposable signing key
@@ -38,7 +39,7 @@ jobs:
           $env:TAURI_SIGNING_PRIVATE_KEY = $private
           $env:ELIX_UPDATE_PUBLIC_KEY = (Get-Content "$root/test.key.pub" -Raw).Trim()
           $env:ELIX_UPDATE_BASE = 'https://127.0.0.1:44335'
-          '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"windows":{"installMode":"quiet"}}}}' | Set-Content src-tauri/tauri.release.json
+          @{bundle=@{createUpdaterArtifacts=$true};plugins=@{updater=@{pubkey=$env:ELIX_UPDATE_PUBLIC_KEY;windows=@{installMode="quiet"}}}} | ConvertTo-Json -Depth 6 | Set-Content src-tauri/tauri.release.json
           foreach ($version in @('0.1.0','0.1.1')) {
             node scripts/set-version.mjs $version stable
             npm install --package-lock-only --ignore-scripts

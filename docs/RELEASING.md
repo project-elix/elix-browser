@@ -1,8 +1,12 @@
 # Release setup and operations
 
+## Repository configuration
+
+The `release-signing` and `release-publication` environments have been created in `project-elix/elix-browser`, restricted to the `main` branch, with `andreasdan04` as required reviewer and administrator bypass disabled. Self-review remains permitted so the sole owner can approve a manually started release. No permanent signing secret or public-key variable has been configured.
+
 ## One-time owner setup
 
-1. In GitHub, create `release-signing` and `release-publication` Environments. Restrict deployment to protected `main`; require appropriate reviewers for publication, prevent self-review where available. Require PR checks and reviews on main, protect version tags, require organization 2FA. YAML references do not create approval policies automatically.
+1. Retain the configured Environment protection. Before adding more maintainers, require PR checks/reviews on main, protect version tags and require organization 2FA. Add a second reviewer if independent approval is desired. YAML references alone do not create approval policies.
 2. Generate a signing key on an owner-controlled machine using the installed, locked Tauri CLI:
 
    ```powershell

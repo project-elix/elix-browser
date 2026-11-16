@@ -54,7 +54,7 @@ jobs:
       - name: Enable signed updater artifacts
         shell: pwsh
         run: |
-          '{"bundle":{"createUpdaterArtifacts":true}}' | Out-File -Encoding utf8 src-tauri/tauri.release.json
+          @{bundle=@{createUpdaterArtifacts=$true};plugins=@{updater=@{pubkey=$env:ELIX_UPDATE_PUBLIC_KEY}}} | ConvertTo-Json -Depth 6 | Set-Content src-tauri/tauri.release.json
       - run: npm run tauri build -- --config src-tauri/tauri.release.json --bundles nsis -- --locked
       - name: Create immutable draft with installer and signature
         shell: pwsh
