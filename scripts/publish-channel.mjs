@@ -1,8 +1,9 @@
-import{execFileSync}from'node:child_process';import{readFileSync,writeFileSync,mkdirSync}from'node:fs';import{makeManifest,validateVersion,isNewer}from'./release-lib.mjs';
+import{execFileSync}from'node:child_process';import{readFileSync,writeFileSync,mkdirSync}from'node:fs';import{makeManifest,validateVersion,isNewer,findDraft}from'./release-lib.mjs';
 const repo=process.env.GITHUB_REPOSITORY,version=process.env.RELEASE_VERSION,channel=process.env.RELEASE_CHANNEL;validateVersion(version,channel);if(!/^[-\w]+\/[-\w]+$/.test(repo))throw new Error('Invalid repository');
 const gh=(...args)=>execFileSync('gh',args,{encoding:'utf8'});const tag=`v${version}`;
-const release=JSON.parse(gh('api',`repos/${repo}/releases/tags/${tag}`));
-if(!release.draft)throw new Error('Refuse to replace an existing published release');
+// The tag endpoint only resolves published releases; authenticated listing includes drafts.
+const releases=JSON.parse(gh('api','--paginate','--slurp',`repos/${repo}/releases?per_page=100`)).flat();
+const release=findDraft(releases,tag,process.env.ELIX_EXPECTED_SOURCE??process.env.GITHUB_SHA);
 const exe=release.assets.filter(a=>a.name.endsWith('.exe'));if(exe.length!==1)throw new Error('Expected one NSIS installer');
 const sig=release.assets.find(a=>a.name===exe[0].name+'.sig');if(!sig)throw new Error('Missing signature asset');
 mkdirSync('channel-output',{recursive:true});gh('release','download',tag,'--repo',repo,'--pattern',sig.name,'--dir','channel-output','--clobber');

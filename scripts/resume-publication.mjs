@@ -1,0 +1,10 @@
+import {execFileSync} from 'node:child_process';
+import {verifiedReleaseSource} from './release-lib.mjs';
+const repo=process.env.GITHUB_REPOSITORY, runId=process.env.SOURCE_RUN_ID;
+if(!/^[-\w]+\/[-\w]+$/.test(repo)||!/^\d+$/.test(runId??''))throw new Error('Invalid repository/run');
+const api=(path,...args)=>JSON.parse(execFileSync('gh',['api',path,...args],{encoding:'utf8'}));
+const run=api(`repos/${repo}/actions/runs/${runId}`);
+const jobs=api(`repos/${repo}/actions/runs/${runId}/jobs?per_page=100`,'--paginate','--slurp').flatMap(page=>page.jobs);
+process.env.ELIX_EXPECTED_SOURCE=verifiedReleaseSource(run,jobs);
+console.log(`Publishing only the existing draft from verified source ${process.env.ELIX_EXPECTED_SOURCE}`);
+await import('./publish-channel.mjs');

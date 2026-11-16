@@ -10,3 +10,20 @@ export function makeManifest({version,channel,notes,url,signature,date}){
  return {version,notes,pub_date:date,platforms:{'windows-x86_64':{url:u.href,signature:signature.trim()}}};
 }
 export function isNewer(a,b){const parts=v=>{const m=/^(\d+)\.(\d+)\.(\d+)(?:-(beta|dev)\.(\d+))?$/.exec(v);if(!m)throw new Error('Invalid previous channel version');return [Number(m[1]),Number(m[2]),Number(m[3]),m[4]?0:1,m[4]??'',Number(m[5]??0)];};const x=parts(a),y=parts(b);for(let i=0;i<x.length;i++){if(x[i]!==y[i])return x[i]>y[i]}return false;}
+
+export function findDraft(releases,tag,source){
+ const matches=releases.filter(r=>r.tag_name===tag);
+ if(matches.length!==1)throw new Error('Expected exactly one release draft');
+ const release=matches[0];
+ if(!release.draft)throw new Error('Refuse to replace an existing published release');
+ if(!/^[a-f0-9]{40}$/.test(source??'')||release.target_commitish!==source)throw new Error('Draft does not match verified source');
+ return release;
+}
+export function verifiedReleaseSource(run,jobs){
+ if(run.path!=='.github/workflows/release.yml'||run.event!=='workflow_dispatch'||run.head_branch!=='main'||run.status!=='completed'||!/^[a-f0-9]{40}$/.test(run.head_sha??''))throw new Error('Expected completed main release workflow');
+ for(const name of ['native-verification / windows','upgrade-verification / upgrade','build']){
+  const matches=jobs.filter(j=>j.name===name);
+  if(matches.length!==1||matches[0].run_id!==run.id||matches[0].conclusion!=='success')throw new Error(`Required release gate did not pass: ${name}`);
+ }
+ return run.head_sha;
+}

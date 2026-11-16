@@ -1,0 +1,43 @@
+name: Resume verified draft publication
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Original release run with successful native, upgrade and build jobs
+        required: true
+        type: string
+      version:
+        description: Exact version of the existing signed draft
+        required: true
+        type: string
+      channel:
+        description: Release channel
+        required: true
+        type: choice
+        options: [stable, beta, developer]
+permissions:
+  contents: read
+concurrency:
+  group: elix-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release-publication
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_CHANNEL: ${{ inputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm test
+      - run: node scripts/resume-publication.mjs
