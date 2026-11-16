@@ -14,24 +14,33 @@ permissions:
   contents: read
 jobs:
   verify:
-    if: github.ref == 'refs/heads/main'
+    # One authorized execution only: all later dispatches and retries are denied.
+    if: github.run_number == '3' && github.run_attempt == '1' && github.actor == 'andreasdan04' && github.ref == 'refs/heads/main' && inputs.version == '0.1.1-beta.1' && inputs.source_sha == '71da83cc856978398d0daaabd77c4e30e95ba14d'
     runs-on: windows-latest
     timeout-minutes: 10
+    environment: release-signing
+    # Temporary Beta 1 review access, explicitly approved by the owner.
+    # Remove after the review; GitHub requires push access to list drafts.
+    permissions:
+      contents: write
     env:
-      GH_TOKEN: ${{ github.token }}
       RELEASE_VERSION: ${{ inputs.version }}
       SOURCE_SHA: ${{ inputs.source_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Fetch exact existing draft without rebuilding or publishing
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+-(beta|dev)\.\d+$') { throw 'Invalid version' }
           if ($env:SOURCE_SHA -notmatch '^[a-f0-9]{40}$') { throw 'Invalid source SHA' }
           $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
-          $matches = @($releases | Where-Object { $_.tag_name -eq "v$env:RELEASE_VERSION" -and $_.draft })
-          if ($LASTEXITCODE -ne 0 -or $matches.Count -ne 1 -or $matches[0].target_commitish -ne $env:SOURCE_SHA) { throw 'Draft source mismatch' }
-          $release = $matches[0]
+          $drafts = @($releases | Where-Object { $_.tag_name -eq "v$env:RELEASE_VERSION" -and $_.draft })
+          if ($LASTEXITCODE -ne 0 -or $drafts.Count -ne 1 -or $drafts[0].target_commitish -ne $env:SOURCE_SHA) { throw 'Draft source mismatch' }
+          $release = $drafts[0]
           gh release download "v$env:RELEASE_VERSION" --repo $env:GITHUB_REPOSITORY --pattern '*.exe' --pattern '*.sig' --dir signed-input
           if ($LASTEXITCODE -ne 0) { throw 'Draft download failed' }
           $files = @(Get-ChildItem signed-input/*.exe)
