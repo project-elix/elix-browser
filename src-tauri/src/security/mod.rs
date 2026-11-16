@@ -6,6 +6,7 @@ pub const INTERNAL_PAGES: &[&str] = &[
     "elix://start",
     "elix://developer",
     "elix://settings",
+    "elix://profiles",
     "elix://bookmarks",
     "elix://history",
     "elix://downloads",

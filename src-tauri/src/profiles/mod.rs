@@ -1,3 +1,4 @@
+pub mod accounts;
 use std::path::{Path, PathBuf};
 pub fn directory(root: &Path, id: &str) -> Result<PathBuf, String> {
     if !crate::security::valid_profile(id) {

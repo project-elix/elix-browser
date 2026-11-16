@@ -103,6 +103,9 @@ mod native {
 
     fn emit(app: &AppHandle) {
         let prompts = snapshot(app);
+        app.state::<AppState>()
+            .permissions_visible
+            .store(!prompts.is_empty(), std::sync::atomic::Ordering::SeqCst);
         let active = app
             .state::<AppState>()
             .session
@@ -113,15 +116,19 @@ mod native {
         if !prompts.is_empty() {
             // Native child WebViews cover HTML dialogs. Hide the page until the
             // entire request batch is resolved so Allow/Deny remains accessible.
-            if let Some(view) = app.get_webview(&active) {
-                let _ = view.hide();
+            for (id, view) in app.webviews() {
+                if id.starts_with("tab-") {
+                    let _ = view.hide();
+                }
             }
             if let Some(shell) = app.get_webview("shell") {
                 let _ = shell.set_focus();
             }
-        } else if let Some(view) = app.get_webview(&active) {
-            let _ = view.show();
-            let _ = view.set_focus();
+        } else {
+            let _ = crate::browser::organization::layout(app);
+            if let Some(view) = app.get_webview(&active) {
+                let _ = view.set_focus();
+            }
         }
         let _ = app.emit_to("shell", "site-permissions", prompts);
     }
@@ -167,6 +174,8 @@ mod native {
                             value.PermissionKind(&mut kind)?;
                             if kind != COREWEBVIEW2_PERMISSION_KIND_CAMERA
                                 && kind != COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
+                                && kind != COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION
+                                && kind != COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS
                             {
                                 continue;
                             }
@@ -218,6 +227,8 @@ mod native {
                             let kind = match kind {
                                 COREWEBVIEW2_PERMISSION_KIND_CAMERA => "camera",
                                 COREWEBVIEW2_PERMISSION_KIND_MICROPHONE => "microphone",
+                                COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION => "location",
+                                COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS => "notifications",
                                 _ => return Ok(()),
                             };
                             let mut raw = PWSTR::null();
@@ -239,6 +250,23 @@ mod native {
                             let Some(top_origin) = media_origin(&tab.url) else {
                                 return Ok(());
                             };
+                            // Saved choices are profile scoped and only apply to the top-level origin.
+                            // Private and third-party frame requests always ask separately.
+                            if !tab.private && origin == top_origin {
+                                let profile = state.profile.lock().unwrap().clone();
+                                let choice = state
+                                    .store
+                                    .lock()
+                                    .unwrap()
+                                    .permission(&profile, &origin, kind);
+                                if choice == "allow" {
+                                    args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+                                    return Ok(());
+                                }
+                                if choice == "deny" {
+                                    return Ok(());
+                                }
+                            }
                             if PENDING.with(|pending| pending.borrow().len() >= 8) {
                                 return Ok(());
                             }

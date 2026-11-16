@@ -17,6 +17,10 @@ use tauri_plugin_dialog::DialogExt;
 
 pub struct AppState {
     root: PathBuf,
+    download_root: PathBuf,
+    window_id: String,
+    recovered: bool,
+    permissions_visible: std::sync::atomic::AtomicBool,
     store: Mutex<storage::Store>,
     profile: Mutex<String>,
     session: Mutex<browser::Session>,
@@ -31,6 +35,67 @@ pub struct AppState {
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Request {
     Snapshot,
+    WindowReady,
+    ReopenTab,
+    RecoverWindows,
+    ReorderTab {
+        id: String,
+        before: String,
+    },
+    DetachTab {
+        id: String,
+        #[serde(default)]
+        outside_only: bool,
+    },
+    Workspace {
+        name: String,
+    },
+    GroupTab {
+        id: String,
+        group: String,
+        workspace: String,
+    },
+    Split {
+        other: Option<String>,
+    },
+    MuteTab {
+        id: String,
+        muted: bool,
+    },
+    RecoverTab {
+        id: String,
+    },
+    ImportBookmarks {
+        items: Vec<storage::Entry>,
+    },
+    Cookies {
+        origin: String,
+        #[serde(default)]
+        delete: bool,
+    },
+    SavedPermissions {
+        origin: String,
+    },
+    SavePermission {
+        origin: String,
+        kind: String,
+        decision: String,
+    },
+    DefaultBrowser,
+    Account {
+        profile: String,
+        operation: String,
+        #[serde(default)]
+        payload: Value,
+    },
+    SyncExport {
+        profile: String,
+    },
+    SyncApply {
+        profile: String,
+        items: Vec<storage::Entry>,
+        appearance: storage::Appearance,
+    },
     Window {
         operation: window::Action,
     },
@@ -148,11 +213,133 @@ async fn dispatch(
     authorize(&webview)?;
     let state = app.state::<AppState>();
     match request {
+        Request::Account {
+            profile,
+            operation,
+            payload,
+        } => profiles::accounts::request(app.clone(), profile, operation, payload).await,
+        Request::SyncExport { profile } => {
+            if *state.profile.lock().unwrap() != profile {
+                return Err("Profilen ble endret".into());
+            }
+            let p = state.profile.lock().unwrap().clone();
+            let store = state.store.lock().unwrap();
+            let mut items = store.entries(&p, "bookmarks")?;
+            if items.len() > 5000 {
+                return Err("Maksimalt 5000 bokmerker for synkronisering".into());
+            }
+            for item in &mut items {
+                item.favicon = None;
+            }
+            Ok(json!({"version":1,"items":items,"appearance":store.settings().appearance}))
+        }
+        Request::SyncApply {
+            profile,
+            items,
+            appearance,
+        } => {
+            if *state.profile.lock().unwrap() != profile {
+                return Err("Profilen ble endret".into());
+            }
+            let p = state.profile.lock().unwrap().clone();
+            let store = state.store.lock().unwrap();
+            let mut settings = store.settings();
+            settings.appearance = appearance;
+            if !settings.valid() {
+                return Err("Ugyldig synkronisert utseende".into());
+            }
+            let count = store.import_bookmarks(&p, items)?;
+            store.set(
+                "preferences",
+                &serde_json::to_string(&settings).map_err(|e| e.to_string())?,
+            )?;
+            Ok(json!(count))
+        }
         Request::Window { operation } => window::perform(&app, operation),
+        Request::WindowReady => {
+            browser::detach::ready(&app);
+            Ok(Value::Null)
+        }
+        Request::RecoverWindows => Ok(json!(browser::detach::recover_windows(&app)?)),
+        Request::ReopenTab => {
+            browser::organization::reopen(&app)?;
+            Ok(Value::Null)
+        }
+        Request::ReorderTab { id, before } => {
+            browser::organization::reorder(&app, &id, &before)?;
+            Ok(Value::Null)
+        }
+        Request::DetachTab { id, outside_only } => Ok(json!(
+            browser::detach::detach(app.clone(), id, outside_only).await?
+        )),
+        Request::Workspace { name } => {
+            browser::organization::workspace(&app, &name)?;
+            Ok(Value::Null)
+        }
+        Request::GroupTab {
+            id,
+            group,
+            workspace,
+        } => {
+            browser::organization::group(&app, &id, &group, &workspace)?;
+            Ok(Value::Null)
+        }
+        Request::Split { other } => {
+            browser::organization::split(&app, other)?;
+            Ok(Value::Null)
+        }
+        Request::MuteTab { id, muted } => {
+            browser::organization::mute(&app, &id, muted).await?;
+            Ok(Value::Null)
+        }
+        Request::RecoverTab { id } => {
+            browser::organization::recover(&app, &id)?;
+            Ok(Value::Null)
+        }
+        Request::Cookies { origin, delete } => {
+            browser::site_data::cookies(&app, origin, delete).await
+        }
+        Request::SavedPermissions { origin } => {
+            let p = state.profile.lock().unwrap().clone();
+            let store = state.store.lock().unwrap();
+            Ok(json!(["camera", "microphone", "location", "notifications"]
+                .iter()
+                .map(|kind| json!({"kind":kind,"decision":store.permission(&p,&origin,kind)}))
+                .collect::<Vec<_>>()))
+        }
+        Request::SavePermission {
+            origin,
+            kind,
+            decision,
+        } => {
+            let p = state.profile.lock().unwrap().clone();
+            state
+                .store
+                .lock()
+                .unwrap()
+                .set_permission(&p, &origin, &kind, &decision)?;
+            Ok(Value::Null)
+        }
+        Request::DefaultBrowser => {
+            #[cfg(windows)]
+            std::process::Command::new("explorer.exe")
+                .arg("ms-settings:defaultapps?registeredAppUser=ELIX%20Browser")
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            #[cfg(not(windows))]
+            return Err("Krever Windows".into());
+            #[allow(unreachable_code)]
+            Ok(Value::Null)
+        }
+        Request::ImportBookmarks { items } => {
+            let p = state.profile.lock().unwrap().clone();
+            let count = state.store.lock().unwrap().import_bookmarks(&p, items)?;
+            Ok(json!(count))
+        }
         Request::Snapshot => {
             let store = state.store.lock().unwrap();
             Ok(
-                json!({"session":state.session.lock().unwrap().clone(),"profiles":store.profiles()?,"profile":state.profile.lock().unwrap().clone(),"settings":store.settings(),"version":env!("CARGO_PKG_VERSION"),"updater_configured":updater::configured()}),
+                json!({"session":state.session.lock().unwrap().clone(),"profiles":store.profiles()?,"profile":state.profile.lock().unwrap().clone(),"settings":store.settings(),"version":env!("CARGO_PKG_VERSION"),"updater_configured":updater::configured(),"recovered":state.recovered}),
             )
         }
         Request::NewTab { url, private } => Ok(json!(
@@ -180,16 +367,25 @@ async fn dispatch(
             Ok(Value::Null)
         }
         Request::Bounds { bounds } => {
-            let active = state.session.lock().unwrap().active.clone();
-            if let Some(v) = app.get_webview(&active) {
-                browser::engine::bounds(&v, bounds)?;
-            }
             *state.bounds.lock().unwrap() = bounds;
+            browser::organization::layout(&app)?;
             Ok(Value::Null)
         }
         Request::Engine { id, operation } => {
             if !["back", "forward", "reload", "stop", "devtools"].contains(&operation.as_str()) {
                 return Err("Ukjent handling".into());
+            }
+            if operation == "reload"
+                && state
+                    .session
+                    .lock()
+                    .unwrap()
+                    .tabs
+                    .iter()
+                    .any(|t| t.id == id && t.crashed)
+            {
+                browser::organization::recover(&app, &id)?;
+                return Ok(Value::Null);
             }
             let dev = state.store.lock().unwrap().settings().developer;
             if operation == "devtools" && !dev {
@@ -226,6 +422,11 @@ async fn dispatch(
                 .lock()
                 .unwrap()
                 .bookmark(&p, &tab.url, &tab.title)?;
+            state
+                .store
+                .lock()
+                .unwrap()
+                .bookmark_icon(&p, &tab.url, tab.favicon.as_deref())?;
             Ok(Value::Null)
         }
         Request::RemoveBookmark { id } => {
@@ -450,7 +651,10 @@ pub fn run() {
             std::fs::create_dir_all(&root)?;
             let store =
                 storage::Store::open(&root.join("elix.sqlite")).map_err(std::io::Error::other)?;
-            let profile = store
+            let (window_id, handoff) = browser::detach::startup().map_err(std::io::Error::other)?;
+            let window_id =
+                browser::detach::claim_window(&store, window_id).map_err(std::io::Error::other)?;
+            let mut profile = store
                 .get("active_profile")
                 .filter(|id| {
                     store
@@ -462,9 +666,35 @@ pub fn run() {
                         .id
                         .clone(),
                 );
-            let downloads = downloads::history::load(&root).map_err(std::io::Error::other)?;
+            if let Some(h) = &handoff {
+                if !h.profile.is_empty()
+                    && store
+                        .profiles()
+                        .map_err(std::io::Error::other)?
+                        .iter()
+                        .any(|p| p.id == h.profile)
+                {
+                    profile = h.profile.clone();
+                }
+            }
+            let recovered = store.get(&format!("dirty:{window_id}")).as_deref() == Some("true");
+            store
+                .set(&format!("dirty:{window_id}"), "true")
+                .map_err(std::io::Error::other)?;
+            let download_root = if window_id == "main" {
+                root.clone()
+            } else {
+                root.join("windows").join(&window_id)
+            };
+            std::fs::create_dir_all(&download_root)?;
+            let downloads =
+                downloads::history::load(&download_root).map_err(std::io::Error::other)?;
             app.manage(AppState {
                 root,
+                download_root,
+                window_id,
+                recovered,
+                permissions_visible: std::sync::atomic::AtomicBool::new(false),
                 store: Mutex::new(store),
                 profile: Mutex::new(profile),
                 session: Mutex::new(browser::Session::default()),
@@ -506,6 +736,22 @@ pub fn run() {
             )?;
             shell.set_auto_resize(true)?;
             browser::restore(app.handle());
+            if let Some(mut handoff) = handoff {
+                handoff.tab.id = format!("tab-{}", uuid::Uuid::new_v4());
+                handoff.tab.loading = false;
+                handoff.tab.suspended = false;
+                let workspace = handoff.tab.workspace.clone();
+                let active = handoff.tab.id.clone();
+                *app.state::<AppState>().session.lock().unwrap() = browser::Session {
+                    tabs: vec![handoff.tab],
+                    active,
+                    workspace: workspace.clone(),
+                    workspaces: vec![workspace],
+                    ..Default::default()
+                };
+                window.unmaximize()?;
+                window.set_position(tauri::PhysicalPosition::new(handoff.x, handoff.y))?;
+            }
             #[cfg(feature = "smoke-tests")]
             if std::env::args().any(|a| a == "--self-test") {
                 browser::smoke::start(app.handle().clone());
@@ -568,6 +814,17 @@ pub fn run() {
                     }
                 }
                 browser::private::cleanup();
+                let state = window.app_handle().state::<AppState>();
+                let _ = state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .set(&format!("window_pid:{}", state.window_id), "0");
+                let _ = state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .set(&format!("dirty:{}", state.window_id), "false");
             }
         })
         .run(tauri::generate_context!())

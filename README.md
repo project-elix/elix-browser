@@ -6,7 +6,7 @@ Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript
 
 Product site: https://browser.projectelix.no
 
-**Source version 0.1.1-beta.1 is a beta implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
+**Source version 0.1.2-dev.6 is the Alpha 6 development branch, not a published installer.** See [Alpha 6 implementation and activation status](docs/alpha6.md). This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
 
 ## Beta test for Windows
 

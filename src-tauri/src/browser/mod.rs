@@ -1,8 +1,11 @@
+pub mod detach;
 pub mod engine;
 pub mod extensions;
 #[cfg(windows)]
 mod favicon;
+pub mod organization;
 pub mod private;
+pub mod site_data;
 #[cfg(feature = "smoke-tests")]
 pub mod smoke;
 #[cfg(windows)]
@@ -19,6 +22,14 @@ pub struct Tab {
     pub private: bool,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default = "organization::default_workspace")]
+    pub workspace: String,
+    #[serde(default)]
+    pub group: String,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(skip)]
+    pub crashed: bool,
     #[serde(default, skip_deserializing)]
     pub favicon: Option<String>,
     #[serde(default)]
@@ -48,6 +59,10 @@ impl Tab {
             url,
             private: false,
             pinned: false,
+            workspace: organization::default_workspace(),
+            group: String::new(),
+            muted: false,
+            crashed: false,
             favicon: None,
             loading: false,
             suspended: false,
@@ -63,6 +78,14 @@ impl Tab {
 pub struct Session {
     pub tabs: Vec<Tab>,
     pub active: String,
+    #[serde(default)]
+    pub closed: Vec<Tab>,
+    #[serde(default = "organization::default_workspaces")]
+    pub workspaces: Vec<String>,
+    #[serde(default = "organization::default_workspace")]
+    pub workspace: String,
+    #[serde(skip)]
+    pub split: Option<[String; 2]>,
 }
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Bounds {
@@ -90,25 +113,50 @@ pub fn persist(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let s = state.session.lock().unwrap().persistent();
     let profile = state.profile.lock().unwrap().clone();
-    let result = state.store.lock().unwrap().save_session(
-        &profile,
-        &serde_json::to_string(&s).map_err(|e| e.to_string())?,
-    );
+    let data = serde_json::to_string(&s).map_err(|e| e.to_string())?;
+    let store = state.store.lock().unwrap();
+    let result = if state.window_id == "main" {
+        store.save_session(&profile, &data)
+    } else {
+        store.set(
+            &format!("window_session:{}:{profile}", state.window_id),
+            &data,
+        )
+    };
     result
 }
 pub fn restore(app: &AppHandle) {
     let state = app.state::<AppState>();
     let p = state.profile.lock().unwrap().clone();
-    let mut s = state
-        .store
-        .lock()
-        .unwrap()
-        .load_session(&p)
-        .and_then(|v| serde_json::from_str::<Session>(&v).ok())
+    let candidates = {
+        let store = state.store.lock().unwrap();
+        if state.window_id == "main" {
+            store.session_candidates(&p)
+        } else {
+            store
+                .get(&format!("window_session:{}:{p}", state.window_id))
+                .into_iter()
+                .collect()
+        }
+    };
+    let mut s = candidates
+        .into_iter()
+        .find_map(|v| serde_json::from_str::<Session>(&v).ok())
         .unwrap_or_default();
     s.tabs
         .retain(|t| !t.private && security::destination(&t.url).is_ok());
     s.tabs.truncate(100);
+    if s.workspaces.is_empty() {
+        s.workspaces = organization::default_workspaces();
+    }
+    s.closed
+        .retain(|t| !t.private && security::destination(&t.url).is_ok());
+    s.closed.truncate(20);
+    for tab in &s.tabs {
+        if !s.workspaces.contains(&tab.workspace) {
+            s.workspaces.push(tab.workspace.clone());
+        }
+    }
     let active_index = s.tabs.iter().position(|t| t.id == s.active).unwrap_or(0);
     for t in &mut s.tabs {
         t.id = format!("tab-{}", uuid::Uuid::new_v4());
@@ -120,6 +168,7 @@ pub fn restore(app: &AppHandle) {
         s.tabs.push(Tab::new("elix://start".into()));
     }
     s.active = s.tabs[active_index.min(s.tabs.len() - 1)].id.clone();
+    s.workspace = s.tabs[active_index.min(s.tabs.len() - 1)].workspace.clone();
     *state.session.lock().unwrap() = s;
 }
 pub async fn create(app: AppHandle, input: String) -> Result<String, String> {
@@ -140,6 +189,7 @@ pub async fn create_with_mode(
         if s.tabs.len() >= 100 {
             return Err("Maksimalt 100 faner".into());
         }
+        tab.workspace = s.workspace.clone();
         s.tabs.push(tab);
     }
     if let Err(error) = activate(&app, &id) {
@@ -167,6 +217,13 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<(), String> {
         tab.last_active = chrono::Utc::now().timestamp();
         let t = tab.clone();
         s.active = id.into();
+        s.workspace = t.workspace.clone();
+        if s.split
+            .as_ref()
+            .is_some_and(|pair| !pair.iter().any(|x| x == id))
+        {
+            s.split = None;
+        }
         t
     };
     for (label, view) in app.webviews() {
@@ -193,7 +250,7 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<(), String> {
         let view = app
             .get_webview(id)
             .ok_or("Nettvisningen kunne ikke opprettes")?;
-        engine::bounds(&view, *state.bounds.lock().unwrap())?;
+        organization::layout(app)?;
         view.show().map_err(|e| e.to_string())?;
         view.set_focus().map_err(|e| e.to_string())?;
         if let Some(t) = state
@@ -209,6 +266,7 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<(), String> {
     } else if let Some(shell) = app.get_webview("shell") {
         shell.set_focus().map_err(|e| e.to_string())?;
     }
+    organization::layout(app)?;
     emit(app);
     Ok(())
 }
@@ -264,6 +322,9 @@ pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
         tab.started = tab.loading.then(std::time::Instant::now);
         tab.http_status = None;
         tab.navigation_error = None;
+        if url.starts_with("elix:") {
+            s.split = None;
+        }
     }
     emit(app);
     if url.starts_with("elix:") {
@@ -282,7 +343,17 @@ pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
     persist(app)
 }
 pub fn close(app: &AppHandle, id: &str) -> Result<(), String> {
-    if app.state::<AppState>().downloads.lock().unwrap().iter().any(|d| d.view_id == id && (d.can_resume || matches!(d.status.as_str(), "downloading" | "paused"))) {
+    if app
+        .state::<AppState>()
+        .downloads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|d| {
+            d.view_id == id
+                && (d.can_resume || matches!(d.status.as_str(), "downloading" | "paused"))
+        })
+    {
         return Err("Fanen har en aktiv nedlasting. Fullfør eller avbryt den i Nedlastinger (Ctrl+J) før du lukker fanen.".into());
     }
 
@@ -299,7 +370,17 @@ pub fn close(app: &AppHandle, id: &str) -> Result<(), String> {
             .iter()
             .position(|t| t.id == id)
             .ok_or("Fant ikke fanen")?;
-        s.tabs.remove(index);
+        let closed = s.tabs.remove(index);
+        if !closed.private {
+            s.closed.insert(0, closed);
+            s.closed.truncate(20);
+        }
+        if s.split
+            .as_ref()
+            .is_some_and(|pair| pair.iter().any(|x| x == id))
+        {
+            s.split = None;
+        }
         if s.tabs.is_empty() {
             s.tabs.push(Tab::new("elix://start".into()));
         }
@@ -316,7 +397,7 @@ pub fn suspend(app: &AppHandle, id: &str) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
         let s = state.session.lock().unwrap();
-        if s.active == id {
+        if s.active == id || s.split.as_ref().is_some_and(|p| p.iter().any(|x| x == id)) {
             return Err("Bytt fane før du setter den i dvale".into());
         }
         let tab = s
@@ -368,7 +449,24 @@ impl Session {
         } else {
             tabs.first().map(|t| t.id.clone()).unwrap_or_default()
         };
-        Self { tabs, active }
+        let mut closed: Vec<_> = self
+            .closed
+            .iter()
+            .filter(|t| !t.private)
+            .take(20)
+            .cloned()
+            .collect();
+        for tab in &mut closed {
+            tab.favicon = None;
+        }
+        Self {
+            tabs,
+            active,
+            closed,
+            workspaces: self.workspaces.clone(),
+            workspace: self.workspace.clone(),
+            split: None,
+        }
     }
 }
 pub fn pin(app: &AppHandle, id: &str, pinned: bool) -> Result<(), String> {
@@ -411,6 +509,7 @@ mod tests {
         let session = Session {
             active: private.id.clone(),
             tabs: vec![regular.clone(), private],
+            ..Default::default()
         };
         let persisted = session.persistent();
         assert_eq!(persisted.tabs.len(), 1);

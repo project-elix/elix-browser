@@ -179,11 +179,116 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(windows)]
+fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_8;
+    use windows::core::Interface;
+    let original = app
+        .state::<AppState>()
+        .session
+        .lock()
+        .unwrap()
+        .active
+        .clone();
+    let a = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
+    wait_title_or_error(app, &a, "ELIX native one")?;
+    let b = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/two")))?;
+    wait_title_or_error(app, &b, "ELIX native two")?;
+    browser::organization::reorder(app, &b, &a)?;
+    {
+        let state = app.state::<AppState>();
+        let s = state.session.lock().unwrap();
+        if s.tabs.iter().position(|t| t.id == b) >= s.tabs.iter().position(|t| t.id == a) {
+            return Err("Tab reorder failed".into());
+        }
+    }
+    browser::organization::split(app, Some(a.clone()))?;
+    let view = app.get_webview(&b).ok_or("Missing split view")?;
+    let other = app.get_webview(&a).ok_or("Missing split view")?;
+    let scale = app
+        .get_window("main")
+        .unwrap()
+        .scale_factor()
+        .map_err(|e| e.to_string())?;
+    let expected = app.state::<AppState>().bounds.lock().unwrap().width * scale / 2.;
+    if (view.size().map_err(|e| e.to_string())?.width as f64 - expected).abs() > 8.
+        || (other.size().map_err(|e| e.to_string())?.width as f64 - expected).abs() > 8.
+    {
+        return Err("Split view bounds are not half width".into());
+    }
+    tauri::async_runtime::block_on(browser::organization::mute(app, &b, true))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    view.with_webview(move |platform| {
+        let result = (|| -> windows::core::Result<bool> {
+            unsafe {
+                let mut muted = windows::core::BOOL(0);
+                platform
+                    .controller()
+                    .CoreWebView2()?
+                    .cast::<ICoreWebView2_8>()?
+                    .IsMuted(&mut muted)?;
+                Ok(muted.as_bool())
+            }
+        })();
+        let _ = tx.send(result.map_err(|e| e.to_string()));
+    })
+    .map_err(|e| e.to_string())?;
+    if !rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|e| e.to_string())??
+    {
+        return Err("Native tab mute failed".into());
+    }
+    browser::organization::split(app, None)?;
+    if !view_bool(
+        &view,
+        "(()=>{document.cookie='alpha6_cookie=1; Path=/';return true})()",
+    )? {
+        return Err("Cookie fixture failed".into());
+    }
+    let cookies =
+        tauri::async_runtime::block_on(browser::site_data::cookies(app, origin.into(), false))?;
+    if !cookies
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|r| r["name"] == "alpha6_cookie"))
+    {
+        return Err("Cookie manager did not list the fixture".into());
+    }
+    tauri::async_runtime::block_on(browser::site_data::cookies(app, origin.into(), true))?;
+    if view_bool(&view, "document.cookie.includes('alpha6_cookie=')")? {
+        return Err("Cookie deletion did not affect native page".into());
+    }
+    browser::close(app, &b)?;
+    browser::organization::reopen(app)?;
+    let reopened = app
+        .state::<AppState>()
+        .session
+        .lock()
+        .unwrap()
+        .active
+        .clone();
+    {
+        let state = app.state::<AppState>();
+        let s = state.session.lock().unwrap();
+        if !s
+            .tabs
+            .iter()
+            .any(|t| t.id == reopened && t.url == format!("{origin}/two") && t.muted)
+        {
+            return Err("Reopen lost tab state".into());
+        }
+    }
+    browser::close(app, &reopened)?;
+    browser::close(app, &a)?;
+    browser::activate(app, &original)?;
+    Ok(())
+}
+
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         let result = exercise(&app);
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        let message=match result{Ok(())=>"PASS: Alpha 6 reorder/reopen, native mute, split bounds and cookie deletion; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         #[cfg(windows)]
         let message = format!(
             "{message}\nDownload native diagnostics: {}",
@@ -1041,6 +1146,8 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             return Err("Bookmark not persisted".into());
         }
     }
+    #[cfg(windows)]
+    alpha6_test(app, &origin)?;
     browser::persist(app)?;
     browser::close(app, &second)?;
     for (label, view) in app.webviews() {
