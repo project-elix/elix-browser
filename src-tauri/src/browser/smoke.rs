@@ -177,38 +177,50 @@ fn history_shortcut_test(app: &AppHandle, tab_id: &str) -> Result<(), String> {
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
         VIRTUAL_KEY, VK_CONTROL,
     };
+    let view = app.get_webview(tab_id).ok_or("Missing shortcut view")?;
     app.get_window("main")
         .ok_or("Missing main window")?
         .set_focus()
         .map_err(|e| e.to_string())?;
-    app.get_webview(tab_id)
-        .ok_or("Missing shortcut view")?
-        .set_focus()
-        .map_err(|e| e.to_string())?;
-    // Use real native keyboard input: dispatching a DOM key event would not
-    // exercise the WebView2 accelerator forwarded from the webpage to ELIX.
-    let key = |value: VIRTUAL_KEY, up: bool| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: value,
-                dwFlags: if up {
-                    KEYEVENTF_KEYUP
-                } else {
-                    KEYBD_EVENT_FLAGS(0)
+    view.set_focus().map_err(|e| e.to_string())?;
+    // Tauri queues focus changes onto the UI thread. Sending input before the
+    // native document actually owns focus races the dispatcher on CI machines.
+    wait(|| view_bool(&view, "document.hasFocus()").unwrap_or(false))?;
+    wait(|| {
+        shell_bool(app, "document.querySelector('[role=tab][aria-selected=true]')?.getAttribute('aria-label')==='ELIX native one'").unwrap_or(false)
+    })?;
+    // Use native keyboard input, holding the modifier until the actual shortcut
+    // is acknowledged. Releasing Ctrl in the same input batch can happen before
+    // WebView2 marshals its accelerator event back from the renderer process.
+    fn key(value: VIRTUAL_KEY, up: bool) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: value,
+                    dwFlags: if up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        KEYBD_EVENT_FLAGS(0)
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
             },
-        },
-    };
-    let inputs = [
-        key(VK_CONTROL, false),
-        key(VIRTUAL_KEY(72), false),
-        key(VIRTUAL_KEY(72), true),
-        key(VK_CONTROL, true),
-    ];
-    if unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) } != inputs.len() as u32 {
-        return Err("Could not send native Ctrl+H".into());
+        }
+    }
+    struct ReleaseKeys;
+    impl Drop for ReleaseKeys {
+        fn drop(&mut self) {
+            let release = [key(VIRTUAL_KEY(72), true), key(VK_CONTROL, true)];
+            unsafe {
+                SendInput(&release, std::mem::size_of::<INPUT>() as i32);
+            }
+        }
+    }
+    let held_keys = ReleaseKeys;
+    let pressed = [key(VK_CONTROL, false), key(VIRTUAL_KEY(72), false)];
+    if unsafe { SendInput(&pressed, std::mem::size_of::<INPUT>() as i32) } != pressed.len() as u32 {
+        return Err("Could not press native Ctrl+H".into());
     }
     wait(|| {
         app.state::<AppState>()
@@ -219,6 +231,7 @@ fn history_shortcut_test(app: &AppHandle, tab_id: &str) -> Result<(), String> {
             .iter()
             .any(|tab| tab.id == tab_id && tab.url == "elix://history")
     })?;
+    drop(held_keys);
     wait(|| {
         shell_bool(app, "Array.from(document.querySelectorAll('h1')).some(h=>h.textContent==='Logg.' && h.getClientRects().length>0)").unwrap_or(false)
     })?;

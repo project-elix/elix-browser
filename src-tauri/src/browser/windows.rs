@@ -40,6 +40,11 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                             {
                                 let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                                 let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
+                                #[cfg(feature = "smoke-tests")]
+                                if key == 72 && std::env::args().any(|arg| arg == "--self-test") {
+                                    keyboard_app.state::<AppState>().logs.add("info", if ctrl { "smoke_native_ctrl_h" } else { "smoke_native_h_without_ctrl" });
+                                }
+
                                 if key == 122
                                     || (key == 27
                                         && keyboard_app
