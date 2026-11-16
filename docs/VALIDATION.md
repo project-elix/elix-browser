@@ -18,7 +18,7 @@ Use a disposable Windows 11 x64 VM and record runtime version, app commit, insta
 - [ ] Resize, maximize, 100/125/150/200% DPI, sidebar open, update banner visible; native content never covers chrome.
 - [ ] Bookmark, history deletion, restart/session restoration, two profiles with distinct cookies and data.
 - [ ] Download known test file, two concurrent same-name files, failed transfer, safe folder opening.
-- [ ] Toggle Developer Mode; F12/Ctrl+Shift+I/context Inspect bind to correct site; DOM/CSS/JS/Network/Performance/Storage/device emulation function; disabling closes tools.
+- [ ] Toggle Developer Mode; F12/Ctrl+Shift+I/context Inspect bind to correct site; DOM/CSS/JS/Network/Performance/Storage/device emulation function; disabling blocks new openings; close existing DevTools windows manually (Wry cannot close/query them on Windows).
 - [ ] CPU/RAM sampling, logs, anonymized export consent/cancel, no URLs/profile names in exported JSON.
 - [ ] Site cannot invoke privileged Rust commands or navigate the trusted shell. Test file/data/javascript/tauri protocols and malicious title text.
 - [ ] Suspend inactive tab; explain lost renderer/form state; switching restores URL.
@@ -41,3 +41,5 @@ Use a separate staging repository and owner-controlled test key. Do not reuse th
 ## Performance
 
 `scripts/measure-performance.ps1` collects process-tree CPU and summed working set to CSV and enforces explicit resource budgets. Use the same VM, runtime versions, power mode, profile state, pages, extensions, warm/cold cache and duration for ELIX/Edge/Chrome. Record at least five repetitions for blank/idle, ten fixed pages and active workload. No comparative results have been collected, so no faster/lighter claim is made.
+
+The Windows CI `smoke-tests` feature launches an actual WebView2 page against a loopback HTTP fixture and checks title, load timing, HTTP status, back/forward, native DevTools open-call acceptance (visual tool inspection remains manual), separate tabs, downloaded file bytes, suspension and profile bookmark isolation. It uses a temporary profile root and exits nonzero on failure. This feature is not included in the official release workflow. The installed-launch and native smoke checks must pass in Actions before they are treated as verified.

@@ -7,7 +7,7 @@ This is a real native implementation, but stable everyday-browser qualification 
 | Platforms | Windows x64 is the target. Linux is only used for headless tests and frontend checks. ARM64/macOS/Linux desktop unsupported. |
 | Multi-WebView | Uses Tauri's explicitly unstable API; lockfiles and a pinned Tauri version reduce accidental drift. |
 | Windows | One main window. The dashboard reports actual window count; additional main windows are not implemented. |
-| DevTools | Actual WebView2 tools, not React replicas. Runtime-version-dependent DevTools features need Windows acceptance testing. |
+| DevTools | Actual WebView2 tools, not React replicas. Runtime-version-dependent DevTools features need Windows acceptance testing. Wry on Windows cannot query or programmatically close the DevTools window; turning the mode off blocks new openings, but existing tool windows must be closed manually. |
 | Profiles | Separate UUID data directories, cookies/history/bookmarks. Switching closes old native tabs. No account synchronization. |
 | Sessions | URLs restored; renderer state, unsaved forms, back-stack and scroll are not serialized. |
 | Suspension | Closes inactive native views; resuming reloads the URL. Off by default. Can interrupt audio/download-related pages and discard unsaved state. |

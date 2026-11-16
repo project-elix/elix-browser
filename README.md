@@ -2,6 +2,8 @@
 
 Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript and SQLite. Norwegian interface; dark blue/cyan ELIX identity.
 
+Product site: https://elix-browser-download.andreasdan04.chatgpt.site
+
 **Version 0.1.0 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
 
 ## Run on Windows

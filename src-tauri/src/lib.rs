@@ -176,9 +176,6 @@ async fn dispatch(
             }
             for (id, v) in app.webviews() {
                 if id.starts_with("tab-") {
-                    if !settings.developer {
-                        v.close_devtools();
-                    }
                     browser::engine::action(v, "set_developer".into(), settings.developer).await?;
                 }
             }
@@ -293,6 +290,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![dispatch])
         .setup(|app| {
             let root = app.path().app_local_data_dir()?;
+            #[cfg(feature = "smoke-tests")]
+            let root = if std::env::args().any(|a| a == "--self-test") {
+                std::env::temp_dir().join(format!("elix-smoke-{}", uuid::Uuid::new_v4()))
+            } else {
+                root
+            };
             std::fs::create_dir_all(&root)?;
             let store =
                 storage::Store::open(&root.join("elix.sqlite")).map_err(std::io::Error::other)?;
@@ -347,6 +350,10 @@ pub fn run() {
             )?;
             shell.set_auto_resize(true)?;
             browser::restore(app.handle());
+            #[cfg(feature = "smoke-tests")]
+            if std::env::args().any(|a| a == "--self-test") {
+                browser::smoke::start(app.handle().clone());
+            }
             app.state::<AppState>()
                 .logs
                 .add("info", "application_started");

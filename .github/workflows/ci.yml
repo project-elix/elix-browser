@@ -25,7 +25,7 @@ jobs:
       - run: npm run check:release
       - run: npm run build
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
-      - run: npm run tauri build -- --bundles nsis -- --locked
+      - run: npm run tauri build -- --features smoke-tests --bundles nsis -- --locked
       - name: Test installed app starts
         shell: pwsh
         run: |
@@ -40,8 +40,21 @@ jobs:
           $app.Refresh()
           if ($app.HasExited) { throw 'Application exited during startup' }
           Stop-Process -Id $app.Id
+      - name: Native WebView2 integration test
+        shell: pwsh
+        run: |
+          $env:ELIX_SMOKE_RESULT = Join-Path $env:RUNNER_TEMP "native-smoke.txt"
+          $test = Start-Process "$env:RUNNER_TEMP/ELIX-smoke/elix-browser.exe" -ArgumentList "--self-test" -PassThru
+          if (!$test.WaitForExit(180000)) { Stop-Process -Id $test.Id; throw "Native smoke test timed out" }
+          if (Test-Path $env:ELIX_SMOKE_RESULT) { Get-Content $env:ELIX_SMOKE_RESULT }
+          if ($test.ExitCode -ne 0 -or !(Test-Path $env:ELIX_SMOKE_RESULT)) { throw "Native smoke test failed" }
+      - name: Measure idle resource budget
+        shell: pwsh
+        run: ./scripts/measure-performance.ps1 -Executable "$env:RUNNER_TEMP/ELIX-smoke/elix-browser.exe" -Seconds 30 -Output performance.csv
       - uses: actions/upload-artifact@v4
         with:
           name: ELIX-Windows-development-build
-          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            performance.csv
           if-no-files-found: error

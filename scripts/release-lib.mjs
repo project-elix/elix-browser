@@ -6,7 +6,7 @@ export function validateVersion(version,channel){
 }
 export function makeManifest({version,channel,notes,url,signature,date}){
  validateVersion(version,channel);const u=new URL(url);if(u.protocol!=='https:')throw new Error('HTTPS required');if(!signature?.trim())throw new Error('Signature required');
- const decoded=Buffer.from(signature.trim(),'base64').toString('utf8');if(!decoded.includes(`version:${version}`))throw new Error('Signature must bind this release version');
+ const decoded=Buffer.from(signature.trim(),'base64').toString('utf8');if(decoded.match(/(?:^|[\t ])version:([^\s]+)/m)?.[1]!==version)throw new Error('Signature must bind this release version');
  return {version,notes,pub_date:date,platforms:{'windows-x86_64':{url:u.href,signature:signature.trim()}}};
 }
 export function isNewer(a,b){const parts=v=>{const m=/^(\d+)\.(\d+)\.(\d+)(?:-(beta|dev)\.(\d+))?$/.exec(v);if(!m)throw new Error('Invalid previous channel version');return [Number(m[1]),Number(m[2]),Number(m[3]),m[4]?0:1,m[4]??'',Number(m[5]??0)];};const x=parts(a),y=parts(b);for(let i=0;i<x.length;i++){if(x[i]!==y[i])return x[i]>y[i]}return false;}

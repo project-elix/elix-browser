@@ -1,4 +1,6 @@
 pub mod engine;
+#[cfg(feature = "smoke-tests")]
+pub mod smoke;
 #[cfg(windows)]
 mod windows;
 use crate::{security, AppState};

@@ -1,7 +1,9 @@
 param([Parameter(Mandatory=$true)][string]$Executable,[string[]]$BrowserArguments=@(),[int]$Seconds=60,[string]$Output='performance.csv',[double]$MaxIdleCpuPercent=10,[double]$MaxWorkingSetMB=2000)
 $ErrorActionPreference='Stop'
 # Use a clean profile and identical URLs/workload for each browser. Never reuse a running process.
-$process = Start-Process -FilePath $Executable -ArgumentList $BrowserArguments -PassThru
+$launch=@{FilePath=$Executable;PassThru=$true}
+if($BrowserArguments.Count -gt 0){$launch.ArgumentList=$BrowserArguments}
+$process = Start-Process @launch
 $rows=@(); $previous=@{}; $logical=[Environment]::ProcessorCount
 try {
  for ($i=0;$i -lt $Seconds;$i+=2) {
