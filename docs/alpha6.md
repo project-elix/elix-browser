@@ -71,7 +71,8 @@ mock providers, persistence migration/import/checkpoint tests and Windows cross-
 compilation are used. The native Windows smoke suite additionally exercises reorder,
 reopen, mute, split view bounds, the split controls in the rendered shell and cookie
 deletion. It also launches an actual child window with an isolated test profile,
-checks shared cookies and transferred tab metadata, verifies saved-session recovery,
+uses native mouse input to drag out after a single fast movement, checks shared
+cookies and transferred tab metadata, verifies saved-session recovery,
 and checks that a failed child startup preserves the source tab.
 
 A local Chromium visual-check attempt was blocked by the environment's socket
@@ -96,7 +97,9 @@ there is no in-place downgrade claim. Do not test by deleting application data.
 - [Initial Windows CI](https://github.com/project-elix/elix-browser/actions/runs/43957080849)
   built the installer, launched the installed application and passed the native
   WebView2 integration suite. Follow-up review fixes and extended window-transfer
-  coverage require a fresh CI run on the updated PR head.
+  coverage require a fresh CI run on the updated PR head. The follow-up installer
+  registry assertion caught malformed command quoting, which is corrected in the
+  next commit. Runtime acceptance is tied to the current PR check result.
 - No signed release, updater channel change or account-service deployment has occurred.
 
 Before release: run Windows CI; inspect the actual UI; test pointer drag out onto

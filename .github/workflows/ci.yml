@@ -42,7 +42,10 @@ jobs:
           $associations = Get-ItemProperty "HKCU:\$capability\URLAssociations"
           if ($associations.http -ne 'ELIXBrowserHTML' -or $associations.https -ne 'ELIXBrowserHTML') { throw 'HTTP/HTTPS associations missing' }
           $openCommand = (Get-Item 'HKCU:\Software\Classes\ELIXBrowserHTML\shell\open\command').GetValue('')
-          if ($openCommand -ne ('"' + $exe + '" --url "%1"')) { throw 'Browser URL launch command differs' }
+          Write-Output "Registered browser command: $openCommand"
+          if ($openCommand -notmatch '^"([^"]+)" --url "%1"$') { throw 'Browser URL launch command arguments differ' }
+          $registeredExe = [IO.Path]::GetFullPath($Matches[1])
+          if ($registeredExe -ne [IO.Path]::GetFullPath($exe)) { throw "Browser executable differs: registered=$registeredExe installed=$exe" }
           $app = Start-Process $exe -PassThru
           Start-Sleep -Seconds 12
           $app.Refresh()

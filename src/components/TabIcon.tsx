@@ -7,5 +7,5 @@ export default function TabIcon({tab}:{tab:Tab}){
  if(tab.suspended)return <Pause size={14}/>;
  if(tab.url.startsWith('elix:'))return <Home size={14}/>;
  const icon=tab.favicon;
- return icon&&icon!==failed&&/^data:image\/(png|jpeg|gif|webp|x-icon|vnd\.microsoft\.icon);base64,/i.test(icon)?<img className="tab-favicon" src={icon} alt="" onError={()=>setFailed(icon)}/>:<Globe size={14}/>;
+ return icon&&icon!==failed&&/^data:image\/(png|jpeg|gif|webp|x-icon|vnd\.microsoft\.icon);base64,/i.test(icon)?<img className="tab-favicon" draggable={false} src={icon} alt="" onError={()=>setFailed(icon)}/>:<Globe size={14}/>;
 }

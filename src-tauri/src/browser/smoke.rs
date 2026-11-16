@@ -97,9 +97,7 @@ fn detached_window_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     {
         return Err("Failed handoff did not preserve the source tab".into());
     }
-    if !tauri::async_runtime::block_on(browser::detach::detach(app.clone(), id.clone(), false))? {
-        return Err("New window did not acknowledge transfer".into());
-    }
+    drag_tab_outside(app, &id)?;
     let state = app.state::<AppState>();
     {
         let session = state.session.lock().unwrap();
@@ -170,6 +168,104 @@ fn detached_window_test(app: &AppHandle, origin: &str) -> Result<(), String> {
         .ok_or("Recovered transferred tab missing")?;
     browser::close(app, &recovered)?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
+    use windows::Win32::UI::{
+        Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN,
+            MOUSEEVENTF_LEFTUP, MOUSE_EVENT_FLAGS,
+        },
+        WindowsAndMessaging::{GetSystemMetrics, SetCursorPos, SM_CXSCREEN},
+    };
+    fn mouse_button(flags: MOUSE_EVENT_FLAGS) -> bool {
+        let input = [INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dwFlags: flags,
+                    ..Default::default()
+                },
+            },
+        }];
+        unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) == 1 }
+    }
+    struct RestoreWindow {
+        window: tauri::Window,
+        position: tauri::PhysicalPosition<i32>,
+        size: tauri::PhysicalSize<u32>,
+        maximized: bool,
+    }
+    impl Drop for RestoreWindow {
+        fn drop(&mut self) {
+            let _ = self.window.set_size(self.size);
+            let _ = self.window.set_position(self.position);
+            if self.maximized {
+                let _ = self.window.maximize();
+            }
+        }
+    }
+    struct ReleaseMouse(bool);
+    impl Drop for ReleaseMouse {
+        fn drop(&mut self) {
+            if self.0 {
+                mouse_button(MOUSEEVENTF_LEFTUP);
+            }
+        }
+    }
+    let window = app.get_window("main").ok_or("Missing drag source window")?;
+    let _restore = RestoreWindow {
+        position: window.outer_position().map_err(|e| e.to_string())?,
+        size: window.inner_size().map_err(|e| e.to_string())?,
+        maximized: window.is_maximized().map_err(|e| e.to_string())?,
+        window: window.clone(),
+    };
+    window.unmaximize().map_err(|e| e.to_string())?;
+    window.set_size(tauri::PhysicalSize::new(900, 600)).map_err(|e| e.to_string())?;
+    window.set_position(tauri::PhysicalPosition::new(0, 0)).map_err(|e| e.to_string())?;
+    let shell = app.get_webview("shell").ok_or("Missing drag source shell")?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    shell.set_focus().map_err(|e| e.to_string())?;
+    wait(|| {
+        !window.is_maximized().unwrap_or(true)
+            && window.inner_size().is_ok_and(|s| s.width == 900 && s.height == 600)
+            && shell_bool(app, "document.hasFocus() && Math.abs(innerWidth * devicePixelRatio - 900) < 2").unwrap_or(false)
+    })?;
+    let selector = format!("[data-tab-id=\"{id}\"]");
+    let (tx, rx) = std::sync::mpsc::channel();
+    shell.eval_with_callback(
+        format!("(()=>{{const tab=document.querySelector('{selector}');const button=tab?.querySelector('[role=tab]');if(!button)return null;button.scrollIntoView({{block:'nearest',inline:'nearest'}});const r=button.getBoundingClientRect();window.__elixDragProbe=null;tab.addEventListener('pointerdown',e=>{{window.__elixDragProbe={{target:e.target,id:e.pointerId}}}},{{once:true}});return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()"),
+        move |value| { let _ = tx.send(value); },
+    ).map_err(|e| e.to_string())?;
+    let point: serde_json::Value = serde_json::from_str(
+        &rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?,
+    ).map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let client = window.inner_position().map_err(|e| e.to_string())?;
+    let x = client.x + (point["x"].as_f64().ok_or("Missing drag source X")? * scale).round() as i32;
+    let y = client.y + (point["y"].as_f64().ok_or("Missing drag source Y")? * scale).round() as i32;
+    let outer = window.outer_position().map_err(|e| e.to_string())?;
+    let drop_x = outer.x + window.outer_size().map_err(|e| e.to_string())?.width as i32 + 24;
+    if drop_x >= unsafe { GetSystemMetrics(SM_CXSCREEN) } {
+        return Err("Native drag fixture needs screen space to the right of the 900px window".into());
+    }
+    unsafe { SetCursorPos(x, y) }.map_err(|e| e.to_string())?;
+    // Release the physical button before restoring geometry, including on failures.
+    let mut held_mouse = ReleaseMouse(true);
+    if !mouse_button(MOUSEEVENTF_LEFTDOWN) {
+        return Err("Could not press native mouse button".into());
+    }
+    wait(|| shell_bool(app, "!!window.__elixDragProbe && window.__elixDragProbe.target.hasPointerCapture(window.__elixDragProbe.id)").unwrap_or(false))?;
+    // First move leaves the tab and window entirely: delayed pointer capture loses it.
+    unsafe { SetCursorPos(drop_x, y) }.map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, &format!("document.querySelector('{selector}')?.classList.contains('dragging')===true")).unwrap_or(false))?;
+    if !mouse_button(MOUSEEVENTF_LEFTUP) {
+        return Err("Could not release native mouse button".into());
+    }
+    held_mouse.0 = false;
+    drop(held_mouse);
+    wait(|| !app.state::<AppState>().session.lock().unwrap().tabs.iter().any(|t| t.id == id))
 }
 #[track_caller]
 fn wait(mut condition: impl FnMut() -> bool) -> Result<(), String> {
