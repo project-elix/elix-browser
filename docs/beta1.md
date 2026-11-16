@@ -6,4 +6,4 @@ The patch version increases to 0.1.1 so that Beta 1 is newer than 0.1.0-dev.5 un
 
 To upgrade from Alpha 5, select **Innstillinger → Oppdateringer → Beta → Se etter oppdateringer**, then install and restart when prompted. The Developer channel retains Alpha 5 until a newer developer release is published.
 
-Beta 1 must be rebuilt and signed from its own committed version. The release requires the Windows native tests, signed installed upgrade test, production installer startup and signature verification. The existing Alpha 5 executable and signature cannot be relabeled as Beta 1. Actual publication evidence belongs in VALIDATION.md.
+Beta 1 was rebuilt and signed from its own committed version and published on 16 November 2026. Windows native tests, the signed installed upgrade fixture, a separate usable-UI check of the exact production installer, and independent public signature verification passed. See [validation evidence](VALIDATION.md) and the [published release](https://github.com/project-elix/elix-browser/releases/tag/v0.1.1-beta.1).

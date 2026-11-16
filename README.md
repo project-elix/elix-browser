@@ -4,13 +4,13 @@
 
 Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript and SQLite. Norwegian interface; dark blue/cyan ELIX identity.
 
-Product site: https://elix-browser-download.andreasdan04.chatgpt.site
+Product site: https://browser.projectelix.no
 
-**Source version 0.1.0-dev.5 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
+**Source version 0.1.1-beta.1 is a beta implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
 
-## Alpha test for Windows
+## Beta test for Windows
 
-**[Download Alpha 5 for Windows x64](https://github.com/project-elix/elix-browser/releases/download/v0.1.0-dev.5/ELIX.Browser_0.1.0-dev.5_x64-setup.exe)** — version 0.1.0-dev.5. It needs no personal server. Alpha 3/4 users can choose **Innstillinger → Oppdateringer → Developer → Se etter oppdateringer**. Install manually over Alpha 1/2 without deleting application data, then select Developer for future signed updates. The updater signature is separate from Windows Authenticode; the installer has no Authenticode publisher certificate. See [Alpha 5 changes and limitations](docs/alpha5.md), [validation evidence](docs/VALIDATION.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
+**[Download Beta 1 for Windows x64](https://github.com/project-elix/elix-browser/releases/download/v0.1.1-beta.1/ELIX.Browser_0.1.1-beta.1_x64-setup.exe)** — version 0.1.1-beta.1, promoting the Alpha 5 feature set. It needs no personal server. Alpha 3/4/5 users can choose **Innstillinger → Oppdateringer → Beta → Se etter oppdateringer**. Install manually over Alpha 1/2 without deleting application data, then select Beta for future signed beta updates. The updater signature is separate from Windows Authenticode; the installer has no Authenticode publisher certificate. See [Beta 1 release notes](docs/beta1.md), [feature limitations](docs/alpha5.md), [validation evidence](docs/VALIDATION.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
 
 ## Run on Windows
 
