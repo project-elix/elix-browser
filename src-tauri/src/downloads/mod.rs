@@ -3,6 +3,10 @@ use std::path::PathBuf;
 #[derive(Clone, Serialize)]
 pub struct Download {
     pub id: String,
+    #[serde(skip)]
+    pub owner: String,
+    #[serde(skip)]
+    pub navigation: Option<u64>,
     pub name: String,
     pub path: PathBuf,
     pub status: String,

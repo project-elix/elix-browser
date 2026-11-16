@@ -2,8 +2,8 @@ use crate::{browser, AppState};
 use tauri::{Emitter, Manager, Webview};
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, DownloadStartingEventHandler,
-    Microsoft::Web::WebView2::Win32::*, NavigationCompletedEventHandler, ProcessFailedEventHandler,
-    StateChangedEventHandler,
+    Microsoft::Web::WebView2::Win32::*, NavigationCompletedEventHandler,
+    NavigationStartingEventHandler, ProcessFailedEventHandler, StateChangedEventHandler,
 };
 use windows::{
     core::{Interface, PWSTR},
@@ -132,6 +132,24 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                     })),
                     &mut token,
                 )?;
+                let start_app = app.clone();
+                let start_id = id.clone();
+                core.add_NavigationStarting(
+                    &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                        if let Some(args) = args {
+                            let mut navigation = 0;
+                            args.NavigationId(&mut navigation)?;
+                            start_app
+                                .state::<AppState>()
+                                .navigation_ids
+                                .lock()
+                                .unwrap()
+                                .insert(start_id.clone(), navigation);
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                )?;
                 let nav_app = app.clone();
                 let nav_id = id.clone();
                 core.add_NavigationCompleted(
@@ -152,6 +170,29 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                             let error = if !success.as_bool() {
                                 let mut code = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
                                 args.WebErrorStatus(&mut code)?;
+                                // Truncated attachment responses may end as navigation
+                                // failures without a DownloadOperation StateChanged event.
+                                // Match both native view and NavigationId so other downloads
+                                // (including the same URL) are never incorrectly failed.
+                                if code != COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED {
+                                    let mut navigation = 0;
+                                    args.NavigationId(&mut navigation)?;
+                                    let state = nav_app.state::<AppState>();
+                                    let mut changed = false;
+                                    for item in state.downloads.lock().unwrap().iter_mut() {
+                                        if item.owner == nav_id
+                                            && item.navigation == Some(navigation)
+                                            && item.status == "downloading"
+                                        {
+                                            item.status = "failed".into();
+                                            changed = true;
+                                        }
+                                    }
+                                    if changed {
+                                        state.logs.add("warn", "download_navigation_failed");
+                                        let _ = nav_app.emit_to("shell", "downloads-changed", ());
+                                    }
+                                }
                                 Some(format!("WebView2 navigation error {}", code.0))
                             } else {
                                 None

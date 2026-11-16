@@ -194,6 +194,11 @@ pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
     persist(app)
 }
 pub fn close(app: &AppHandle, id: &str) -> Result<(), String> {
+    app.state::<AppState>()
+        .navigation_ids
+        .lock()
+        .unwrap()
+        .remove(id);
     if let Some(v) = app.get_webview(id) {
         v.close().map_err(|e| e.to_string())?;
     }

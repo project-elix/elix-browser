@@ -158,6 +158,13 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
                     .unwrap()
                     .push(crate::downloads::Download {
                         id,
+                        owner: view.label().to_owned(),
+                        navigation: state
+                            .navigation_ids
+                            .lock()
+                            .unwrap()
+                            .get(view.label())
+                            .copied(),
                         name: path
                             .file_name()
                             .unwrap_or_default()
