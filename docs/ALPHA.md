@@ -1,5 +1,7 @@
 # Test ELIX Browser Alpha 1
 
+**Historical release. For the current alpha see [Alpha 2](ALPHA-2.md).**
+
 Alpha 1 is version **0.1.0-dev.1**, distributed as a public GitHub prerelease. It is a Windows desktop application and does **not** require your own server.
 
 ## Install

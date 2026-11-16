@@ -3,8 +3,8 @@
 ## Executed in the build workspace
 
 - Production React/TypeScript/Vite build: passed.
-- Vitest release-channel/input/progress tests: 8 passed.
-- Actual Rust storage and URL-security modules, headless Linux harness: 4 passed.
+- Vitest release-channel/input/progress and theme contrast tests: 11 passed.
+- Actual Rust storage and URL-security modules, headless Linux harness: 6 passed (including Alpha 1 preference compatibility and theme persistence).
 - Windows GNU target type-check (Tauri, WebView2 COM hooks, updater, SQLite): passed using x86_64-pc-windows-gnu. This checks Windows-only COM calls; it does not run Windows.
 - Start-page visual inspection: passed in Chromium frontend preview. This validates layout, not WebView2 behavior. The public page now uses an actual Windows CI desktop capture, explicitly labeled.
 
@@ -58,4 +58,14 @@ Alpha 1 uses the native verification workflow and then builds a separate install
 
 The native download lifetime regression was reproduced on Windows and fixed by retaining each COM download operation until its terminal state. Run [43886856083](https://github.com/project-elix/elix-browser/actions/runs/43886856083) passed the expanded native test, including interrupted download status, remote IPC denial and active-session restoration. The assertion was retained; navigation errors are not substituted for download state.
 
-Alpha 1 (`0.1.0-dev.1`) was built without test features, silently installed, launched successfully and published by the same run on 2026-11-16. The public installer download was independently hashed and matched the CI checksum and GitHub asset digest. Automatic ELIX updates remain disabled; the signed 0.1.0 → 0.1.1 round trip is **not yet qualified**.
+Alpha 1 (`0.1.0-dev.1`) was built without test features, silently installed, launched successfully and published by the same run on 2026-11-16. The public installer download was independently hashed and matched the CI checksum and GitHub asset digest. Automatic ELIX updates remain disabled; at that time the signed round trip was not yet qualified (subsequent result below).
+
+## Alpha 2 verification — 2026-11-16
+
+- Run [43897753259](https://github.com/project-elix/elix-browser/actions/runs/43897753259) passed the new native minimize/maximize/restore/fullscreen/close path alongside existing real browsing, DevTools, download, profile and IPC tests. Its desktop capture shows the supplied ELIX logo and visible window buttons.
+- Run [43897753542](https://github.com/project-elix/elix-browser/actions/runs/43897753542) **passed the actual signed 0.1.0 → 0.1.1 round trip**: installed old NSIS package, production check/download/signature verification/install, automatic restart into the new executable, preserved two profiles, bookmarks, history, preferences, persistent WebView2 cookies and profile files. Corrupted bytes and a correctly signed old installer replayed as a newer version were rejected.
+- The first attempted test hung at the interactive CurrentUser root-certificate trust dialog. The corrected fixture uses the LocalMachine root store on its disposable hosted Windows runner and removes the ephemeral certificate afterward. TLS verification remains enabled. No test certificate or test signing key is used in distributed alpha builds.
+- The automatic round trip qualifies the tested path, not the whole manual acceptance matrix. Third-party logins, UI interaction, high-DPI visuals, installer interruption/cancellation and power loss still need manual acceptance.
+- Permanent production signing credentials and a Windows Authenticode publisher certificate are not configured. Passing a disposable-key test does not activate a public updater channel.
+
+Alpha 2 publication run [43897911998](https://github.com/project-elix/elix-browser/actions/runs/43897911998) passed native verification, built the distributable without test features, silently installed/launched it, and published `0.1.0-dev.2`. Public bytes were independently hashed and matched both CI and GitHub digests.

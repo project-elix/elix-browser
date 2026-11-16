@@ -6,11 +6,11 @@ Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript
 
 Product site: https://elix-browser-download.andreasdan04.chatgpt.site
 
-**Version 0.1.0 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
+**Version 0.1.0-dev.2 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
 
 ## Alpha test for Windows
 
-**[Download Alpha 1 for Windows x64](https://github.com/project-elix/elix-browser/releases/download/v0.1.0-dev.1/ELIX.Browser_0.1.0-dev.1_x64-setup.exe)** — version 0.1.0-dev.1, published 16 November 2026 after Windows verification and a separate installed-launch check. It needs no personal server. Automatic ELIX updates are disabled and the installer is not Authenticode-signed. See [alpha installation and testing](docs/ALPHA.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
+**[Download Alpha 2 for Windows x64](https://github.com/project-elix/elix-browser/releases/download/v0.1.0-dev.2/ELIX.Browser_0.1.0-dev.2_x64-setup.exe)** — version 0.1.0-dev.2, published 16 November 2026 after Windows verification and a separate installed-launch check. It needs no personal server. Automatic ELIX updates are disabled and the installer is not Authenticode-signed. See [alpha installation and testing](docs/ALPHA-2.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
 
 ## Run on Windows
 
