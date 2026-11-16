@@ -23,7 +23,6 @@ pub struct AppState {
     metrics: Mutex<developer::Metrics>,
     runtime_version: Mutex<Option<String>>,
     downloads: Mutex<Vec<downloads::Download>>,
-    navigation_ids: Mutex<std::collections::HashMap<String, u64>>,
     logs: diagnostics::Logs,
     updates: updater::Updates,
 }
@@ -326,7 +325,6 @@ pub fn run() {
                 metrics: Mutex::new(developer::Metrics::default()),
                 runtime_version: Mutex::new(None),
                 downloads: Mutex::new(Vec::new()),
-                navigation_ids: Mutex::new(std::collections::HashMap::new()),
                 logs: diagnostics::Logs::default(),
                 updates: updater::Updates::default(),
             });

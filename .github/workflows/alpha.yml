@@ -10,7 +10,7 @@ concurrency:
   group: elix-alpha
   cancel-in-progress: false
 jobs:
-  # Requires native download failure correlation by NavigationId.
+  # Requires initial download state and future native state events to be tested.
   verify:
     uses: ./.github/workflows/ci.yml
   publish:
