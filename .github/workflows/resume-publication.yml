@@ -15,6 +15,11 @@ on:
         required: true
         type: choice
         options: [stable, beta, developer]
+      repair_channel_metadata:
+        description: Repair only current channel metadata for an already published verified release
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -30,6 +35,7 @@ jobs:
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
+      REPAIR_CHANNEL_METADATA: ${{ inputs.repair_channel_metadata }}
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
       RELEASE_VERSION: ${{ inputs.version }}
       RELEASE_CHANNEL: ${{ inputs.channel }}

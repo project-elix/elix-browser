@@ -11,11 +11,11 @@ export function makeManifest({version,channel,notes,url,signature,date}){
 }
 export function isNewer(a,b){const parts=v=>{const m=/^(\d+)\.(\d+)\.(\d+)(?:-(beta|dev)\.(\d+))?$/.exec(v);if(!m)throw new Error('Invalid previous channel version');return [Number(m[1]),Number(m[2]),Number(m[3]),m[4]?0:1,m[4]??'',Number(m[5]??0)];};const x=parts(a),y=parts(b);for(let i=0;i<x.length;i++){if(x[i]!==y[i])return x[i]>y[i]}return false;}
 
-export function findDraft(releases,tag,source){
+export function findVerifiedRelease(releases,tag,source,draft=true){
  const matches=releases.filter(r=>r.tag_name===tag);
  if(matches.length!==1)throw new Error('Expected exactly one release draft');
  const release=matches[0];
- if(!release.draft)throw new Error('Refuse to replace an existing published release');
+ if(release.draft!==draft)throw new Error('Release has an unexpected publication state');
  if(!/^[a-f0-9]{40}$/.test(source??'')||release.target_commitish!==source)throw new Error('Draft does not match verified source');
  return release;
 }
@@ -26,4 +26,14 @@ export function verifiedReleaseSource(run,jobs){
   if(matches.length!==1||matches[0].run_id!==run.id||matches[0].conclusion!=='success')throw new Error(`Required release gate did not pass: ${name}`);
  }
  return run.head_sha;
+}
+
+export const findDraft=(releases,tag,source)=>findVerifiedRelease(releases,tag,source,true);
+export function publishedInstallerUrl(release,assetId,repo,version){
+ if(release.draft||release.tag_name!==`v${version}`)throw new Error('Release is not published at the expected tag');
+ const asset=release.assets.find(a=>a.id===assetId);
+ if(!asset)throw new Error('Original installer asset missing');
+ const url=new URL(asset.browser_download_url);
+ if(url.protocol!=='https:'||url.hostname!=='github.com'||!url.pathname.startsWith(`/${repo}/releases/download/v${version}/`)||!url.pathname.endsWith('.exe'))throw new Error('Expected final immutable installer URL');
+ return url.href;
 }
