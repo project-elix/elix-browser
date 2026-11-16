@@ -1,5 +1,7 @@
 # ELIX Browser
 
+<img src="public/elix-mark.png" width="240" alt="ELIX Browser logo">
+
 Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript and SQLite. Norwegian interface; dark blue/cyan ELIX identity.
 
 Product site: https://elix-browser-download.andreasdan04.chatgpt.site
@@ -35,6 +37,8 @@ The NSIS installer is written to `src-tauri/target/release/bundle/nsis/`. Ordina
 - Bookmarks, history, profile records, settings and tab-session persistence in SQLite. Profile-specific WebView2 data directories.
 - Downloads via the engine, completion/failure list and Show folder. Files are never automatically opened.
 - Start page, gaming dashboard, optional reload-based tab suspension, side panel.
+- Native minimize, maximize/restore, fullscreen (F11/Esc) and close controls.
+- Five theme presets, custom accent/background colors, density, corner radius and reduced motion; preferences persist locally and older settings remain readable.
 - Developer mode enables WebView2 DevTools on page WebViews, F12/Ctrl+Shift+I/context menu Inspect. Local diagnostic dashboard uses process measurements and native navigation events.
 - Updater checks at startup and every six hours, channel selection, progress, signature verification, explicit install step and persistent user data. Official updater configuration is embedded at build time, never accepted from a web page.
 - Windows CI, signed release workflow, admin publication gate, pause-channel workflow and a fail-closed download website.
