@@ -91,3 +91,13 @@ Signed release run [43926787374](https://github.com/project-elix/elix-browser/ac
 The immutable [Alpha 5 release](https://github.com/project-elix/elix-browser/releases/tag/v0.1.0-dev.5) was published at 2026-11-16T18:27:19Z. The public 4,626,415-byte installer had SHA-256 `c9d72a7a903cb1218cc7969179443175f49d91a3a26514897330eff3c4b30cc5`, matching GitHub's asset digest. Independent verification passed against the permanent public key, the signed version `0.1.0-dev.5`, and a tampered copy. Developer channel metadata matched the final immutable installer URL and signature. Windows Authenticode remains unconfigured.
 
 Sites version 8, source `488cdaaf0208c1fa50ee2466afff37ed15d6b774`, was published successfully with the verified Alpha 5 download, actual signed-build Windows capture and the new settings descriptions. The live configuration section was visually checked; [publication capture](images/alpha5-site.jpg).
+
+## Beta 1 verification — 2026-11-16
+
+Source `71da83cc856978398d0daaabd77c4e30e95ba14d` promotes the Alpha 5 feature set to `0.1.1-beta.1` on the Beta channel. The patch bump makes Beta 1 newer than `0.1.0-dev.5`; regression tests verify that promotion and reject the reverse downgrade. The browser displays “Beta 1” alongside the complete version.
+
+Release run [43931804293](https://github.com/project-elix/elix-browser/actions/runs/43931804293) passed native Windows verification: 20 JavaScript tests, 15 Rust tests, frontend build, NSIS installation/startup, the complete Alpha 5 native integration suite and the idle resource budget. The runner measured 0% mean CPU and 337.9 MB peak summed working set; this is not a browser performance comparison. Local frontend tests/build, release-version validation and Windows cross-target compilation also passed.
+
+The same run passed the signed 0.1.0 → 0.1.1 installed upgrade fixture. Profiles, bookmarks, history, settings, cookies and profile files were preserved; corrupt and replayed installers were rejected. This fixture validates the production updater path with disposable test signing credentials; it does not claim an interactive Alpha 5 → Beta 1 user acceptance run. The existing manual acceptance limits remain.
+
+The signed production installer was built and its process remained alive after installation, but the fixed 12-second desktop capture was blank. This does not establish a usable UI. Beta 1 publication remains pending an additional UI readiness check on the exact existing signed installer. The first read-only review attempts could not retrieve the draft (GitHub draft listings require push access). A proposed privilege increase was rejected by automatic approval review and was not pushed.
