@@ -1,3 +1,5 @@
+#[cfg(windows)]
+pub mod permissions;
 use url::Url;
 
 pub const INTERNAL_PAGES: &[&str] = &[

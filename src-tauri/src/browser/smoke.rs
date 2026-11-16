@@ -32,13 +32,14 @@ fn title(app: &AppHandle, id: &str, expected: &str) -> bool {
         .any(|t| t.id == id && t.title == expected && !t.loading)
 }
 fn shell_bool(app: &AppHandle, script: &str) -> Result<bool, String> {
-    let shell = app.get_webview("shell").ok_or("Missing shell")?;
+    view_bool(&app.get_webview("shell").ok_or("Missing shell")?, script)
+}
+fn view_bool(view: &tauri::Webview, script: &str) -> Result<bool, String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    shell
-        .eval_with_callback(script, move |value| {
-            let _ = tx.send(value);
-        })
-        .map_err(|e| e.to_string())?;
+    view.eval_with_callback(script, move |value| {
+        let _ = tx.send(value);
+    })
+    .map_err(|e| e.to_string())?;
     let value = rx
         .recv_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
@@ -102,18 +103,60 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
         .eval("document.querySelector('.rail [aria-label=\"Innstillinger\"]').click()")
         .map_err(|e| e.to_string())?;
     wait(|| shell_bool(app, "!!document.querySelector('.settings-nav')").unwrap_or(false))?;
+    for placement in ["sidebar", "toolbar"] {
+        shell.eval(format!("(()=>{{const select=document.querySelector('[aria-label=\"Bokmerkenes plassering\"]');select.value='{placement}';select.dispatchEvent(new Event('change',{{bubbles:true}}))}})()")).map_err(|e|e.to_string())?;
+        shell
+            .eval("document.querySelector('.appearance-actions .primary').click()")
+            .map_err(|e| e.to_string())?;
+        wait(|| {
+            app.state::<AppState>()
+                .store
+                .lock()
+                .unwrap()
+                .settings()
+                .appearance
+                .bookmark_bar
+                == placement
+        })?;
+        let label = if placement == "sidebar" {
+            "Bokmerker i sidemenyen"
+        } else {
+            "Bokmerker under adressefeltet"
+        };
+        wait(|| {
+            shell_bool(
+                app,
+                &format!(
+                    "document.querySelector('[aria-label=\"{label}\"]')?.getClientRects().length>0"
+                ),
+            )
+            .unwrap_or(false)
+        })?;
+    }
+
     shell.eval("Array.from(document.querySelectorAll('.settings-nav button')).find(b=>b.textContent==='Oppdateringer').click()").map_err(|e| e.to_string())?;
     wait(|| {
         shell_bool(app, "Array.from(document.querySelectorAll('.settings-content h2')).some(h=>h.textContent==='Oppdateringer' && h.getClientRects().length>0) && document.querySelector('.appearance-settings').getClientRects().length===0").unwrap_or(false)
     })?;
     browser::navigate(app, remote, "elix://start")?;
+    if app
+        .state::<AppState>()
+        .session
+        .lock()
+        .unwrap()
+        .tabs
+        .iter()
+        .any(|tab| tab.id == remote && tab.loading)
+    {
+        return Err("Internal page retained a stale loading indicator".into());
+    }
     Ok(())
 }
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         let result = exercise(&app);
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: sidebar expand/hide/restore, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native HTTP navigation, title/status, tab switching, back/forward, DevTools, download bytes/failure, suspension, profile storage isolation, active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        let message=match result{Ok(())=>"PASS: sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, failed download, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         println!("{message}");
         if let Some(path) = std::env::var_os("ELIX_SMOKE_RESULT") {
             let _ = std::fs::write(path, &message);
@@ -128,6 +171,346 @@ pub fn start(app: AppHandle) {
         }
     });
 }
+#[cfg(windows)]
+fn history_shortcut_test(app: &AppHandle, tab_id: &str) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        VIRTUAL_KEY, VK_CONTROL,
+    };
+    app.get_window("main")
+        .ok_or("Missing main window")?
+        .set_focus()
+        .map_err(|e| e.to_string())?;
+    app.get_webview(tab_id)
+        .ok_or("Missing shortcut view")?
+        .set_focus()
+        .map_err(|e| e.to_string())?;
+    // Use real native keyboard input: dispatching a DOM key event would not
+    // exercise the WebView2 accelerator forwarded from the webpage to ELIX.
+    let key = |value: VIRTUAL_KEY, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: value,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+                ..Default::default()
+            },
+        },
+    };
+    let inputs = [
+        key(VK_CONTROL, false),
+        key(VIRTUAL_KEY(72), false),
+        key(VIRTUAL_KEY(72), true),
+        key(VK_CONTROL, true),
+    ];
+    if unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) } != inputs.len() as u32 {
+        return Err("Could not send native Ctrl+H".into());
+    }
+    wait(|| {
+        app.state::<AppState>()
+            .session
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|tab| tab.id == tab_id && tab.url == "elix://history")
+    })?;
+    wait(|| {
+        shell_bool(app, "Array.from(document.querySelectorAll('h1')).some(h=>h.textContent==='Logg.' && h.getClientRects().length>0)").unwrap_or(false)
+    })?;
+    Ok(())
+}
+fn private_test(app: &AppHandle, regular_id: &str, origin: &str) -> Result<(), String> {
+    let regular = app.get_webview(regular_id).ok_or("Missing regular view")?;
+    if !view_bool(&regular, "(()=>{document.cookie='elix_regular=1; Path=/';return document.cookie.includes('elix_regular=1')})()")? {
+        return Err("Could not seed regular cookie".into());
+    }
+    let private_url = format!("{origin}/private-secret");
+    let private_id = tauri::async_runtime::block_on(browser::create_with_mode(
+        app.clone(),
+        private_url.clone(),
+        true,
+    ))?;
+    wait(|| title(app, &private_id, "ELIX private fixture"))?;
+    let private = app.get_webview(&private_id).ok_or("Missing private view")?;
+    #[cfg(windows)]
+    if !tauri::async_runtime::block_on(browser::private::is_in_private(&private))?
+        || tauri::async_runtime::block_on(browser::private::is_in_private(&regular))?
+    {
+        return Err("WebView2 native InPrivate profile flag is incorrect".into());
+    }
+    if !view_bool(&private, "(()=>{if(document.cookie.includes('elix_regular='))return false;document.cookie='elix_private=1; Path=/';return document.cookie.includes('elix_private=1')})()")? {
+        return Err("Private profile reused regular cookies or cannot store session cookie".into());
+    }
+    if !view_bool(
+        &regular,
+        "document.cookie.includes('elix_regular=1') && !document.cookie.includes('elix_private=')",
+    )? {
+        return Err("Private cookie leaked into regular profile".into());
+    }
+    browser::persist(app)?;
+    {
+        let state = app.state::<AppState>();
+        let profile = state.profile.lock().unwrap().clone();
+        let store = state.store.lock().unwrap();
+        if store
+            .entries(&profile, "history")?
+            .iter()
+            .any(|entry| entry.url == private_url)
+        {
+            return Err("Private navigation was written to history".into());
+        }
+        if store
+            .load_session(&profile)
+            .is_some_and(|saved| saved.contains("private-secret") || saved.contains(&private_id))
+        {
+            return Err("Private tab was written to session restore".into());
+        }
+    }
+    browser::close(app, &private_id)?;
+    let fresh_id =
+        tauri::async_runtime::block_on(browser::create_with_mode(app.clone(), private_url, true))?;
+    wait(|| title(app, &fresh_id, "ELIX private fixture"))?;
+    let fresh = app
+        .get_webview(&fresh_id)
+        .ok_or("Missing new private view")?;
+    if !view_bool(
+        &fresh,
+        "!document.cookie.includes('elix_private=') && !document.cookie.includes('elix_regular=')",
+    )? {
+        return Err("Private cookies survived closing the last private tab".into());
+    }
+    browser::close(app, &fresh_id)?;
+    browser::activate(app, regular_id)?;
+    Ok(())
+}
+fn resumable_download_test(app: &AppHandle, tab_id: &str, origin: &str) -> Result<(), String> {
+    browser::navigate(app, tab_id, &format!("{origin}/slow"))?;
+    wait(|| {
+        app.state::<AppState>()
+            .downloads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|d| {
+                d.name == "elix-resume.bin" && d.status == "downloading" && d.bytes_received > 0
+            })
+    })?;
+    let id = app
+        .state::<AppState>()
+        .downloads
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|d| d.name == "elix-resume.bin")
+        .ok_or("Missing resumable download")?
+        .id
+        .clone();
+    browser::navigate(app, tab_id, "elix://downloads")?;
+    let manager_id = app
+        .state::<AppState>()
+        .session
+        .lock()
+        .unwrap()
+        .active
+        .clone();
+    if manager_id == tab_id || app.get_webview(tab_id).is_none() {
+        return Err("Opening Downloads closed the live transfer's owning WebView".into());
+    }
+    wait(|| {
+        shell_bool(app, "Array.from(document.querySelectorAll('.download-entry')).some(entry=>entry.querySelector('strong')?.textContent==='elix-resume.bin' && Array.from(entry.querySelectorAll('button')).some(button=>button.textContent==='Pause' && !button.disabled))").unwrap_or(false)
+    })?;
+    app.get_webview("shell").ok_or("Missing shell")?.eval("Array.from(document.querySelectorAll('.download-entry')).find(entry=>entry.querySelector('strong')?.textContent==='elix-resume.bin').querySelector('.download-actions button').click()").map_err(|e|e.to_string())?;
+    wait(|| {
+        app.state::<AppState>()
+            .downloads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|d| d.id == id && d.status == "paused" && d.can_resume)
+    })?;
+    if browser::suspend(app, tab_id).is_ok() {
+        return Err("Suspension accepted a tab owning a paused download".into());
+    }
+    wait(|| {
+        shell_bool(app, "Array.from(document.querySelectorAll('.download-entry')).some(entry=>entry.querySelector('strong')?.textContent==='elix-resume.bin' && Array.from(entry.querySelectorAll('button')).some(button=>button.textContent==='Fortsett' && !button.disabled))").unwrap_or(false)
+    })?;
+    app.get_webview("shell").ok_or("Missing shell")?.eval("Array.from(document.querySelectorAll('.download-entry')).find(entry=>entry.querySelector('strong')?.textContent==='elix-resume.bin').querySelector('.download-actions button').click()").map_err(|e|e.to_string())?;
+
+    wait(|| {
+        app.state::<AppState>()
+            .downloads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|d| d.id == id && d.status == "complete")
+    })?;
+    let path = app
+        .state::<AppState>()
+        .downloads
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|d| d.id == id)
+        .ok_or("Resumed download missing")?
+        .path
+        .clone();
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    if bytes.len() != SLOW_DOWNLOAD_BYTES || bytes.iter().any(|byte| *byte != b'E') {
+        return Err("Resumed download bytes differ".into());
+    }
+    browser::close(app, &manager_id)?;
+    let state = app.state::<AppState>();
+    let persisted = crate::downloads::history::load(&state.root)?;
+    if !persisted.iter().any(|d| {
+        d.id == id && d.status == "complete" && d.bytes_received == SLOW_DOWNLOAD_BYTES as u64
+    }) {
+        return Err("Complete download was not persisted for app restart".into());
+    }
+    Ok(())
+}
+fn permission_test(app: &AppHandle, origin: &str) -> Result<(), String> {
+    let id = tauri::async_runtime::block_on(browser::create(
+        app.clone(),
+        format!("{origin}/permission"),
+    ))?;
+    wait(|| title(app, &id, "ELIX permission fixture"))?;
+    let view = app.get_webview(&id).ok_or("Missing permission view")?;
+    view.eval("navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{stream.getTracks().forEach(t=>t.stop());document.title='ELIX permission unexpectedly granted'},()=>{document.title='ELIX permission denied'})").map_err(|e|e.to_string())?;
+    let mut pending = None;
+    wait(|| {
+        pending = tauri::async_runtime::block_on(crate::security::permissions::list(app))
+            .ok()
+            .and_then(|items| items.into_iter().find(|p| p.tab_id == id));
+        pending.is_some()
+    })?;
+    let prompt = pending.ok_or("Missing microphone permission prompt")?;
+    if prompt.origin != origin || prompt.top_origin != origin {
+        return Err("Microphone permission prompt has wrong origin".into());
+    }
+    tauri::async_runtime::block_on(crate::security::permissions::respond(
+        app, &prompt.id, false,
+    ))?;
+    wait(|| title(app, &id, "ELIX permission denied"))?;
+    if !tauri::async_runtime::block_on(crate::security::permissions::list(app))?.is_empty() {
+        return Err("Resolved permission prompt remained pending".into());
+    }
+    browser::close(app, &id)?;
+    Ok(())
+}
+const SLOW_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
+fn serve_fixture(mut stream: std::net::TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+    let mut request = [0; 8192];
+    let size = stream.read(&mut request).unwrap_or(0);
+    let request = String::from_utf8_lossy(&request[..size]);
+    if request.starts_with("GET /broken ") {
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=broken.txt\r\nConnection: close\r\n\r\n");
+        // Commit the download before disconnecting mid-transfer. An already
+        // truncated response may be retried as navigation instead.
+        let _ = stream.flush();
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = stream.write_all(b"partial");
+        let _ = stream.flush();
+        std::thread::sleep(Duration::from_millis(500));
+        return;
+    }
+    if request.starts_with("GET /slow ") {
+        let offset = request
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if !name.eq_ignore_ascii_case("range") {
+                    return None;
+                }
+                value
+                    .trim()
+                    .strip_prefix("bytes=")?
+                    .split('-')
+                    .next()?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .unwrap_or(0)
+            .min(SLOW_DOWNLOAD_BYTES - 1);
+        let status = if offset > 0 {
+            "206 Partial Content"
+        } else {
+            "200 OK"
+        };
+        let range = if offset > 0 {
+            format!(
+                "Content-Range: bytes {}-{}/{}\r\n",
+                offset,
+                SLOW_DOWNLOAD_BYTES - 1,
+                SLOW_DOWNLOAD_BYTES
+            )
+        } else {
+            String::new()
+        };
+        let headers = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=elix-resume.bin\r\nAccept-Ranges: bytes\r\nETag: \"elix-resume-fixture-v1\"\r\n{range}Connection: close\r\n\r\n", SLOW_DOWNLOAD_BYTES - offset);
+        if stream.write_all(headers.as_bytes()).is_err() {
+            return;
+        }
+        let bytes = [b'E'; 65536];
+        let mut sent = offset;
+        while sent < SLOW_DOWNLOAD_BYTES {
+            let length = bytes.len().min(SLOW_DOWNLOAD_BYTES - sent);
+            if stream.write_all(&bytes[..length]).is_err() {
+                return;
+            }
+            let _ = stream.flush();
+            sent += length;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        return;
+    }
+    if request.starts_with("GET /favicon.png ") {
+        // A real PNG fetched by the native renderer, not a shell-assigned icon.
+        let png: &[u8] = &[
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 16, 0, 0, 0, 16,
+            8, 2, 0, 0, 0, 144, 145, 104, 54, 0, 0, 0, 22, 73, 68, 65, 84, 120, 156, 99, 112, 190,
+            252, 130, 36, 196, 48, 170, 97, 84, 195, 240, 213, 0, 0, 123, 196, 254, 16, 221, 3, 4,
+            4, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+        let headers = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: image/png\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", png.len());
+        let _ = stream.write_all(headers.as_bytes());
+        let _ = stream.write_all(png);
+        return;
+    }
+    let download = request.starts_with("GET /download ");
+    let body = if download {
+        "elix-native-download".to_owned()
+    } else {
+        let title = if request.starts_with("GET /two ") {
+            "ELIX native two"
+        } else if request.starts_with("GET /private-secret ") {
+            "ELIX private fixture"
+        } else if request.starts_with("GET /permission ") {
+            "ELIX permission fixture"
+        } else {
+            "ELIX native one"
+        };
+        format!("<!doctype html><html><head><title>{title}</title><link rel=\"icon\" href=\"/favicon.png\" type=\"image/png\"></head><body>Native WebView2 fixture</body></html>")
+    };
+    let extra = if download {
+        "Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=elix-smoke.txt\r\n"
+    } else {
+        "Content-Type: text/html; charset=utf-8\r\n"
+    };
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
+        body.len(),
+        extra,
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
 fn exercise(app: &AppHandle) -> Result<(), String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let origin = format!(
@@ -135,40 +518,10 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         listener.local_addr().map_err(|e| e.to_string())?
     );
     std::thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-            let mut request = [0; 8192];
-            let size = stream.read(&mut request).unwrap_or(0);
-            let request = String::from_utf8_lossy(&request[..size]);
-            if request.starts_with("GET /broken ") {
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=broken.txt\r\nConnection: close\r\n\r\n");
-                // Commit the download before disconnecting mid-transfer. An already
-                // truncated response can be retried as a failed navigation instead.
-                let _ = stream.flush();
-                std::thread::sleep(Duration::from_millis(500));
-                let _ = stream.write_all(b"partial");
-                let _ = stream.flush();
-                std::thread::sleep(Duration::from_millis(500));
-                continue;
-            }
-            let download = request.starts_with("GET /download ");
-            let body = if download {
-                "elix-native-download".to_owned()
-            } else {
-                format!("<!doctype html><html><head><title>{}</title></head><body>Native WebView2 fixture</body></html>",if request.starts_with("GET /two "){"ELIX native two"}else{"ELIX native one"})
-            };
-            let extra = if download {
-                "Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=elix-smoke.txt\r\n"
-            } else {
-                "Content-Type: text/html; charset=utf-8\r\n"
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
-                body.len(),
-                extra,
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
+        for stream in listener.incoming().flatten() {
+            // A paused transfer must not prevent navigation, favicon requests, or
+            // the resumed Range request from reaching the same local fixture.
+            std::thread::spawn(move || serve_fixture(stream));
         }
     });
     std::thread::sleep(Duration::from_secs(2));
@@ -190,6 +543,24 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     main.maximize().map_err(|e| e.to_string())?;
     let first =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
+    wait(|| title(app, &first, "ELIX native one"))?;
+    wait(|| {
+        app.state::<AppState>()
+            .session
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| {
+                t.id == first
+                    && t.favicon
+                        .as_deref()
+                        .is_some_and(|icon| icon.starts_with("data:image/png;base64,"))
+            })
+    })?;
+    #[cfg(windows)]
+    history_shortcut_test(app, &first)?;
+    browser::navigate(app, &first, &format!("{origin}/one"))?;
     wait(|| title(app, &first, "ELIX native one"))?;
     sidebar_test(app, &first)?;
     browser::navigate(app, &first, &format!("{origin}/one"))?;
@@ -215,6 +586,34 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         false,
     ))?;
     wait(|| title(app, &first, "ELIX native two"))?;
+    let unused = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let unavailable = format!(
+        "http://{}/unavailable",
+        unused.local_addr().map_err(|e| e.to_string())?
+    );
+    drop(unused);
+    browser::navigate(app, &first, &unavailable)?;
+    wait(|| {
+        app.state::<AppState>()
+            .session
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|tab| tab.id == first && !tab.loading && tab.navigation_error.is_some())
+    })?;
+    browser::navigate(app, &first, &format!("{origin}/two"))?;
+    wait(|| {
+        title(app, &first, "ELIX native two")
+            && app
+                .state::<AppState>()
+                .session
+                .lock()
+                .unwrap()
+                .tabs
+                .iter()
+                .any(|tab| tab.id == first && tab.navigation_error.is_none())
+    })?;
     tauri::async_runtime::block_on(browser::engine::action(
         view.clone(),
         "set_developer".into(),
@@ -234,6 +633,10 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     view.eval("(async()=>{document.title='ELIX IPC pending';if(!window.__TAURI_INTERNALS__?.invoke){document.title='ELIX IPC denied';return}const result=await Promise.race([window.__TAURI_INTERNALS__.invoke('dispatch',{request:{action:'snapshot'}}).then(()=> 'allowed',()=> 'denied'),new Promise(resolve=>setTimeout(()=>resolve('unreachable'),2000))]);document.title='ELIX IPC '+result})()")
         .map_err(|e| e.to_string())?;
     wait(|| title(app, &first, "ELIX IPC denied") || title(app, &first, "ELIX IPC unreachable"))?;
+    tauri::async_runtime::block_on(browser::extensions::smoke(app.clone()))?;
+    private_test(app, &first, &origin)?;
+    permission_test(app, &origin)?;
+    browser::pin(app, &first, true)?;
     let second =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
     wait(|| title(app, &second, "ELIX native one"))?;
@@ -259,6 +662,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     if std::fs::read_to_string(&path).map_err(|e| e.to_string())? != "elix-native-download" {
         return Err("Downloaded bytes differ".into());
     }
+    resumable_download_test(app, &second, &origin)?;
     browser::navigate(app, &second, &format!("{origin}/broken"))?;
     wait(|| {
         app.state::<AppState>()
@@ -268,6 +672,20 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             .iter()
             .any(|d| d.status == "failed")
     })?;
+    // A resumable interrupted transfer legitimately keeps its source alive.
+    // Explicitly cancel it before testing ordinary inactive-tab suspension.
+    let resumable = app
+        .state::<AppState>()
+        .downloads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|download| download.view_id == second && download.can_resume)
+        .map(|download| download.id.clone())
+        .collect::<Vec<_>>();
+    for id in resumable {
+        tauri::async_runtime::block_on(crate::downloads::action(app, &id, "cancel"))?;
+    }
     browser::activate(app, &first)?;
     browser::suspend(app, &second)?;
     if app.get_webview(&second).is_some() {
@@ -296,12 +714,10 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     browser::restore(app);
     let state = app.state::<AppState>();
     let session = state.session.lock().unwrap();
-    if !session
-        .tabs
-        .iter()
-        .any(|t| t.id == session.active && t.url == format!("{origin}/two"))
-    {
-        return Err("Active tab was not restored".into());
+    if !session.tabs.iter().any(|t| {
+        t.id == session.active && t.url == format!("{origin}/two") && t.pinned && !t.private
+    }) {
+        return Err("Pinned active tab was not restored".into());
     }
     Ok(())
 }

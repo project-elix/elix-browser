@@ -1,6 +1,6 @@
 [package]
 name = "elix-browser"
-version = "0.1.0-dev.4"
+version = "0.1.0-dev.5"
 edition = "2021"
 rust-version = "1.88"
 
@@ -27,6 +27,7 @@ url = "2"
 sysinfo = "0.37"
 chrono = { version = "0.4", features = ["serde"] }
 semver = "1"
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"

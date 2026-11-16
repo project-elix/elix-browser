@@ -22,6 +22,8 @@ pub struct Settings {
     pub channel: String,
     pub suspend_minutes: u32,
     pub appearance: Appearance,
+    pub password_autosave: bool,
+    pub autofill: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -31,6 +33,8 @@ impl Default for Settings {
             channel: "stable".into(),
             suspend_minutes: 0,
             appearance: Appearance::default(),
+            password_autosave: false,
+            autofill: false,
         }
     }
 }
@@ -44,6 +48,7 @@ pub struct Appearance {
     pub reduce_motion: bool,
     pub gradient: bool,
     pub sidebar: String,
+    pub bookmark_bar: String,
 }
 impl Default for Appearance {
     fn default() -> Self {
@@ -55,6 +60,7 @@ impl Default for Appearance {
             reduce_motion: false,
             gradient: true,
             sidebar: "icons".into(),
+            bookmark_bar: "toolbar".into(),
         }
     }
 }
@@ -72,6 +78,7 @@ impl Settings {
             && ["comfortable", "compact"].contains(&self.appearance.density.as_str())
             && self.appearance.radius <= 20
             && ["icons", "expanded", "hidden"].contains(&self.appearance.sidebar.as_str())
+            && ["hidden", "sidebar", "toolbar"].contains(&self.appearance.bookmark_bar.as_str())
     }
 }
 pub struct Store {
@@ -299,6 +306,21 @@ mod tests {
         let mut invalid = settings;
         invalid.appearance.sidebar = "invalid".into();
         assert!(!invalid.valid());
+    }
+    #[test]
+    fn alpha_four_settings_keep_defaults_and_bookmark_placement() {
+        let mut settings: Settings =
+            serde_json::from_str(r#"{"appearance":{"sidebar":"expanded"},"developer":true}"#)
+                .unwrap();
+        assert_eq!(settings.appearance.bookmark_bar, "toolbar");
+        assert!(!settings.password_autosave && !settings.autofill);
+        assert!(settings.valid());
+        for placement in ["hidden", "sidebar", "toolbar"] {
+            settings.appearance.bookmark_bar = placement.into();
+            assert!(settings.valid());
+        }
+        settings.appearance.bookmark_bar = "outside".into();
+        assert!(!settings.valid());
     }
     #[test]
     fn newer_database_is_not_modified() {

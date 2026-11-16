@@ -6,7 +6,7 @@ Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript
 
 Product site: https://elix-browser-download.andreasdan04.chatgpt.site
 
-**Version 0.1.0-dev.3 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
+**Source version 0.1.0-dev.5 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
 
 ## Alpha test for Windows
 
@@ -35,7 +35,9 @@ The NSIS installer is written to `src-tauri/target/release/bundle/nsis/`. Ordina
 
 - Native child WebViews for tabs; navigation, redirects, titles, new-window links redirected to tabs, native back/forward/reload/stop.
 - Bookmarks, history, profile records, settings and tab-session persistence in SQLite. Profile-specific WebView2 data directories.
-- Downloads via the engine, completion/failure list and Show folder. Files are never automatically opened.
+- Native download progress, pause/resume/cancel, per-profile persisted list and Show folder. Files are never automatically opened; interrupted transfers must restart after app exit.
+- Local address suggestions, native favicons, pinned tabs, configurable bookmark placement and Ctrl+H history.
+- Real InPrivate tabs, per-request camera/microphone prompts, opt-in native password saving/autofill and unpacked extension management. See [Alpha 5](docs/alpha5.md) for scope and limitations.
 - Start page, gaming dashboard, optional reload-based tab suspension, side panel.
 - Native minimize, maximize/restore, fullscreen (F11/Esc) and close controls.
 - Five theme presets, custom accent/background colors, density, corner radius and reduced motion; preferences persist locally and older settings remain readable.

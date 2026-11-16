@@ -1,9 +1,8 @@
 use crate::{browser, AppState};
 use tauri::{Emitter, Manager, Webview};
 use webview2_com::{
-    AcceleratorKeyPressedEventHandler, DownloadStartingEventHandler,
-    Microsoft::Web::WebView2::Win32::*, NavigationCompletedEventHandler, ProcessFailedEventHandler,
-    StateChangedEventHandler,
+    AcceleratorKeyPressedEventHandler, Microsoft::Web::WebView2::Win32::*,
+    NavigationCompletedEventHandler, ProcessFailedEventHandler,
 };
 use windows::{
     core::{Interface, PWSTR},
@@ -25,66 +24,7 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                 *app.state::<AppState>().runtime_version.lock().unwrap() = value;
                 let settings = core.Settings()?;
                 settings.SetAreDefaultContextMenusEnabled(true)?;
-                // Wry deliberately returns path=None for interrupted downloads. Read
-                // ResultFilePath from the real operation to identify the failed item,
-                // including concurrent downloads of the same URL.
-                let download_app = app.clone();
-                // Keep each COM operation alive until its terminal state. A local
-                // DownloadOperation() temporary is insufficient during automatic retries.
-                let operations = std::rc::Rc::new(std::cell::RefCell::new(Vec::<
-                    ICoreWebView2DownloadOperation,
-                >::new(
-                )));
-                let mut download_token = 0;
-                core.cast::<ICoreWebView2_4>()?.add_DownloadStarting(
-                    &DownloadStartingEventHandler::create(Box::new(move |_, args| {
-                        if let Some(args) = args {
-                            let app = download_app.clone();
-                            let mut token = 0;
-                            let operation = args.DownloadOperation()?;
-                            operations.borrow_mut().push(operation.clone());
-                            let callback_operations = std::rc::Rc::downgrade(&operations);
-                            let callback_app = app.clone();
-                            operation.add_StateChanged(
-                                &StateChangedEventHandler::create(Box::new(move |operation, _| {
-                                    if let Some(operation) = operation {
-                                        if update_download_state(&callback_app, &operation)? {
-                                            if let Some(operations) = callback_operations.upgrade()
-                                            {
-                                                operations
-                                                    .borrow_mut()
-                                                    .retain(|item| item != &operation);
-                                            }
-                                        }
-                                    }
-                                    Ok(())
-                                })),
-                                &mut token,
-                            )?;
-                            // A short response can finish before handlers are registered.
-                            // Snapshot the actual state as well as observing future events.
-                            let mut initial = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
-                            operation.State(&mut initial)?;
-                            app.state::<AppState>().logs.add(
-                                "info",
-                                match initial {
-                                    COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED => {
-                                        "download_started_interrupted"
-                                    }
-                                    COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED => {
-                                        "download_started_complete"
-                                    }
-                                    _ => "download_started_in_progress",
-                                },
-                            );
-                            if update_download_state(&app, &operation)? {
-                                operations.borrow_mut().retain(|item| item != &operation);
-                            }
-                        }
-                        Ok(())
-                    })),
-                    &mut download_token,
-                )?;
+                crate::downloads::windows::attach(&core, app.clone())?;
                 let keyboard_app = app.clone();
                 let keyboard_id = id.clone();
                 let mut token = 0;
@@ -140,13 +80,18 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                                             );
                                         }
                                     });
-                                } else if ctrl && [76, 84, 87].contains(&key) {
+                                } else if ctrl
+                                    && ([72, 74, 76, 84, 87].contains(&key) || (shift && key == 78))
+                                {
                                     args.SetHandled(true)?;
                                     let _ = keyboard_app.emit_to(
                                         "shell",
                                         "shortcut",
                                         match key {
+                                            72 => "history",
+                                            74 => "downloads",
                                             76 => "address",
+                                            78 => "private_tab",
                                             84 => "new_tab",
                                             _ => "close_tab",
                                         },
@@ -181,7 +126,14 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                             let error = if !success.as_bool() {
                                 let mut code = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
                                 args.WebErrorStatus(&mut code)?;
-                                Some(format!("WebView2 navigation error {}", code.0))
+                                match code {
+                                    COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED => None,
+                                    COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED => Some("Fant ikke nettstedet. Kontroller adressen og internettforbindelsen.".into()),
+                                    COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT => Some("Nettstedet brukte for lang tid på å svare. Prøv igjen.".into()),
+                                    COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT | COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE | COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED => Some("Kunne ikke koble til nettstedet. Kontroller internettforbindelsen og prøv igjen.".into()),
+                                    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED => Some("Nettstedets sikkerhetssertifikat kunne ikke godkjennes. Tilkoblingen er blokkert.".into()),
+                                    _ => Some(format!("Siden kunne ikke lastes inn (nettverksfeil {}). Prøv igjen.", code.0)),
+                                }
                             } else {
                                 None
                             };
@@ -273,38 +225,4 @@ pub async fn action(view: Webview, action: String, enabled: bool) -> Result<(), 
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-unsafe fn update_download_state(
-    app: &tauri::AppHandle,
-    operation: &ICoreWebView2DownloadOperation,
-) -> windows::core::Result<bool> {
-    let mut status = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
-    operation.State(&mut status)?;
-    if status == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
-        return Ok(false);
-    }
-    let mut raw = PWSTR::null();
-    operation.ResultFilePath(&mut raw)?;
-    let path = raw.to_string().ok().map(std::path::PathBuf::from);
-    windows::Win32::System::Com::CoTaskMemFree(Some(raw.0.cast()));
-    if let Some(path) = path {
-        let state = app.state::<AppState>();
-        if let Some(d) = state
-            .downloads
-            .lock()
-            .unwrap()
-            .iter_mut()
-            .find(|d| d.path == path)
-        {
-            d.status = if status == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
-                "complete"
-            } else {
-                "failed"
-            }
-            .into();
-        };
-    }
-    let _ = app.emit_to("shell", "downloads-changed", ());
-    Ok(true)
 }

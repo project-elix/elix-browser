@@ -1,4 +1,4 @@
-# 0.1.0 limits
+# Alpha 5 limits
 
 This is a real native implementation, but stable everyday-browser qualification remains outstanding.
 
@@ -10,12 +10,12 @@ This is a real native implementation, but stable everyday-browser qualification 
 | DevTools | Actual WebView2 tools, not React replicas. Runtime-version-dependent DevTools features need Windows acceptance testing. Wry on Windows cannot query or programmatically close the DevTools window; turning the mode off blocks new openings, but existing tool windows must be closed manually. |
 | Profiles | Separate UUID data directories, cookies/history/bookmarks. Switching closes old native tabs. No account synchronization. |
 | Sessions | URLs restored; renderer state, unsaved forms, back-stack and scroll are not serialized. |
-| Suspension | Closes inactive native views; resuming reloads the URL. Off by default. Can interrupt audio/download-related pages and discard unsaved state. |
-| Downloads | Native download requests and completion callbacks; unique destination subfolders. No byte progress, pause/resume or cross-session list. |
+| Suspension | Closes inactive native views; resuming reloads the URL. Off by default. Can interrupt audio and discard unsaved state; private/pinned tabs and active/resumable downloads are excluded. |
+| Downloads | Native byte progress, pause/resume/cancel and per-profile persisted history. Resume requires a live engine object and CanResume; after restart an incomplete transfer must start again. Private metadata is excluded; files remain. |
 | Navigation | HTTP/HTTPS only. Custom external protocols are blocked. Popups become tabs; opener-dependent login flows need testing. |
-| Permissions | Camera/microphone/location/etc. denied until an origin-bound permission UI is implemented. |
+| Permissions | Camera/microphone get per-request origin-bound prompts. Other permissions remain denied. No stored grants or full per-site permission manager. |
 | Security features | No custom phishing/malware service; no claim of complete equivalence to Edge/Chrome's browser-level protections. Runtime itself must stay updated. |
-| Unsupported browser features | No extensions, private browsing, password manager, import, sync, default-browser registration UI, print UI or per-site permission manager. |
+| Unsupported browser features | InPrivate tabs, unpacked extension management, native password autosave/autofill and delete-all are implemented. No Chrome Web Store installation, extension toolbar popups, individual password editor, import, sync, default-browser registration UI or print UI. |
 | Diagnostics | CPU/RAM/process tree and top-level load data. DNS/TLS/cache/subrequests and per-tab process attribution unavailable. |
 | Crash reports | Process failure event codes only; no automatic dumps or uploads. |
 | Resource limits | No fabricated CPU/RAM limiter, FPS boost or performance superiority claims. |

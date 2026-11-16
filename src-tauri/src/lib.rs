@@ -31,25 +31,86 @@ pub struct AppState {
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Request {
     Snapshot,
-    Window { operation: window::Action },
-    NewTab { url: String },
-    Activate { id: String },
-    Navigate { id: String, url: String },
-    CloseTab { id: String },
-    Suspend { id: String },
-    Bounds { bounds: browser::Bounds },
-    Engine { id: String, operation: String },
-    ListEntries { kind: String },
-    Bookmark { id: String },
-    RemoveBookmark { id: i64 },
+    Window {
+        operation: window::Action,
+    },
+    NewTab {
+        url: String,
+        #[serde(default)]
+        private: bool,
+    },
+    PinTab {
+        id: String,
+        pinned: bool,
+    },
+    Activate {
+        id: String,
+    },
+    Navigate {
+        id: String,
+        url: String,
+    },
+    CloseTab {
+        id: String,
+    },
+    Suspend {
+        id: String,
+    },
+    Bounds {
+        bounds: browser::Bounds,
+    },
+    Engine {
+        id: String,
+        operation: String,
+    },
+    ListEntries {
+        kind: String,
+    },
+    Bookmark {
+        id: String,
+    },
+    RemoveBookmark {
+        id: i64,
+    },
     ClearHistory,
-    Settings { settings: storage::Settings },
-    CreateProfile { name: String },
-    SwitchProfile { id: String },
+    Settings {
+        settings: storage::Settings,
+    },
+    CreateProfile {
+        name: String,
+    },
+    SwitchProfile {
+        id: String,
+    },
+    Extensions,
+    AddExtension,
+    EnableExtension {
+        id: String,
+        enabled: bool,
+    },
+    RemoveExtension {
+        id: String,
+    },
+    ClearPasswords {
+        consent: bool,
+    },
+    SitePermissions,
+    RespondPermission {
+        id: String,
+        allow: bool,
+    },
     Downloads,
-    ShowDownload { id: String },
+    ShowDownload {
+        id: String,
+    },
+    DownloadAction {
+        id: String,
+        operation: String,
+    },
     Diagnostics,
-    ExportDiagnostics { consent: bool },
+    ExportDiagnostics {
+        consent: bool,
+    },
     CheckUpdate,
     DownloadUpdate,
     InstallUpdate,
@@ -94,7 +155,13 @@ async fn dispatch(
                 json!({"session":state.session.lock().unwrap().clone(),"profiles":store.profiles()?,"profile":state.profile.lock().unwrap().clone(),"settings":store.settings(),"version":env!("CARGO_PKG_VERSION"),"updater_configured":updater::configured()}),
             )
         }
-        Request::NewTab { url } => Ok(json!(browser::create(app.clone(), url).await?)),
+        Request::NewTab { url, private } => Ok(json!(
+            browser::create_with_mode(app.clone(), url, private).await?
+        )),
+        Request::PinTab { id, pinned } => {
+            browser::pin(&app, &id, pinned)?;
+            Ok(Value::Null)
+        }
         Request::Activate { id } => {
             browser::activate(&app, &id)?;
             browser::persist(&app)?;
@@ -188,6 +255,22 @@ async fn dispatch(
                     }
                 }
             }
+            if previous.password_autosave != settings.password_autosave
+                || previous.autofill != settings.autofill
+            {
+                let tabs = state.session.lock().unwrap().tabs.clone();
+                for tab in tabs {
+                    if let Some(view) = app.get_webview(&tab.id) {
+                        browser::extensions::apply_preferences(
+                            view,
+                            settings.password_autosave,
+                            settings.autofill,
+                            tab.private,
+                        )
+                        .await?;
+                    }
+                }
+            }
             if channel_changed {
                 *state.updates.pending.lock().unwrap() = None;
                 *state.updates.bytes.lock().unwrap() = None;
@@ -215,27 +298,82 @@ async fn dispatch(
                 return Err("Ukjent profil".into());
             }
             browser::persist(&app)?;
+            #[cfg(windows)]
+            security::permissions::cancel_all(&app);
+            downloads::persist(&app);
+            downloads::clear_private(&app);
             for (label, v) in app.webviews() {
                 if label.starts_with("tab-") {
                     v.close().map_err(|e| e.to_string())?;
                 }
             }
+            browser::private::cleanup();
             state.store.lock().unwrap().set("active_profile", &id)?;
             *state.profile.lock().unwrap() = id;
-            state.downloads.lock().unwrap().clear();
             browser::restore(&app);
             let id = state.session.lock().unwrap().active.clone();
             browser::activate(&app, &id)?;
             Ok(Value::Null)
         }
-        Request::Downloads => Ok(json!(state.downloads.lock().unwrap().clone())),
+        Request::Extensions => {
+            browser::extensions::execute(app.clone(), browser::extensions::Operation::List).await
+        }
+        Request::AddExtension => browser::extensions::pick_and_add(app.clone()).await,
+        Request::EnableExtension { id, enabled } => {
+            browser::extensions::execute(
+                app.clone(),
+                browser::extensions::Operation::Enable { id, enabled },
+            )
+            .await
+        }
+        Request::RemoveExtension { id } => {
+            browser::extensions::execute(app.clone(), browser::extensions::Operation::Remove { id })
+                .await
+        }
+        Request::ClearPasswords { consent } => {
+            if !consent {
+                return Err("Sletting av passord krever bekreftelse".into());
+            }
+            browser::extensions::execute(
+                app.clone(),
+                browser::extensions::Operation::ClearPasswords,
+            )
+            .await
+        }
+        Request::SitePermissions => {
+            #[cfg(windows)]
+            {
+                return Ok(json!(security::permissions::list(&app).await?));
+            }
+            #[cfg(not(windows))]
+            {
+                Ok(json!([]))
+            }
+        }
+        Request::RespondPermission { id, allow } => {
+            #[cfg(windows)]
+            {
+                security::permissions::respond(&app, &id, allow).await?;
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (id, allow);
+            }
+            Ok(Value::Null)
+        }
+        Request::Downloads => Ok(json!(downloads::list(&app))),
+        Request::DownloadAction { id, operation } => {
+            downloads::action(&app, &id, &operation).await?;
+            Ok(Value::Null)
+        }
         Request::ShowDownload { id } => {
+            let profile = state.profile.lock().unwrap().clone();
             let path = state
                 .downloads
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|d| d.id == id)
+                .find(|d| d.id == id && d.profile == profile)
                 .map(|d| d.path.clone())
                 .ok_or("Ukjent nedlasting")?;
             #[cfg(windows)]
@@ -324,6 +462,7 @@ pub fn run() {
                         .id
                         .clone(),
                 );
+            let downloads = downloads::history::load(&root).map_err(std::io::Error::other)?;
             app.manage(AppState {
                 root,
                 store: Mutex::new(store),
@@ -332,7 +471,7 @@ pub fn run() {
                 bounds: Mutex::new(browser::Bounds::default()),
                 metrics: Mutex::new(developer::Metrics::default()),
                 runtime_version: Mutex::new(None),
-                downloads: Mutex::new(Vec::new()),
+                downloads: Mutex::new(downloads),
                 logs: diagnostics::Logs::default(),
                 updates: updater::Updates::default(),
             });
@@ -393,6 +532,13 @@ pub fn run() {
                             .filter(|t| {
                                 t.id != s.active
                                     && !t.suspended
+                                    && !t.private
+                                    && !state.downloads.lock().unwrap().iter().any(|d| {
+                                        d.view_id == t.id
+                                            && (d.can_resume
+                                                || ["downloading", "paused"]
+                                                    .contains(&d.status.as_str()))
+                                    })
                                     && !t.url.starts_with("elix:")
                                     && chrono::Utc::now().timestamp() - t.last_active
                                         > minutes as i64 * 60
@@ -413,6 +559,15 @@ pub fn run() {
             }
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                 let _ = browser::persist(window.app_handle());
+                downloads::persist(window.app_handle());
+                #[cfg(windows)]
+                security::permissions::cancel_all(window.app_handle());
+                for (label, view) in window.app_handle().webviews() {
+                    if label.starts_with("tab-") {
+                        let _ = view.close();
+                    }
+                }
+                browser::private::cleanup();
             }
         })
         .run(tauri::generate_context!())

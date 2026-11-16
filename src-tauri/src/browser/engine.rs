@@ -30,23 +30,37 @@ pub fn bounds(view: &Webview, b: Bounds) -> Result<(), String> {
 pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
     let state = app.state::<AppState>();
     let profile = state.profile.lock().unwrap().clone();
-    let directory = crate::profiles::directory(&state.root, &profile)?;
-    let dev = state.store.lock().unwrap().settings().developer;
+    let private = tab.private;
+    let directory = if private {
+        super::private::directory(&state.root)?
+    } else {
+        crate::profiles::directory(&state.root, &profile)?
+    };
+    let settings = state.store.lock().unwrap().settings();
+    let profile_download = profile.clone();
     let nav_app = app.clone();
     let nav_id = tab.id.clone();
     let popup_app = app.clone();
     let profile_load = profile.clone();
     let builder = WebviewBuilder::new(
         &tab.id,
-        WebviewUrl::External(tab.url.parse().map_err(|_| "Ugyldig URL")?),
+        WebviewUrl::External("about:blank".parse().map_err(|_| "Ugyldig URL")?),
     )
     .data_directory(directory)
-    .devtools(dev)
+    .incognito(private)
+    .browser_extensions_enabled(!private)
+    .general_autofill_enabled(!private && settings.autofill)
+    .devtools(settings.developer)
     .disable_drag_drop_handler()
     .zoom_hotkeys_enabled(true)
     .on_navigation(move |url| {
+        if url.as_str() == "about:blank" {
+            return true;
+        }
         let allowed = security::remote_allowed(url);
         if allowed {
+            #[cfg(windows)]
+            crate::security::permissions::cancel(&nav_app, &nav_id);
             let state = nav_app.state::<AppState>();
             if let Some(t) = state
                 .session
@@ -56,6 +70,9 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
                 .iter_mut()
                 .find(|t| t.id == nav_id)
             {
+                if t.url != url.as_str() {
+                    t.favicon = None;
+                }
                 t.url = url.to_string();
             }
             browser::emit(&nav_app);
@@ -66,26 +83,23 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         if security::remote_allowed(&url) {
             let app = popup_app.clone();
             tauri::async_runtime::spawn(async move {
-                if browser::create(app.clone(), url.to_string()).await.is_err() {
+                if browser::create_with_mode(app.clone(), url.to_string(), private)
+                    .await
+                    .is_err()
+                {
                     app.state::<AppState>().logs.add("warn", "popup_failed");
                 }
             });
         }
         NewWindowResponse::Deny
     })
-    .on_permission_request(|view, _| {
-        let app = view.app_handle();
-        app.state::<AppState>()
-            .logs
-            .add("warn", "site_permission_denied");
-        let _ = app.emit_to(
-            "shell",
-            "notice",
-            "Nettstedstillatelser som kamera og mikrofon er ikke støttet i 0.1.0.",
-        );
-        PermissionResponse::Deny
-    })
+    // The native permission handler defers camera/microphone decisions to the shell.
+    // Everything without an explicit native handler remains denied.
+    .on_permission_request(|_, _| PermissionResponse::Deny)
     .on_document_title_changed(|view, title| {
+        if view.url().is_ok_and(|url| url.as_str() == "about:blank") {
+            return;
+        }
         let app = view.app_handle();
         let state = app.state::<AppState>();
         if let Some(t) = state
@@ -104,6 +118,9 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
     .on_page_load(move |view, payload| {
         let app = view.app_handle();
         let state = app.state::<AppState>();
+        if payload.url().as_str() == "about:blank" {
+            return;
+        }
         let mut visit = None;
         {
             let mut session = state.session.lock().unwrap();
@@ -125,7 +142,7 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
             }
         }
         if let Some((url, title)) = visit {
-            if security::remote_allowed(payload.url()) {
+            if !private && security::remote_allowed(payload.url()) {
                 if state
                     .store
                     .lock()
@@ -140,11 +157,13 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         browser::emit(app);
         let _ = browser::persist(app);
     })
-    .on_download(|view, event| {
+    .on_download(move |view, event| {
         let app = view.app_handle();
         let state = app.state::<AppState>();
         match event {
-            DownloadEvent::Requested { destination, .. } => {
+            DownloadEvent::Requested {
+                destination, url, ..
+            } => {
                 let Ok(root) = app.path().download_dir() else {
                     return false;
                 };
@@ -156,19 +175,18 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
                     .downloads
                     .lock()
                     .unwrap()
-                    .push(crate::downloads::Download {
+                    .push(crate::downloads::Download::new(
                         id,
-                        name: path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into(),
                         path,
-                        status: "downloading".into(),
-                        time: chrono::Utc::now().to_rfc3339(),
-                    });
+                        profile_download.clone(),
+                        private,
+                        url.to_string(),
+                        view.label().to_string(),
+                    ));
+                let _ = crate::downloads::persist(app);
             }
             DownloadEvent::Finished { path, success, .. } => {
+                #[cfg(not(windows))]
                 if let Some(path) = path {
                     if let Some(d) = state
                         .downloads
@@ -180,6 +198,8 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
                         d.status = if success { "complete" } else { "failed" }.into();
                     }
                 }
+                #[cfg(windows)]
+                let _ = path;
                 state.logs.add(
                     if success { "info" } else { "warn" },
                     if success {
@@ -194,6 +214,12 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         let _ = app.emit_to("shell", "downloads-changed", ());
         true
     });
+    #[cfg(feature = "smoke-tests")]
+    let builder = if std::env::args().any(|arg| arg == "--self-test") {
+        builder.additional_browser_args("--use-fake-device-for-media-stream")
+    } else {
+        builder
+    };
     let window = app.get_window("main").ok_or("Fant ikke hovedvinduet")?;
     let view = window
         .add_child(
@@ -203,7 +229,23 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     #[cfg(windows)]
-    super::windows::attach(&view)?;
+    {
+        super::windows::attach(&view)?;
+        super::favicon::attach(&view)?;
+        crate::security::permissions::attach(&view)?;
+    }
+    super::extensions::configure(
+        &view,
+        settings.password_autosave,
+        settings.autofill,
+        private,
+    )?;
+    if private {
+        super::private::launch(&view, &tab.url)?;
+    } else {
+        view.navigate(tab.url.parse().map_err(|_| "Ugyldig URL")?)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 pub async fn action(view: Webview, action: String, enabled: bool) -> Result<(), String> {
