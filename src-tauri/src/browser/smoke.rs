@@ -183,7 +183,7 @@ pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         let result = exercise(&app);
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, accurate retry-attempt records with no active phantoms after cancellation, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        let message=match result{Ok(())=>"PASS: sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         #[cfg(windows)]
         let message = format!(
             "{message}\nDownload native diagnostics: {}",
@@ -472,6 +472,98 @@ fn concurrent_download_test(app: &AppHandle, origin: &str, return_tab: &str) -> 
     browser::activate(app, return_tab)?;
     Ok(())
 }
+fn canceled_download_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    for (index, endpoint) in ["cancel-active", "cancel-paused"].iter().enumerate() {
+        CANCEL_BYTES[index].store(0, Ordering::SeqCst);
+        CANCEL_ENDED[index].store(false, Ordering::SeqCst);
+        CANCEL_ABORTED[index].store(false, Ordering::SeqCst);
+        let tab =
+            tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
+        wait(|| title(app, &tab, "ELIX native one"))?;
+        browser::navigate(app, &tab, &format!("{origin}/{endpoint}"))?;
+        wait(|| {
+            app.state::<AppState>()
+                .downloads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|download| {
+                    download.view_id == tab
+                        && download.status == "downloading"
+                        && download.bytes_received > 0
+                })
+        })?;
+        let item = app
+            .state::<AppState>()
+            .downloads
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|download| download.view_id == tab)
+            .cloned()
+            .ok_or("Missing cancellation transfer")?;
+        if index == 1 {
+            tauri::async_runtime::block_on(crate::downloads::action(app, &item.id, "pause"))?;
+            wait(|| {
+                app.state::<AppState>()
+                    .downloads
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|download| {
+                        download.id == item.id && download.status == "paused" && download.can_resume
+                    })
+            })?;
+        }
+        tauri::async_runtime::block_on(crate::downloads::action(app, &item.id, "cancel"))?;
+        wait(|| {
+            app.state::<AppState>()
+                .downloads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|download| {
+                    download.id == item.id && download.status == "canceled" && !download.can_resume
+                })
+        })?;
+        // Independent evidence: the actual HTTP writer must observe its socket
+        // closing before the complete payload, not merely an updated UI row.
+        wait(|| CANCEL_ENDED[index].load(Ordering::SeqCst))?;
+        let sent = CANCEL_BYTES[index].load(Ordering::SeqCst);
+        if !CANCEL_ABORTED[index].load(Ordering::SeqCst) || sent == 0 || sent >= SLOW_DOWNLOAD_BYTES
+        {
+            return Err(format!(
+                "Cancel did not stop {endpoint} network transfer: sent={sent}, aborted={}",
+                CANCEL_ABORTED[index].load(Ordering::SeqCst)
+            ));
+        }
+        if std::fs::metadata(&item.path)
+            .is_ok_and(|metadata| metadata.len() >= SLOW_DOWNLOAD_BYTES as u64)
+        {
+            return Err("Canceled transfer still produced a complete file".into());
+        }
+        #[cfg(windows)]
+        tauri::async_runtime::block_on(crate::downloads::windows::refresh(app))?;
+        if app
+            .state::<AppState>()
+            .downloads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|download| {
+                download.view_id == tab
+                    && (download.can_resume
+                        || matches!(download.status.as_str(), "downloading" | "paused"))
+            })
+        {
+            return Err("Canceled transfer was resurrected by a late native callback".into());
+        }
+        browser::close(app, &tab)?;
+    }
+    browser::activate(app, return_tab)?;
+    Ok(())
+}
 fn permission_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     let id = tauri::async_runtime::block_on(browser::create(
         app.clone(),
@@ -502,6 +594,27 @@ fn permission_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     Ok(())
 }
 const SLOW_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
+static CANCEL_BYTES: [std::sync::atomic::AtomicUsize; 2] = [
+    std::sync::atomic::AtomicUsize::new(0),
+    std::sync::atomic::AtomicUsize::new(0),
+];
+static CANCEL_ENDED: [std::sync::atomic::AtomicBool; 2] = [
+    std::sync::atomic::AtomicBool::new(false),
+    std::sync::atomic::AtomicBool::new(false),
+];
+static CANCEL_ABORTED: [std::sync::atomic::AtomicBool; 2] = [
+    std::sync::atomic::AtomicBool::new(false),
+    std::sync::atomic::AtomicBool::new(false),
+];
+fn record_cancel_fixture(index: Option<usize>, sent: usize, ended: bool, aborted: bool) {
+    if let Some(index) = index {
+        use std::sync::atomic::Ordering;
+        CANCEL_BYTES[index].store(sent, Ordering::SeqCst);
+        CANCEL_ABORTED[index].store(aborted, Ordering::SeqCst);
+        CANCEL_ENDED[index].store(ended, Ordering::SeqCst);
+    }
+}
+
 fn serve_fixture(mut stream: std::net::TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
@@ -519,7 +632,14 @@ fn serve_fixture(mut stream: std::net::TcpStream) {
         std::thread::sleep(Duration::from_millis(500));
         return;
     }
-    if request.starts_with("GET /slow ") {
+    let cancel_index = if request.starts_with("GET /cancel-active ") {
+        Some(0)
+    } else if request.starts_with("GET /cancel-paused ") {
+        Some(1)
+    } else {
+        None
+    };
+    if request.starts_with("GET /slow ") || cancel_index.is_some() {
         let offset = request
             .lines()
             .find_map(|line| {
@@ -554,6 +674,7 @@ fn serve_fixture(mut stream: std::net::TcpStream) {
         };
         let headers = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=elix-resume.bin\r\nAccept-Ranges: bytes\r\nETag: \"elix-resume-fixture-v1\"\r\n{range}Connection: close\r\n\r\n", SLOW_DOWNLOAD_BYTES - offset);
         if stream.write_all(headers.as_bytes()).is_err() {
+            record_cancel_fixture(cancel_index, 0, true, true);
             return;
         }
         let bytes = [b'E'; 65536];
@@ -561,12 +682,15 @@ fn serve_fixture(mut stream: std::net::TcpStream) {
         while sent < SLOW_DOWNLOAD_BYTES {
             let length = bytes.len().min(SLOW_DOWNLOAD_BYTES - sent);
             if stream.write_all(&bytes[..length]).is_err() {
+                record_cancel_fixture(cancel_index, sent, true, true);
                 return;
             }
             let _ = stream.flush();
             sent += length;
+            record_cancel_fixture(cancel_index, sent, false, false);
             std::thread::sleep(Duration::from_millis(50));
         }
+        record_cancel_fixture(cancel_index, sent, true, false);
         return;
     }
     if request.starts_with("GET /favicon.png ") {
@@ -763,6 +887,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     }
     resumable_download_test(app, &second, &origin)?;
     concurrent_download_test(app, &origin, &second)?;
+    canceled_download_test(app, &origin, &second)?;
     let broken_url = format!("{origin}/broken");
     browser::navigate(app, &second, &broken_url)?;
     wait(|| {
@@ -806,6 +931,42 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             "Interrupted download attempts are missing or collide: {}",
             serde_json::to_string(&retry_items).map_err(|e| e.to_string())?
         ));
+    }
+    #[cfg(windows)]
+    {
+        use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH;
+        let trace = crate::downloads::windows::debug_trace();
+        if let Some(operations) = trace
+            .as_array()
+            .and_then(|events| {
+                events
+                    .iter()
+                    .rev()
+                    .find(|event| event["event"] == "refresh")
+            })
+            .and_then(|event| event["operations"].as_array())
+        {
+            for operation in operations {
+                let contradictory = operation["state"].as_i64() == Some(0)
+                    && operation["reason"].as_i64()
+                        == Some(
+                            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH.0
+                                as i64,
+                        )
+                    && operation["received"].as_u64() == Some(0)
+                    && operation["can_resume"].as_bool() == Some(false);
+                if contradictory {
+                    let record = retry_items
+                        .iter()
+                        .find(|download| Some(download.id.as_str()) == operation["id"].as_str());
+                    if record
+                        .is_some_and(|download| download.status != "failed" || download.can_resume)
+                    {
+                        return Err("Native nonresumable length-mismatch attempt remained active before cancellation".into());
+                    }
+                }
+            }
+        }
     }
     // A resumable interruption may already be retrying when cleanup runs.
     // Explicitly cancel the live operation before testing tab suspension.

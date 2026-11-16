@@ -145,12 +145,55 @@ unsafe fn take_string(raw: PWSTR) -> windows::core::Result<String> {
     Ok(value?)
 }
 
+fn classify(
+    state: COREWEBVIEW2_DOWNLOAD_STATE,
+    reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
+    received: i64,
+    can_resume: bool,
+) -> (&'static str, bool) {
+    if state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
+        return ("complete", false);
+    }
+    if state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
+        // Verified WebView2 retry inconsistency: an abandoned zero-byte response
+        // reports IN_PROGRESS forever, but has a content-length mismatch and no
+        // resumable transfer. Keep its wrapper so genuine later progress can
+        // recover; do not generalize this to stale USER_PAUSED or other reasons.
+        if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH
+            && received == 0
+            && !can_resume
+        {
+            return ("failed", false);
+        }
+        return ("downloading", false);
+    }
+    if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED {
+        ("canceled", false)
+    } else if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED {
+        ("paused", can_resume)
+    } else {
+        ("failed", can_resume)
+    }
+}
+
 unsafe fn update(
     app: &tauri::AppHandle,
     id: &str,
     operation: &ICoreWebView2DownloadOperation,
     persist: bool,
 ) -> windows::core::Result<bool> {
+    // A successful user Cancel is terminal even when the runtime later emits a
+    // stale IN_PROGRESS/INTERRUPTED snapshot for the abandoned native wrapper.
+    if app
+        .state::<AppState>()
+        .downloads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|download| download.id == id && download.status == "canceled")
+    {
+        return Ok(true);
+    }
     let mut native_state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
     let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE;
     let mut received = 0;
@@ -159,21 +202,12 @@ unsafe fn update(
     operation.State(&mut native_state)?;
     operation.BytesReceived(&mut received)?;
     operation.TotalBytesToReceive(&mut total)?;
-    if native_state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
-        operation.InterruptReason(&mut reason)?;
-        operation.CanResume(&mut can_resume)?;
-    }
-    let status = if native_state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
-        "complete"
-    } else if native_state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
-        "downloading"
-    } else if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED {
-        "paused"
-    } else if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED {
-        "canceled"
-    } else {
-        "failed"
-    };
+    // Some WebView2 builds retain IN_PROGRESS for a discarded response while its
+    // interrupt reason already says the response body did not match its length.
+    // Read all native fields, rather than hiding the reason behind State.
+    operation.InterruptReason(&mut reason)?;
+    operation.CanResume(&mut can_resume)?;
+    let (status, can_resume) = classify(native_state, reason, received, can_resume.as_bool());
     {
         let state = app.state::<AppState>();
         let mut downloads = state.downloads.lock().unwrap();
@@ -181,7 +215,7 @@ unsafe fn update(
             download.status = status.into();
             download.bytes_received = received.max(0) as u64;
             download.total_bytes = (total >= 0).then_some(total as u64);
-            download.can_resume = can_resume.as_bool();
+            download.can_resume = can_resume;
         }
         if persist && super::history::save(&state.root, &downloads).is_err() {
             state.logs.add("error", "download_history_write_failed");
@@ -226,7 +260,30 @@ pub async fn action(app: &tauri::AppHandle, path: PathBuf, action: String) -> Re
                         }
                         operation.Resume().map_err(|e| e.to_string())?;
                     }
-                    "cancel" => operation.Cancel().map_err(|e| e.to_string())?,
+                    "cancel" => {
+                        operation.Cancel().map_err(|e| e.to_string())?;
+                        // S_OK accepts the cancellation. Some runtime wrappers
+                        // retain their previous State/CanResume afterward; that
+                        // stale snapshot must not offer Resume or block tab closure.
+                        {
+                            let state = callback_app.state::<AppState>();
+                            let mut downloads = state.downloads.lock().unwrap();
+                            if let Some(download) = downloads
+                                .iter_mut()
+                                .find(|download| download.id == active.id)
+                            {
+                                // Completion can win the race while Cancel is executing.
+                                if download.status != "complete" {
+                                    download.status = "canceled".into();
+                                }
+                                download.can_resume = false;
+                            }
+                        }
+                        OPERATIONS.with(|items| items.borrow_mut().remove(&identity));
+                        super::persist(&callback_app);
+                        let _ = callback_app.emit_to("shell", "downloads-changed", ());
+                        return Ok(());
+                    }
                     _ => return Err("Ukjent nedlastingshandling".into()),
                 }
                 if update(&callback_app, &active.id, &operation, true).map_err(|e| e.to_string())? {
@@ -247,7 +304,7 @@ pub async fn action(app: &tauri::AppHandle, path: PathBuf, action: String) -> Re
 }
 
 /// Reconcile native getters as well as events. Some WebView2 builds can miss a
-/// StateChanged callback during automatic retries; native State remains authoritative.
+/// StateChanged callback during automatic retries; read State and InterruptReason.
 unsafe fn refresh_on_ui(app: &tauri::AppHandle) -> windows::core::Result<()> {
     let operations = OPERATIONS.with(|items| {
         items
@@ -352,4 +409,72 @@ unsafe fn trace_navigation(core: &ICoreWebView2, view_id: &str) -> windows::core
             trace(serde_json::json!({"event":"navigation_complete","view":completed_view,"navigation":id,"success":success.as_bool(),"error":error.0}));
         }Ok(())
     })),&mut token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discarded_content_length_attempt_does_not_remain_active() {
+        let mismatch = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH;
+        assert_eq!(
+            classify(COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS, mismatch, 0, false),
+            ("failed", false)
+        );
+        // A genuine retry starts transferring: the stale reason must not hide it.
+        assert_eq!(
+            classify(
+                COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                mismatch,
+                128,
+                false
+            ),
+            ("downloading", false)
+        );
+        assert_eq!(
+            classify(COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED, mismatch, 0, true),
+            ("failed", true)
+        );
+    }
+
+    #[test]
+    fn resumed_download_and_completed_empty_file_are_not_failed() {
+        assert_eq!(
+            classify(
+                COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED,
+                0,
+                false
+            ),
+            ("downloading", false)
+        );
+        assert_eq!(
+            classify(
+                COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE,
+                0,
+                false
+            ),
+            ("downloading", false)
+        );
+        assert_eq!(
+            classify(
+                COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED,
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED,
+                32,
+                true
+            ),
+            ("paused", true)
+        );
+        assert_eq!(
+            classify(
+                COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED,
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH,
+                0,
+                false
+            ),
+            ("complete", false)
+        );
+    }
 }
