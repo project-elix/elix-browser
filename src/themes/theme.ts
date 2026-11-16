@@ -1,5 +1,5 @@
 import type {Appearance} from '../types';
-export const defaultAppearance:Appearance={accent:'#43d3e8',background:'#080b12',density:'comfortable',radius:12,reduce_motion:false,gradient:true};
+export const defaultAppearance:Appearance={accent:'#43d3e8',background:'#080b12',density:'comfortable',radius:12,reduce_motion:false,gradient:true,sidebar:'icons'};
 export const presets=[{name:'ELIX Midnight',accent:'#43d3e8',background:'#080b12'},{name:'Obsidian',accent:'#a78bfa',background:'#121016'},{name:'Frost',accent:'#1768cf',background:'#f4f7fb'},{name:'Forest',accent:'#47de9c',background:'#081813'},{name:'Ember',accent:'#ff9c58',background:'#1a1010'}];
 const rgb=(hex:string)=>[1,3,5].map(i=>parseInt(hex.slice(i,i+2),16));
 const hex=(values:number[])=>'#'+values.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');

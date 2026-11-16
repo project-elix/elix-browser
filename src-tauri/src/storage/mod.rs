@@ -43,6 +43,7 @@ pub struct Appearance {
     pub radius: u8,
     pub reduce_motion: bool,
     pub gradient: bool,
+    pub sidebar: String,
 }
 impl Default for Appearance {
     fn default() -> Self {
@@ -53,6 +54,7 @@ impl Default for Appearance {
             radius: 12,
             reduce_motion: false,
             gradient: true,
+            sidebar: "icons".into(),
         }
     }
 }
@@ -69,6 +71,7 @@ impl Settings {
             && color(&self.appearance.background)
             && ["comfortable", "compact"].contains(&self.appearance.density.as_str())
             && self.appearance.radius <= 20
+            && ["icons", "expanded", "hidden"].contains(&self.appearance.sidebar.as_str())
     }
 }
 pub struct Store {
@@ -268,6 +271,7 @@ mod tests {
         settings.appearance.accent = "#1768cf".into();
         settings.appearance.radius = 0;
         settings.appearance.density = "compact".into();
+        settings.appearance.sidebar = "expanded".into();
         {
             let store = Store::open(&path).unwrap();
             store
@@ -283,6 +287,18 @@ mod tests {
         settings.appearance.accent = "#ffffff".into();
         settings.appearance.radius = 21;
         assert!(!settings.valid());
+    }
+    #[test]
+    fn alpha_three_preferences_preserve_custom_theme_and_gain_sidebar() {
+        let settings: Settings = serde_json::from_str(r##"{"channel":"developer","appearance":{"accent":"#1768cf","background":"#f4f7fb","density":"compact","radius":3,"gradient":false,"reduce_motion":true}}"##).unwrap();
+        assert_eq!(settings.channel, "developer");
+        assert_eq!(settings.appearance.accent, "#1768cf");
+        assert_eq!(settings.appearance.sidebar, "icons");
+        assert!(settings.appearance.reduce_motion && !settings.appearance.gradient);
+        assert!(settings.valid());
+        let mut invalid = settings;
+        invalid.appearance.sidebar = "invalid".into();
+        assert!(!invalid.valid());
     }
     #[test]
     fn newer_database_is_not_modified() {

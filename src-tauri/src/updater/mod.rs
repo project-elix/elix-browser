@@ -52,6 +52,8 @@ pub async fn check(app: &AppHandle) -> Result<Value, String> {
     if url.scheme() != "https" {
         return Err("Oppdateringer krever HTTPS".into());
     }
+    *state.updates.pending.lock().unwrap() = None;
+    *state.updates.bytes.lock().unwrap() = None;
     state.logs.add("info", "update_check_started");
     let result = app
         .updater_builder()
@@ -67,6 +69,12 @@ pub async fn check(app: &AppHandle) -> Result<Value, String> {
         .await;
     let update = match result {
         Ok(v) => v,
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
+            state.logs.add("info", "update_channel_unavailable");
+            return Ok(
+                json!({"state":"unavailable","message":format!("Ingen utgivelsesinformasjon er tilgjengelig for {} akkurat nå. Kanalen kan være tom eller midlertidig utilgjengelig. Velg Developer for alpha-utgaver, eller prøv igjen senere.", channel)}),
+            );
+        }
         Err(_) => {
             state.logs.add("warn", "update_check_failed");
             return Err("Kunne ikke sjekke oppdateringer. Prøv igjen senere.".into());

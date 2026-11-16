@@ -175,16 +175,23 @@ async fn dispatch(
             if !settings.valid() {
                 return Err("Ugyldige innstillinger".into());
             }
-            if state.updates.busy.load(std::sync::atomic::Ordering::SeqCst) {
+            let previous = state.store.lock().unwrap().settings();
+            let channel_changed = previous.channel != settings.channel;
+            if channel_changed && state.updates.busy.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("Vent til oppdateringsoperasjonen er ferdig".into());
             }
-            for (id, v) in app.webviews() {
-                if id.starts_with("tab-") {
-                    browser::engine::action(v, "set_developer".into(), settings.developer).await?;
+            if previous.developer != settings.developer {
+                for (id, v) in app.webviews() {
+                    if id.starts_with("tab-") {
+                        browser::engine::action(v, "set_developer".into(), settings.developer)
+                            .await?;
+                    }
                 }
             }
-            *state.updates.pending.lock().unwrap() = None;
-            *state.updates.bytes.lock().unwrap() = None;
+            if channel_changed {
+                *state.updates.pending.lock().unwrap() = None;
+                *state.updates.bytes.lock().unwrap() = None;
+            }
             state.store.lock().unwrap().set(
                 "preferences",
                 &serde_json::to_string(&settings).map_err(|e| e.to_string())?,

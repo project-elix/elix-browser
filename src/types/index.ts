@@ -1,6 +1,6 @@
 export interface Tab {id:string;url:string;title:string;loading:boolean;suspended:boolean;last_active:number;load_ms:number|null;http_status:number|null;navigation_error:string|null}
 export interface Session {tabs:Tab[];active:string}
-export interface Appearance {accent:string;background:string;density:'comfortable'|'compact';radius:number;reduce_motion:boolean;gradient:boolean}
+export interface Appearance {accent:string;background:string;density:'comfortable'|'compact';radius:number;reduce_motion:boolean;gradient:boolean;sidebar:'icons'|'expanded'|'hidden'}
 export interface Settings {appearance:Appearance;developer:boolean;gaming:boolean;channel:'stable'|'beta'|'developer';suspend_minutes:number}
 export interface Profile {id:string;name:string}
 export interface Snapshot {session:Session;profiles:Profile[];profile:string;settings:Settings;version:string;updater_configured:boolean}
@@ -9,4 +9,4 @@ export interface Download {id:string;name:string;path:string;status:string;time:
 export interface Sample {time:string;cpu_percent:number|null;memory_bytes:number;processes:number}
 export interface Log {time:string;level:string;code:string}
 export interface Diagnostics {system:Record<string,string|number|null>;samples:Sample[];logs:Log[];network:Tab[];unavailable:string[];crash_reports:string}
-export interface UpdateState {state:'idle'|'checking'|'available'|'downloading'|'ready'|'current'|'unconfigured'|'error'|'installed';version?:string;notes?:string;message?:string;received?:number;total?:number|null}
+export interface UpdateState {state:'idle'|'checking'|'available'|'downloading'|'ready'|'current'|'unconfigured'|'unavailable'|'error'|'installed';version?:string;notes?:string;message?:string;received?:number;total?:number|null}
