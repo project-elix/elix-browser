@@ -1,8 +1,9 @@
 use crate::{browser, AppState};
 use tauri::{Emitter, Manager, Webview};
 use webview2_com::{
-    AcceleratorKeyPressedEventHandler, Microsoft::Web::WebView2::Win32::*,
-    NavigationCompletedEventHandler, ProcessFailedEventHandler,
+    AcceleratorKeyPressedEventHandler, DownloadStartingEventHandler,
+    Microsoft::Web::WebView2::Win32::*, NavigationCompletedEventHandler, ProcessFailedEventHandler,
+    StateChangedEventHandler,
 };
 use windows::{
     core::{Interface, PWSTR},
@@ -24,6 +25,53 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                 *app.state::<AppState>().runtime_version.lock().unwrap() = value;
                 let settings = core.Settings()?;
                 settings.SetAreDefaultContextMenusEnabled(true)?;
+                // Wry deliberately returns path=None for interrupted downloads. Read
+                // ResultFilePath from the real operation to identify the failed item,
+                // including concurrent downloads of the same URL.
+                let download_app = app.clone();
+                let mut download_token = 0;
+                core.cast::<ICoreWebView2_4>()?.add_DownloadStarting(
+                    &DownloadStartingEventHandler::create(Box::new(move |_, args| {
+                        if let Some(args) = args {
+                            let app = download_app.clone();
+                            let mut token = 0;
+                            args.DownloadOperation()?.add_StateChanged(
+                                &StateChangedEventHandler::create(Box::new(move |operation, _| {
+                                    if let Some(operation) = operation {
+                                        let mut status = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+                                        operation.State(&mut status)?;
+                                        if status == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
+                                            let mut raw = PWSTR::null();
+                                            operation.ResultFilePath(&mut raw)?;
+                                            let path =
+                                                raw.to_string().ok().map(std::path::PathBuf::from);
+                                            windows::Win32::System::Com::CoTaskMemFree(Some(
+                                                raw.0.cast(),
+                                            ));
+                                            if let Some(path) = path {
+                                                let state = app.state::<AppState>();
+                                                if let Some(d) = state
+                                                    .downloads
+                                                    .lock()
+                                                    .unwrap()
+                                                    .iter_mut()
+                                                    .find(|d| d.path == path)
+                                                {
+                                                    d.status = "failed".into();
+                                                };
+                                            }
+                                            let _ = app.emit_to("shell", "downloads-changed", ());
+                                        }
+                                    }
+                                    Ok(())
+                                })),
+                                &mut token,
+                            )?;
+                        }
+                        Ok(())
+                    })),
+                    &mut download_token,
+                )?;
                 let keyboard_app = app.clone();
                 let keyboard_id = id.clone();
                 let mut token = 0;

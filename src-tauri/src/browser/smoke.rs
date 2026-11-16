@@ -29,7 +29,7 @@ pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         let result = exercise(&app);
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: native HTTP navigation, title/status, tab switching, back/forward, DevTools, download bytes, suspension, profile storage isolation".to_owned(),Err(e)=>format!("FAIL: {e}")};
+        let message=match result{Ok(())=>"PASS: native HTTP navigation, title/status, tab switching, back/forward, DevTools, download bytes/failure, suspension, profile storage isolation, active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}")};
         println!("{message}");
         if let Some(path) = std::env::var_os("ELIX_SMOKE_RESULT") {
             let _ = std::fs::write(path, &message);
@@ -49,6 +49,10 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             let mut request = [0; 8192];
             let size = stream.read(&mut request).unwrap_or(0);
             let request = String::from_utf8_lossy(&request[..size]);
+            if request.starts_with("GET /broken ") {
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=broken.txt\r\nConnection: close\r\n\r\npartial");
+                continue;
+            }
             let download = request.starts_with("GET /download ");
             let body = if download {
                 "elix-native-download".to_owned()
@@ -105,6 +109,9 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         "devtools".into(),
         true,
     ))?;
+    view.eval("(async()=>{if(!window.__TAURI_INTERNALS__?.invoke){document.title='ELIX IPC denied';return}try{await window.__TAURI_INTERNALS__.invoke('dispatch',{request:{action:'snapshot'}});document.title='ELIX IPC allowed'}catch{document.title='ELIX IPC denied'}})()")
+        .map_err(|e| e.to_string())?;
+    wait(|| title(app, &first, "ELIX IPC denied"))?;
     let second =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
     wait(|| title(app, &second, "ELIX native one"))?;
@@ -130,6 +137,15 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     if std::fs::read_to_string(&path).map_err(|e| e.to_string())? != "elix-native-download" {
         return Err("Downloaded bytes differ".into());
     }
+    browser::navigate(app, &second, &format!("{origin}/broken"))?;
+    wait(|| {
+        app.state::<AppState>()
+            .downloads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|d| d.status == "failed")
+    })?;
     browser::activate(app, &first)?;
     browser::suspend(app, &second)?;
     if app.get_webview(&second).is_some() {
@@ -150,5 +166,20 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     }
     browser::persist(app)?;
     browser::close(app, &second)?;
+    for (label, view) in app.webviews() {
+        if label.starts_with("tab-") {
+            view.close().map_err(|e| e.to_string())?;
+        }
+    }
+    browser::restore(app);
+    let state = app.state::<AppState>();
+    let session = state.session.lock().unwrap();
+    if !session
+        .tabs
+        .iter()
+        .any(|t| t.id == session.active && t.url == format!("{origin}/two"))
+    {
+        return Err("Active tab was not restored".into());
+    }
     Ok(())
 }

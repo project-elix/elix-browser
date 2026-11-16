@@ -110,7 +110,8 @@ async fn dispatch(
             Ok(Value::Null)
         }
         Request::Bounds { bounds } => {
-            if let Some(v) = app.get_webview(&state.session.lock().unwrap().active) {
+            let active = state.session.lock().unwrap().active.clone();
+            if let Some(v) = app.get_webview(&active) {
                 browser::engine::bounds(&v, bounds)?;
             }
             *state.bounds.lock().unwrap() = bounds;
@@ -329,8 +330,10 @@ pub fn run() {
             });
             let window = tauri::window::WindowBuilder::new(app, "main")
                 .title("ELIX Browser")
+                .theme(Some(tauri::Theme::Dark))
                 .inner_size(1380., 900.)
                 .min_inner_size(900., 600.)
+                .maximized(true)
                 .build()?;
             let shell = tauri::webview::WebviewBuilder::new(
                 "shell",

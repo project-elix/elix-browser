@@ -95,6 +95,7 @@ pub fn restore(app: &AppHandle) {
         .unwrap_or_default();
     s.tabs.retain(|t| security::destination(&t.url).is_ok());
     s.tabs.truncate(100);
+    let active_index = s.tabs.iter().position(|t| t.id == s.active).unwrap_or(0);
     for t in &mut s.tabs {
         t.id = format!("tab-{}", uuid::Uuid::new_v4());
         t.loading = false;
@@ -104,7 +105,7 @@ pub fn restore(app: &AppHandle) {
     if s.tabs.is_empty() {
         s.tabs.push(Tab::new("elix://start".into()));
     }
-    s.active = s.tabs[0].id.clone();
+    s.active = s.tabs[active_index.min(s.tabs.len() - 1)].id.clone();
     *state.session.lock().unwrap() = s;
 }
 pub async fn create(app: AppHandle, input: String) -> Result<String, String> {
