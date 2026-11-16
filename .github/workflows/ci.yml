@@ -1,0 +1,47 @@
+name: Windows verification
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm test
+      - run: npm run check:release
+      - run: npm run build
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - run: npm run tauri build -- --bundles nsis -- --locked
+      - name: Test installed app starts
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $dest = Join-Path $env:RUNNER_TEMP 'ELIX-smoke'
+          $p = Start-Process $installer.FullName -ArgumentList @('/S', "/D=$dest") -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
+          $exe = Join-Path $dest 'elix-browser.exe'
+          if (!(Test-Path $exe)) { throw 'Installed executable missing' }
+          $app = Start-Process $exe -PassThru
+          Start-Sleep -Seconds 12
+          $app.Refresh()
+          if ($app.HasExited) { throw 'Application exited during startup' }
+          Stop-Process -Id $app.Id
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ELIX-Windows-development-build
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

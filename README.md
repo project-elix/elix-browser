@@ -1,2 +1,61 @@
-# elix-browser
-ELIX Browser — Windows desktop browser with Rust, Tauri 2 and WebView2.
+# ELIX Browser
+
+Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript and SQLite. Norwegian interface; dark blue/cyan ELIX identity.
+
+**Version 0.1.0 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
+
+## Run on Windows
+
+Install Node.js 24 LTS, stable Rust (MSVC), Visual Studio 2022 Build Tools with **Desktop development with C++**, and Microsoft Edge WebView2 Evergreen Runtime.
+
+```powershell
+git clone https://github.com/project-elix/elix-browser.git
+cd elix-browser
+npm ci
+npm run desktop
+```
+
+Build a development installer (no updater key configured):
+
+```powershell
+npm run tauri build -- --bundles nsis -- --locked
+```
+
+The NSIS installer is written to `src-tauri/target/release/bundle/nsis/`. Ordinary CI also uploads a development installer artifact after its checks. This installer is not an official signed update.
+
+## Implemented
+
+- Native child WebViews for tabs; navigation, redirects, titles, new-window links redirected to tabs, native back/forward/reload/stop.
+- Bookmarks, history, profile records, settings and tab-session persistence in SQLite. Profile-specific WebView2 data directories.
+- Downloads via the engine, completion/failure list and Show folder. Files are never automatically opened.
+- Start page, gaming dashboard, optional reload-based tab suspension, side panel.
+- Developer mode enables WebView2 DevTools on page WebViews, F12/Ctrl+Shift+I/context menu Inspect. Local diagnostic dashboard uses process measurements and native navigation events.
+- Updater checks at startup and every six hours, channel selection, progress, signature verification, explicit install step and persistent user data. Official updater configuration is embedded at build time, never accepted from a web page.
+- Windows CI, signed release workflow, admin publication gate, pause-channel workflow and a fail-closed download website.
+
+## Verify
+
+```powershell
+npm test
+npm run build
+npm run check:release
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+```
+
+The headless persistence/security harness can also run on Linux:
+
+```bash
+cargo test --manifest-path tests/core/Cargo.toml --locked
+```
+
+Multi-WebView APIs require Tauri's **unstable** feature. The project pins Tauri 2.12.5 and commits dependency lockfiles. WebView2 remains responsible for web-page rendering and JavaScript; Rust alone does not make websites faster.
+
+## Release administration
+
+GitHub Actions, Environments and Releases are the administration surface. GitHub authentication and repository roles protect it; there is no custom web admin accepting arbitrary executables. [Release setup and operations](docs/RELEASING.md) describes keys, environments, channels, pauses and promotion.
+
+**Before first stable release:** configure signing secrets and protected environments, complete the Windows acceptance checklist including a genuine 0.1.0 → 0.1.1 update, finalize publisher/privacy contact details, and review Authenticode signing. Nothing in this repository claims those steps have already passed.
+
+## Layout
+
+`src-tauri/src/browser/engine.rs` and `browser/windows.rs` are the engine seam. Storage, profiles, downloads, diagnostics and updater are separate Rust modules. The UI lives in `src/`; the public landing-page source in `website/`; CI in `.github/workflows/`; reproducible checks in `tests/` and `scripts/`.

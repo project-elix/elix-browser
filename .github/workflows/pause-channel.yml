@@ -1,0 +1,31 @@
+name: Pause update channel
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        type: choice
+        options: [stable, beta, developer]
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: elix-release
+  cancel-in-progress: false
+jobs:
+  pause:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release-publication
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Withdraw channel manifest and website entry
+        run: node scripts/pause-channel.mjs

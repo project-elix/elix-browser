@@ -1,0 +1,3 @@
+import{describe,it,expect}from'vitest';import{progress,internalTitle}from'../src/browser/bridge';
+describe('update progress',()=>{it('does not fabricate progress without Content-Length',()=>{expect(progress(123,null)).toBeNull();expect(progress(0,0)).toBeNull()});it('is bounded for inconsistent server sizes',()=>{expect(progress(20,10)).toBe(100);expect(progress(-1,10)).toBe(0);expect(progress(5,10)).toBe(50)})});
+describe('internal routes',()=>{it('labels internal developer dashboard independently from web titles',()=>{expect(internalTitle('elix://developer')).toBe('Utvikler');expect(internalTitle('elix://settings')).toBe('Innstillinger')})});

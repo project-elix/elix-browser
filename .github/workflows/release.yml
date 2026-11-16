@@ -1,0 +1,87 @@
+name: Build and publish signed release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version already committed in all manifests
+        required: true
+        type: string
+      channel:
+        description: Release channel
+        type: choice
+        options: [stable, beta, developer]
+        required: true
+      notes:
+        description: Release notes (plain text)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: elix-release
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    environment: release-signing
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_CHANNEL: ${{ inputs.channel }}
+      RELEASE_NOTES: ${{ inputs.notes }}
+      ELIX_UPDATE_BASE: https://github.com/${{ github.repository }}/releases/download/channels
+      ELIX_UPDATE_PUBLIC_KEY: ${{ vars.ELIX_UPDATE_PUBLIC_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      REQUIRE_RELEASE_SECRETS: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm run check:release
+      - run: npm test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Enable signed updater artifacts
+        shell: pwsh
+        run: |
+          '{"bundle":{"createUpdaterArtifacts":true}}' | Out-File -Encoding utf8 src-tauri/tauri.release.json
+      - run: npm run tauri build -- --config src-tauri/tauri.release.json --bundles nsis -- --locked
+      - name: Create immutable draft with installer and signature
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:RELEASE_VERSION"
+          $existing = gh release view $tag --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Release already exists; do not overwrite it.' }
+          $env:RELEASE_NOTES | Out-File -Encoding utf8 release-notes.txt
+          $assets = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe, src-tauri/target/release/bundle/nsis/*-setup.exe.sig | ForEach-Object FullName)
+          if ($assets.Count -ne 2) { throw 'Installer/signature pair missing' }
+          gh release create $tag @assets --draft --target $env:GITHUB_SHA --title "ELIX Browser $env:RELEASE_VERSION" --notes-file release-notes.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Draft release failed' }
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release-publication
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_CHANNEL: ${{ inputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/publish-channel.mjs

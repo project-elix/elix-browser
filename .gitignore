@@ -1,0 +1,15 @@
+node_modules/
+dist/
+target/
+*.key
+*.key.pub
+.env*
+!.env.example
+src-tauri/tauri.release.json
+*.log
+*.zip
+*.tar.gz
+channel-output/
+release-notes.txt
+
+src-tauri/gen/
