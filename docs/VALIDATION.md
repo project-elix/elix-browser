@@ -3,7 +3,7 @@
 ## Executed in the build workspace
 
 - Production React/TypeScript/Vite build: passed.
-- Vitest release-channel/input/progress and theme contrast tests: 11 passed.
+- Vitest release-channel/input/progress, theme contrast and publisher recovery tests: 14 passed.
 - Actual Rust storage and URL-security modules, headless Linux harness: 6 passed (including Alpha 1 preference compatibility and theme persistence).
 - Windows GNU target type-check (Tauri, WebView2 COM hooks, updater, SQLite): passed using x86_64-pc-windows-gnu. This checks Windows-only COM calls; it does not run Windows.
 - Start-page visual inspection: passed in Chromium frontend preview. This validates layout, not WebView2 behavior. The public page now uses an actual Windows CI desktop capture, explicitly labeled.
@@ -66,6 +66,12 @@ Alpha 1 (`0.1.0-dev.1`) was built without test features, silently installed, lau
 - Run [43897753542](https://github.com/project-elix/elix-browser/actions/runs/43897753542) **passed the actual signed 0.1.0 → 0.1.1 round trip**: installed old NSIS package, production check/download/signature verification/install, automatic restart into the new executable, preserved two profiles, bookmarks, history, preferences, persistent WebView2 cookies and profile files. Corrupted bytes and a correctly signed old installer replayed as a newer version were rejected.
 - The first attempted test hung at the interactive CurrentUser root-certificate trust dialog. The corrected fixture uses the LocalMachine root store on its disposable hosted Windows runner and removes the ephemeral certificate afterward. TLS verification remains enabled. No test certificate or test signing key is used in distributed alpha builds.
 - The automatic round trip qualifies the tested path, not the whole manual acceptance matrix. Third-party logins, UI interaction, high-DPI visuals, installer interruption/cancellation and power loss still need manual acceptance.
-- Permanent production signing credentials and a Windows Authenticode publisher certificate are not configured. Passing a disposable-key test does not activate a public updater channel.
+- At Alpha 2 publication, permanent production signing credentials and a Windows Authenticode publisher certificate were not configured. Passing a disposable-key test alone does not activate a public updater channel. See the Alpha 3 record below for the later permanent-key configuration.
 
 Alpha 2 publication run [43897911998](https://github.com/project-elix/elix-browser/actions/runs/43897911998) passed native verification, built the distributable without test features, silently installed/launched it, and published `0.1.0-dev.2`. Public bytes were independently hashed and matched both CI and GitHub digests.
+
+## Alpha 3 verification — 2026-11-16
+
+Release source `20b61c2007bc699fdfb9299a7c1d4124d0b6e267`, run [43902529321](https://github.com/project-elix/elix-browser/actions/runs/43902529321). Both native Windows verification and the separate signed upgrade round trip passed on this source. The upgrade result explicitly verifies profiles, bookmarks, history, settings, cookies and profile files, with tampered/replayed packages rejected. Permanent production updater credentials have now been configured separately from those disposable test credentials. Windows Authenticode remains unconfigured.
+
+The signed production distributable installed and started successfully. Independent public-byte signature, signed-version and tamper-rejection checks passed. The initial publication needed fixes for draft lookup and post-publication asset URLs; gated recovery runs 43906863977 and 43907644207 completed successfully. The final Developer JSON and release index were checked against the published immutable installer URL and signature. Remaining manual acceptance limits above still apply.

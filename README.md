@@ -1,16 +1,16 @@
 # ELIX Browser
 
-<img src="public/elix-mark.png" width="240" alt="ELIX Browser logo">
+<img src="public/elix-mark.png" width="120" alt="ELIX Browser logo">
 
 Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript and SQLite. Norwegian interface; dark blue/cyan ELIX identity.
 
 Product site: https://elix-browser-download.andreasdan04.chatgpt.site
 
-**Version 0.1.0-dev.2 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
+**Version 0.1.0-dev.3 is a development implementation, not a qualified stable release.** This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and [limitations](docs/LIMITATIONS.md) before distribution.
 
 ## Alpha test for Windows
 
-**[Download Alpha 2 for Windows x64](https://github.com/project-elix/elix-browser/releases/download/v0.1.0-dev.2/ELIX.Browser_0.1.0-dev.2_x64-setup.exe)** — version 0.1.0-dev.2, published 16 November 2026 after Windows verification and a separate installed-launch check. It needs no personal server. Automatic ELIX updates are disabled and the installer is not Authenticode-signed. See [alpha installation and testing](docs/ALPHA-2.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
+**[Download Alpha 3 for Windows x64](https://github.com/project-elix/elix-browser/releases/download/v0.1.0-dev.3/ELIX.Browser_0.1.0-dev.3_x64-setup.exe)** — version 0.1.0-dev.3, published 16 November 2026 after Windows verification and a separate installed-launch check. It needs no personal server. Install this version manually once over Alpha 1/2, then choose **Innstillinger → Motta alpha-oppdateringer** to receive future signed Developer updates. The installer has no Windows Authenticode publisher certificate. See [alpha installation and testing](docs/ALPHA-3.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
 
 ## Run on Windows
 
@@ -64,7 +64,7 @@ Multi-WebView APIs require Tauri's **unstable** feature. The project pins Tauri 
 
 GitHub Actions, Environments and Releases are the administration surface. GitHub authentication and repository roles protect it; there is no custom web admin accepting arbitrary executables. [Release setup and operations](docs/RELEASING.md) describes keys, environments, channels, pauses and promotion.
 
-**Before first stable release:** configure signing secrets and protected environments, complete the Windows acceptance checklist including a genuine 0.1.0 → 0.1.1 update, finalize publisher/privacy contact details, and review Authenticode signing. Nothing in this repository claims those steps have already passed.
+**Before first stable release:** complete the remaining manual Windows acceptance checklist, finalize publisher/privacy contact details, and review [free Windows signing requirements](docs/WINDOWS-SIGNING.md). Protected signing environments and permanent updater credentials are configured, and the automated signed 0.1.0 → 0.1.1 round trip has passed; broader stable qualification remains outstanding.
 
 ## Layout
 

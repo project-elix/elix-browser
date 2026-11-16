@@ -4,20 +4,20 @@
 
 The `release-signing` and `release-publication` environments have been created in `project-elix/elix-browser`, restricted to the `main` branch, with `andreasdan04` as required reviewer and administrator bypass disabled. Self-review remains permitted so the sole owner can approve a manually started release. Permanent encrypted updater key and password are configured as environment secrets in `release-signing`, together with the `ELIX_UPDATE_PUBLIC_KEY` environment variable. Public-key SHA-256 fingerprint: `515739145370edcde3ba17444835187376930f98e2e182d2f0023535c24ca847`. No Windows Authenticode publisher certificate is configured.
 
-## One-time owner setup
+## Key recovery and future setup
 
 1. Retain the configured Environment protection. Before adding more maintainers, require PR checks/reviews on main, protect version tags and require organization 2FA. Add a second reviewer if independent approval is desired. YAML references alone do not create approval policies.
-2. Generate a signing key on an owner-controlled machine using the installed, locked Tauri CLI:
+2. The permanent key is already configured. Do **not** generate a replacement for routine releases: existing installations trust the original public key. For a new independent application only, generate a signing key on an owner-controlled machine using the installed, locked Tauri CLI:
 
    ```powershell
    npm run tauri signer generate -- -w "$env:USERPROFILE\.tauri\elix.key"
    ```
 
-   Keep an encrypted offline backup. Do not commit the key or paste it in chat.
+   Keep an encrypted offline backup when provisioning keys. No owner-held offline backup has been delivered by this setup; the configured key and password are currently retained in protected GitHub environment secrets. Do not delete those secrets or rotate the key casually. Do not commit the key or paste it in chat.
 3. Store the private-key contents in GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY`, and its password in `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, scoped to `release-signing`. Put the public-key contents in environment variable `ELIX_UPDATE_PUBLIC_KEY` in `release-signing`. CI embeds the public key and HTTPS channel base into the Rust binary.
-4. Verify the CI installer smoke test, run the Windows acceptance checklist and the signed updater round trip. Complete publisher details/privacy contact; decide and configure Authenticode signing before broad public distribution. Tauri signing does not establish SmartScreen reputation.
+4. Verify the CI installer smoke test, run the Windows acceptance checklist and the signed updater round trip. Complete publisher details/privacy contact; review the free Authenticode route and remaining owner decisions in [WINDOWS-SIGNING.md](WINDOWS-SIGNING.md) before broad public distribution. Tauri signing does not establish SmartScreen reputation.
 
-No keys are included in this source. Ordinary development builds use an empty updater configuration and report `unconfigured`; they cannot silently accept unsigned updates.
+No private keys are included in this source. The public verification key is available in `docs/update-public-key.txt`. Ordinary development builds use an empty updater configuration and report `unconfigured`; they cannot silently accept unsigned updates.
 
 ## Normal release
 
@@ -45,3 +45,9 @@ Run **Pause update channel**, select the channel and approve through `release-pu
 ## Interrupted updates
 
 Downloads are verified by the updater before bytes become installable. Failed downloads/signatures discard staged bytes; the original app and profile stay in place. Installation persists the tab session first. A hard power failure during installer execution still needs testing; recovery is reinstalling the same/newer official package while retaining the app-data directory. Do not claim transactional installer rollback until tested.
+
+## Resume a failed publication without rebuilding
+
+If native verification, the signed upgrade test and the production build all succeeded, but publication failed **before** the draft was published, use **Resume verified draft publication** with the original release run ID, exact version and channel. The job still requires `release-publication` approval and reruns publisher tests. It verifies the original main-branch release workflow, each required successful job, and the draft's exact source commit. It will not publish a draft from another commit or overwrite a published release. No signing secrets or arbitrary executable uploads are involved.
+
+The initial Alpha 3 publication exposed GitHub's published-only lookup by tag. Draft lookup now uses authenticated, paginated release listings. For an already published version that is already the current channel version, enable `repair_channel_metadata` to refresh only its channel JSON/index. The original successful verification/build run and exact source commit are still required. This mode never edits or uploads installer/signature assets and cannot advance or downgrade the channel. Draft URLs are never carried into final metadata: the publisher reloads asset URLs after publication.
