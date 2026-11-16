@@ -66,10 +66,30 @@ service. No live delivery or provider authorization has yet been verified.
 
 ## Deploy on the existing ELIX Linux server
 
+The selected host is the **same server as `medlem.projectelix.no`**, and the selected
+sender is **`no-reply@projectelix.no`**. These are the user's confirmed choices;
+they do not indicate that the account service has already been deployed or that a
+live Brevo sender check has run.
+
 The checked-in setup uses one Node 24 process, systemd and an Internet-facing Nginx
 TLS proxy. It does not provision a new hosting account. Adapt the proxy configuration
 to the existing server after confirming its hostname, TLS setup and Node location.
 `accounts.projectelix.no` is a possible hostname, not a domain already configured.
+
+The membership source documents SMTP variables (`APP_SMTP_HOST`, `APP_SMTP_PORT`,
+`APP_SMTP_USER`, `APP_SMTP_PASSWORD`, `APP_MAIL_FROM`). This browser service currently
+uses Brevo's **HTTPS API**, so its `BREVO_API_KEY` must be an API key for the existing
+Brevo account, not an SMTP password. Check the actual protected server configuration:
+if an API key already exists, supply that value to the new service's protected
+environment; if the membership server only has SMTP credentials, an API key must be
+configured or an SMTP adapter added before activation. Do not import the membership
+service's entire environment into this process. Keep its database, session secrets
+and existing mail configuration separate from the browser account service.
+
+Deployment access is still required. The accessible membership repository describes
+deployment preparation and does not expose live server configuration or an active
+`.github/workflows/deploy.yml`. Reuse the existing deployment mechanism once its
+actual location/access is available; no new hosting account is needed.
 
 1. Make the chosen hostname point to the existing server and obtain its TLS
    certificate using that server's existing certificate process. Do not redirect

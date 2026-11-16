@@ -60,7 +60,9 @@ sanitized provider errors, rejected redirects, a sender/API check with optional
 non-delivering sandbox mode, and systemd/Nginx examples for the existing ELIX server.
 Production fails startup on missing email configuration or placeholder secrets.
 The Windows CI and release jobs accept the public `ELIX_ACCOUNTS_URL` repository
-variable. The live server, Brevo key, verified sender and DNS are still pending;
+variable. The chosen host is the server running `medlem.projectelix.no`, with
+`no-reply@projectelix.no` as sender. Deployment access, the server-side Brevo API key,
+live sender verification and the account-service HTTPS hostname are still pending;
 mock tests and sandbox acceptance do not prove actual inbox delivery.
 
 Sync is optional and manual: upload or fetch-and-merge bookmarks and appearance.
