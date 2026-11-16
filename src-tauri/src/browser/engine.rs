@@ -156,71 +156,64 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         }
         browser::emit(app);
         let _ = browser::persist(app);
-    })
-    .on_download(move |view, event| {
-        // Windows owns destination and metadata in the native DownloadStarting
-        // handler. Wry emits Requested again on automatic retries and cannot
-        // identify the native operation; allocating here would create phantom rows.
-        #[cfg(windows)]
-        {
-            let _ = (view, event);
-            true
-        }
-        #[cfg(not(windows))]
-        {
-            let app = view.app_handle();
-            let state = app.state::<AppState>();
-            match event {
-                DownloadEvent::Requested {
-                    destination, url, ..
-                } => {
-                    let Ok(root) = app.path().download_dir() else {
-                        return false;
-                    };
-                    let Ok((id, path)) = crate::downloads::destination(root, destination) else {
-                        return false;
-                    };
-                    *destination = path.clone();
-                    state
+    });
+    // Windows has a single native DownloadStarting owner. Registering Wry's
+    // callback, even a no-op, retrieves separate DownloadOperation wrappers and
+    // installs its own state handler / destination handling before ours.
+    #[cfg(not(windows))]
+    let builder = builder.on_download(move |view, event| {
+        let app = view.app_handle();
+        let state = app.state::<AppState>();
+        match event {
+            DownloadEvent::Requested {
+                destination, url, ..
+            } => {
+                let Ok(root) = app.path().download_dir() else {
+                    return false;
+                };
+                let Ok((id, path)) = crate::downloads::destination(root, destination) else {
+                    return false;
+                };
+                *destination = path.clone();
+                state
+                    .downloads
+                    .lock()
+                    .unwrap()
+                    .push(crate::downloads::Download::new(
+                        id,
+                        path,
+                        profile_download.clone(),
+                        private,
+                        url.to_string(),
+                        view.label().to_string(),
+                    ));
+                let _ = crate::downloads::persist(app);
+            }
+            DownloadEvent::Finished { path, success, .. } => {
+                if let Some(path) = path {
+                    if let Some(d) = state
                         .downloads
                         .lock()
                         .unwrap()
-                        .push(crate::downloads::Download::new(
-                            id,
-                            path,
-                            profile_download.clone(),
-                            private,
-                            url.to_string(),
-                            view.label().to_string(),
-                        ));
-                    let _ = crate::downloads::persist(app);
-                }
-                DownloadEvent::Finished { path, success, .. } => {
-                    if let Some(path) = path {
-                        if let Some(d) = state
-                            .downloads
-                            .lock()
-                            .unwrap()
-                            .iter_mut()
-                            .find(|d| d.path == path)
-                        {
-                            d.status = if success { "complete" } else { "failed" }.into();
-                        }
+                        .iter_mut()
+                        .find(|d| d.path == path)
+                    {
+                        d.status = if success { "complete" } else { "failed" }.into();
                     }
-                    state.logs.add(
-                        if success { "info" } else { "warn" },
-                        if success {
-                            "download_complete"
-                        } else {
-                            "download_failed"
-                        },
-                    );
                 }
-                _ => {}
+                state.logs.add(
+                    if success { "info" } else { "warn" },
+                    if success {
+                        "download_complete"
+                    } else {
+                        "download_failed"
+                    },
+                );
             }
-            let _ = app.emit_to("shell", "downloads-changed", ());
-            true
+            _ => {}
         }
+        let _ = app.emit_to("shell", "downloads-changed", ());
+        true
     });
     #[cfg(feature = "smoke-tests")]
     let builder = if std::env::args().any(|arg| arg == "--self-test") {

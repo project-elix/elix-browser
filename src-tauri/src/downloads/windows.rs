@@ -1,6 +1,6 @@
 //! COM download operations stay on the WebView2 UI thread for their full lifetime.
-//! WebView2 can raise DownloadStarting again when the same operation retries. Its
-//! COM identity, not the mutable result path or URL, identifies one logical transfer.
+//! A COM identity tracks one retained native wrapper. WebView2 can create a new
+//! wrapper for another attempt, so distinct objects must never be merged by URL.
 use crate::AppState;
 use std::{cell::RefCell, collections::HashMap, path::PathBuf};
 use tauri::{Emitter, Manager};
@@ -25,6 +25,8 @@ pub unsafe fn attach(
     app: tauri::AppHandle,
     view_id: String,
 ) -> windows::core::Result<()> {
+    #[cfg(feature = "smoke-tests")]
+    trace_navigation(core, &view_id)?;
     let state = app.state::<AppState>();
     let profile = state.profile.lock().unwrap().clone();
     let private = state
@@ -40,6 +42,9 @@ pub unsafe fn attach(
         &DownloadStartingEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else { return Ok(()) };
             args.SetHandled(true)?;
+            #[cfg(feature = "smoke-tests")]
+            probe("starting", Some(&args));
+            let _ = refresh_on_ui(&app);
             let mut created: Option<(usize, String)> = None;
             let result = (|| -> windows::core::Result<()> {
                 let Some(private) = private else {
@@ -52,8 +57,8 @@ pub unsafe fn attach(
                 let identity = operation.cast::<IUnknown>()?.as_raw() as usize;
                 let existing = OPERATIONS.with(|items| items.borrow().get(&identity).cloned());
                 if let Some(existing) = existing {
-                    // Reuse the original destination and handlers. A retry must
-                    // never create a second row or strand the first row in progress.
+                    // Repeated callbacks for this same native wrapper reuse its
+                    // destination and handlers rather than stranding a duplicate row.
                     args.SetResultFilePath(&HSTRING::from(existing.path.as_os_str()))?;
                     app.state::<AppState>().logs.add("info", "download_native_retry");
                     if update(&app, &existing.id, &operation, true)? {
@@ -70,6 +75,8 @@ pub unsafe fn attach(
                 let mut uri = PWSTR::null();
                 operation.Uri(&mut uri)?;
                 let uri = take_string(uri)?;
+                #[cfg(feature = "smoke-tests")]
+                trace(serde_json::json!({"event":"created","id":id,"view":view_id}));
                 app.state::<AppState>().downloads.lock().unwrap().push(super::Download::new(
                     id.clone(), path.clone(), profile.clone(), private, uri, view_id.clone(),
                 ));
@@ -237,4 +244,112 @@ pub async fn action(app: &tauri::AppHandle, path: PathBuf, action: String) -> Re
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Reconcile native getters as well as events. Some WebView2 builds can miss a
+/// StateChanged callback during automatic retries; native State remains authoritative.
+unsafe fn refresh_on_ui(app: &tauri::AppHandle) -> windows::core::Result<()> {
+    let operations = OPERATIONS.with(|items| {
+        items
+            .borrow()
+            .iter()
+            .map(|(key, active)| (*key, active.clone()))
+            .collect::<Vec<_>>()
+    });
+    for (identity, active) in operations {
+        if update(app, &active.id, &active.operation, true)? {
+            OPERATIONS.with(|items| items.borrow_mut().remove(&identity));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "smoke-tests")]
+pub async fn refresh(app: &tauri::AppHandle) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let callback_app = app.clone();
+    app.run_on_main_thread(move || {
+        #[cfg(feature = "smoke-tests")]
+        unsafe {
+            probe("refresh", None);
+        }
+        let result = unsafe { refresh_on_ui(&callback_app) }.map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| "Nedlastingsstatus svarte ikke".to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "smoke-tests")]
+static TRACE: std::sync::Mutex<Vec<serde_json::Value>> = std::sync::Mutex::new(Vec::new());
+#[cfg(feature = "smoke-tests")]
+fn trace(value: serde_json::Value) {
+    let mut trace = TRACE.lock().unwrap();
+    if trace.len() >= 180 {
+        trace.remove(0);
+    }
+    trace.push(value);
+}
+#[cfg(feature = "smoke-tests")]
+pub fn debug_trace() -> serde_json::Value {
+    serde_json::json!(TRACE.lock().unwrap().clone())
+}
+
+#[cfg(feature = "smoke-tests")]
+unsafe fn probe(event: &str, args: Option<&ICoreWebView2DownloadStartingEventArgs>) {
+    let requested_path = args.and_then(|args| {
+        let mut raw = PWSTR::null();
+        args.ResultFilePath(&mut raw).ok()?;
+        take_string(raw).ok().map(PathBuf::from)
+    });
+    let mut observations = Vec::new();
+    let operations = OPERATIONS.with(|items| items.borrow().values().cloned().collect::<Vec<_>>());
+    for active in operations {
+        let mut state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+        let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE;
+        let mut received = 0;
+        let mut total = -1;
+        let mut resumable = windows::core::BOOL(0);
+        let state_ok = active.operation.State(&mut state).is_ok();
+        let reason_ok = active.operation.InterruptReason(&mut reason).is_ok();
+        let bytes_ok = active.operation.BytesReceived(&mut received).is_ok();
+        let total_ok = active.operation.TotalBytesToReceive(&mut total).is_ok();
+        let resume_ok = active.operation.CanResume(&mut resumable).is_ok();
+        let mut raw = PWSTR::null();
+        let native_path = active
+            .operation
+            .ResultFilePath(&mut raw)
+            .ok()
+            .and_then(|_| take_string(raw).ok())
+            .map(PathBuf::from);
+        observations.push(serde_json::json!({"id":active.id,"state_ok":state_ok,"state":state.0,"reason_ok":reason_ok,"reason":reason.0,"bytes_ok":bytes_ok,"received":received,"total_ok":total_ok,"total":total,"resume_ok":resume_ok,"can_resume":resumable.as_bool(),"canonical_path_matches":native_path.as_ref()==Some(&active.path),"new_path_matches":requested_path.is_some()&&native_path==requested_path}));
+    }
+    trace(serde_json::json!({"event":event,"operations":observations}));
+}
+
+#[cfg(feature = "smoke-tests")]
+unsafe fn trace_navigation(core: &ICoreWebView2, view_id: &str) -> windows::core::Result<()> {
+    use webview2_com::{NavigationCompletedEventHandler, NavigationStartingEventHandler};
+    let starting_view = view_id.to_owned();
+    let mut token = 0;
+    core.add_NavigationStarting(&NavigationStartingEventHandler::create(Box::new(move|_,args|{
+        if let Some(args)=args{
+            let mut id=0;let mut redirected=windows::core::BOOL(0);let mut user=windows::core::BOOL(0);
+            args.NavigationId(&mut id)?;args.IsRedirected(&mut redirected)?;args.IsUserInitiated(&mut user)?;
+            trace(serde_json::json!({"event":"navigation_start","view":starting_view,"navigation":id,"redirected":redirected.as_bool(),"user":user.as_bool()}));
+        }Ok(())
+    })),&mut token)?;
+    let completed_view = view_id.to_owned();
+    core.add_NavigationCompleted(&NavigationCompletedEventHandler::create(Box::new(move|_,args|{
+        if let Some(args)=args{
+            let mut id=0;let mut success=windows::core::BOOL(0);let mut error=COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+            args.NavigationId(&mut id)?;args.IsSuccess(&mut success)?;args.WebErrorStatus(&mut error)?;
+            trace(serde_json::json!({"event":"navigation_complete","view":completed_view,"navigation":id,"success":success.as_bool(),"error":error.0}));
+        }Ok(())
+    })),&mut token)
 }
