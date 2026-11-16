@@ -622,9 +622,11 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
         return Err("Cookie manager did not list the fixture".into());
     }
     tauri::async_runtime::block_on(browser::site_data::cookies(app, origin.into(), true))?;
-    if view_bool(&view, "document.cookie.includes('alpha6_cookie=')")? {
-        return Err("Cookie deletion did not affect native page".into());
-    }
+    // WebView2 accepts DeleteCookie before its renderer observes the updated cookie store.
+    wait(|| {
+        view_bool(&view, "document.cookie.includes('alpha6_cookie=')").is_ok_and(|present| !present)
+    })
+    .map_err(|_| "Cookie deletion did not reach the native page within 25 seconds".to_string())?;
     browser::close(app, &b)?;
     browser::organization::reopen(app)?;
     let reopened = app
