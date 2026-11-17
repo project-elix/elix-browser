@@ -15,6 +15,92 @@ fn checkpoint(stage: &str) {
     let _ = stage;
 }
 
+// Keep the pinned Tauri runtime's reparent mutex on the UI thread; a worker
+// must not hold it while waiting for callbacks on that same event loop.
+// See tauri-apps/tauri#15489. Focus preflight avoids synchronous SetParent
+// focus callbacks re-entering the moving view's dispatcher.
+fn reparent_live(
+    app: &tauri::AppHandle,
+    view: &tauri::Webview,
+    destination: &tauri::Window,
+) -> Result<(), String> {
+    use std::sync::{atomic::{AtomicU8, Ordering}, mpsc, Arc};
+    const PENDING: u8 = 0;
+    const RUNNING: u8 = 1;
+    const CANCELLED: u8 = 2;
+    let phase = Arc::new(AtomicU8::new(PENDING));
+    let scheduled_phase = phase.clone();
+    let target_app = app.clone();
+    let view = view.clone();
+    let destination_label = destination.label().to_owned();
+    let (tx, rx) = mpsc::channel();
+    app.run_on_main_thread(move || {
+        // A timed-out queued request may not run after its caller has rolled back.
+        if scheduled_phase.compare_exchange(PENDING, RUNNING, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return;
+        }
+        let result = (|| -> Result<(), String> {
+            // Re-resolve the target on the UI thread. A queued request must not
+            // pass a destroyed/replaced window handle to the runtime's Reparent.
+            let destination = target_app.get_window(&destination_label).ok_or("Målvinduet ble lukket")?;
+            if target_app.get_webview(view.label()).is_none() {
+                return Err("Fanen ble lukket før den kunne flyttes".into());
+            }
+            checkpoint("media.reparent.ui.focus.begin");
+            let main = target_app.get_window("main").ok_or("Fant ikke hovedvinduet")?;
+            let shell = target_app.get_webview("shell").ok_or("Fant ikke nettlesermenyen")?;
+            main.set_focus().map_err(|e| e.to_string())?;
+            shell.set_focus().map_err(|e| e.to_string())?;
+            #[cfg(windows)]
+            {
+                // Already on the UI thread: with_webview executes inline in the
+                // pinned runtime. try_recv avoids introducing a blocking UI wait.
+                let (focus_tx, focus_rx) = mpsc::channel();
+                view.with_webview(move |platform| {
+                    let result = (|| -> windows::core::Result<bool> {
+                        use windows::Win32::{
+                            Foundation::HWND,
+                            UI::{Input::KeyboardAndMouse::GetFocus, WindowsAndMessaging::IsChild},
+                        };
+                        unsafe {
+                            let mut container = HWND::default();
+                            platform.controller().ParentWindow(&mut container)?;
+                            let focused = GetFocus();
+                            Ok(focused != container && !IsChild(container, focused).as_bool())
+                        }
+                    })();
+                    let _ = focus_tx.send(result.map_err(|e| e.to_string()));
+                }).map_err(|e| e.to_string())?;
+                if !focus_rx.try_recv().map_err(|_| "Kunne ikke kontrollere fokus før flytting av fanen")?? {
+                    return Err("Fanen beholdt fokus. Velg nettlesermenyen og prøv igjen.".into());
+                }
+            }
+            checkpoint("media.reparent.ui.focus.done");
+            checkpoint("media.reparent.ui.move.begin");
+            view.reparent(&destination).map_err(|e| e.to_string())?;
+            checkpoint("media.reparent.ui.move.end");
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    }).map_err(|e| e.to_string())?;
+
+    // On the UI thread the pinned runtime ran the closure inline, so its result
+    // is already queued. Only an off-thread caller can wait for a pending task.
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("Flytting av fanen ble avbrutt".into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            if phase.compare_exchange(PENDING, CANCELLED, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                Err("Nettleservinduet svarte ikke. Fanen ble ikke flyttet.".into())
+            } else {
+                // The native operation has started; do not pretend it was
+                // cancelled and race caller rollback against an active move.
+                rx.recv().map_err(|_| "Flytting av fanen ble avbrutt".to_string())?
+            }
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub struct Player {
     pub id: String,
@@ -236,7 +322,7 @@ pub fn release(app: &AppHandle, id: &str) -> Result<(), String> {
         // Returning a live player is strict; destroying one clears ownership first.
         if let Some(view) = app.get_webview(id) {
             checkpoint("media.release.reparent.begin");
-            let reparented = app.get_window("main").is_some_and(|window| view.reparent(&window).is_ok());
+            let reparented = app.get_window("main").is_some_and(|window| reparent_live(app, &view, &window).is_ok());
             checkpoint("media.release.reparent.end");
             if !reparented { let _ = view.close(); }
         }
@@ -256,7 +342,7 @@ fn return_to_browser(app: &AppHandle) -> Result<Option<String>, String> {
     if let Some(view) = app.get_webview(&player.id) {
         let main = app.get_window("main").ok_or("Fant ikke hovedvinduet")?;
         checkpoint("media.return.reparent.begin");
-        view.reparent(&main).map_err(|e| e.to_string())?;
+        reparent_live(app, &view, &main)?;
         checkpoint("media.return.reparent.end");
     }
     app.state::<AppState>().media.lock().unwrap().player = None;
@@ -289,7 +375,7 @@ fn open(app: &AppHandle, id: &str) -> Result<(), String> {
     };
     window.set_title(&format!("ELIX Minispiller · {}", tab.title)).map_err(|e| e.to_string())?;
     checkpoint("media.open.reparent.begin");
-    view.reparent(&window).map_err(|e| e.to_string())?;
+    reparent_live(app, &view, &window)?;
     checkpoint("media.open.reparent.end");
     app.state::<AppState>().media.lock().unwrap().player = Some(Player { id: id.into(), hidden: false });
     // Keep the return control available even if a later window/focus call fails.

@@ -1078,6 +1078,15 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     let shell = app.get_webview("shell").ok_or("Missing shell")?;
     browser::organization::split(app, Some(return_tab.into()))?;
     let main = app.get_window("main").ok_or("Missing media window")?;
+    let focus_before_move = |stage: &str| -> Result<(), String> {
+        progress(&format!("media: focus before {stage}: begin"));
+        view.window().set_focus().map_err(|e| e.to_string())?;
+        view.set_focus().map_err(|e| e.to_string())?;
+        wait(|| view_bool(&view, "document.hasFocus()").unwrap_or(false))
+            .map_err(|_| format!("Native media page did not acquire focus before {stage}"))?;
+        progress(&format!("media: focus before {stage}: confirmed"));
+        Ok(())
+    };
     let prior_fullscreen = main.is_fullscreen().map_err(|e| e.to_string())?;
     let scale = main.scale_factor().map_err(|e| e.to_string())?;
     wait(|| view.size().is_ok_and(|size| (size.width as f64 - app.state::<AppState>().bounds.lock().unwrap().width * scale / 2.).abs() <= 8.))?;
@@ -1126,6 +1135,7 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     main.set_fullscreen(prior_fullscreen).map_err(|e| e.to_string())?;
     wait(|| main.is_fullscreen().is_ok_and(|value| value == prior_fullscreen))?;
     browser::organization::split(app, None)?;
+    focus_before_move("first open")?;
     browser::media::perform(app, "open", Some(&id))?;
     wait(|| view.window().label() == "media-player")?;
     let player = app.get_window("media-player").ok_or("Missing miniplayer window")?;
@@ -1151,6 +1161,7 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     browser::media::perform(app, "show", None)?;
     wait(|| player.is_visible().unwrap_or(false))?;
     capture_native_screen("native-video-miniplayer.png")?;
+    focus_before_move("return")?;
     progress("media: before return");
     browser::media::perform(app, "return", None)?;
     progress("media: return completed; before ownership wait");
@@ -1158,9 +1169,11 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     progress("media: return ownership verified; before page state check");
     if !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Returning miniplayer recreated or paused media".into()); }
     progress("media: returned page verified; before reopen");
+    focus_before_move("reopen")?;
     browser::media::perform(app, "open", Some(&id))?;
     progress("media: reopened; before ownership wait");
     wait(|| browser::media::is_player(app, &id))?;
+    focus_before_move("reset")?;
     progress("media: before reset");
     browser::media::reset(app)?;
     progress("media: reset completed; before ownership wait");
