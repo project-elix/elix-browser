@@ -8,7 +8,7 @@ use tauri::{Emitter, Manager};
 pub fn persist(app: &tauri::AppHandle) {
     let state = app.state::<crate::AppState>();
     let downloads = state.downloads.lock().unwrap();
-    if history::save(&state.root, &downloads).is_err() {
+    if history::save(&state.download_root, &downloads).is_err() {
         state.logs.add("error", "download_history_write_failed");
     }
 }

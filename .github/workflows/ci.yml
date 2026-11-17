@@ -12,6 +12,8 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 40
+    env:
+      ELIX_ACCOUNTS_URL: ${{ vars.ELIX_ACCOUNTS_URL || 'https://medlem.projectelix.no' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,6 +25,7 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
+      - run: npm ci --prefix services/accounts --omit=dev --ignore-scripts
       - run: npm test
       - run: npm run check:release
       - run: npm run build
@@ -37,6 +40,15 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $exe = Join-Path $dest 'elix-browser.exe'
           if (!(Test-Path $exe)) { throw 'Installed executable missing' }
+          $capability = Get-ItemPropertyValue 'HKCU:\Software\RegisteredApplications' 'ELIX Browser'
+          if ($capability -ne 'Software\Clients\StartMenuInternet\ELIX Browser\Capabilities') { throw 'Default browser registration missing' }
+          $associations = Get-ItemProperty "HKCU:\$capability\URLAssociations"
+          if ($associations.http -ne 'ELIXBrowserHTML' -or $associations.https -ne 'ELIXBrowserHTML') { throw 'HTTP/HTTPS associations missing' }
+          $openCommand = (Get-Item 'HKCU:\Software\Classes\ELIXBrowserHTML\shell\open\command').GetValue('')
+          Write-Output "Registered browser command: $openCommand"
+          if ($openCommand -notmatch '^"([^"]+)" --url "%1"$') { throw 'Browser URL launch command arguments differ' }
+          $registeredExe = [IO.Path]::GetFullPath($Matches[1])
+          if ($registeredExe -ne [IO.Path]::GetFullPath($exe)) { throw "Browser executable differs: registered=$registeredExe installed=$exe" }
           $app = Start-Process $exe -PassThru
           Start-Sleep -Seconds 12
           $app.Refresh()
@@ -68,6 +80,7 @@ jobs:
             src-tauri/target/release/bundle/nsis/*-setup.exe
             performance.csv
             windows-start.png
+            native-smoke.txt
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -77,3 +90,4 @@ jobs:
             windows-start.png
             native-smoke.txt
           if-no-files-found: warn
+

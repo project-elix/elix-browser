@@ -242,7 +242,7 @@ mod native {
     // A temporary hidden about:blank view gives access to the selected profile even
     // when all visible tabs are internal pages. It has no shell IPC authorization,
     // cannot navigate, and is closed after the native operation completes.
-    fn profile_view(app: &AppHandle) -> Result<(Webview, bool), String> {
+    pub(super) fn profile_view(app: &AppHandle) -> Result<(Webview, bool), String> {
         let state = app.state::<AppState>();
         let existing = state
             .session
@@ -542,4 +542,9 @@ mod native {
         }
         Ok(())
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn profile_view(app: &AppHandle) -> Result<(Webview, bool), String> {
+    native::profile_view(app)
 }

@@ -13,6 +13,8 @@ pub struct Entry {
     pub url: String,
     pub title: String,
     pub time: String,
+    #[serde(default)]
+    pub favicon: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -94,7 +96,7 @@ impl Store {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if version > 1 {
+        if version > 2 {
             return Err("Databasen er fra en nyere ELIX-versjon. Nedgradering er blokkert.".into());
         }
         if version < 1 {
@@ -115,8 +117,36 @@ impl Store {
                 )
                 .map_err(|e| e.to_string())?;
             }
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute_batch("CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY, name TEXT NOT NULL); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS bookmarks(id INTEGER PRIMARY KEY, profile TEXT NOT NULL REFERENCES profiles(id), url TEXT NOT NULL, title TEXT NOT NULL, time TEXT NOT NULL, UNIQUE(profile,url)); CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY, profile TEXT NOT NULL REFERENCES profiles(id), url TEXT NOT NULL, title TEXT NOT NULL, time TEXT NOT NULL); CREATE INDEX IF NOT EXISTS history_profile_time ON history(profile,time); CREATE TABLE IF NOT EXISTS sessions(profile TEXT PRIMARY KEY REFERENCES profiles(id), data TEXT NOT NULL); PRAGMA user_version=1;").map_err(|e|e.to_string())?;
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            if tx
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?
+                < 1
+            {
+                tx.execute_batch("CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY, name TEXT NOT NULL); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS bookmarks(id INTEGER PRIMARY KEY, profile TEXT NOT NULL REFERENCES profiles(id), url TEXT NOT NULL, title TEXT NOT NULL, time TEXT NOT NULL, UNIQUE(profile,url)); CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY, profile TEXT NOT NULL REFERENCES profiles(id), url TEXT NOT NULL, title TEXT NOT NULL, time TEXT NOT NULL); CREATE INDEX IF NOT EXISTS history_profile_time ON history(profile,time); CREATE TABLE IF NOT EXISTS sessions(profile TEXT PRIMARY KEY REFERENCES profiles(id), data TEXT NOT NULL); PRAGMA user_version=1;").map_err(|e|e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+        if version < 2 {
+            if version == 1 && !path.with_extension("v1.backup.sqlite").exists() {
+                conn.backup("main", path.with_extension("v1.backup.sqlite"), None)
+                    .map_err(|e| e.to_string())?;
+            }
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            if tx
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?
+                < 2
+            {
+                tx.execute_batch("ALTER TABLE bookmarks ADD COLUMN favicon TEXT;
+                CREATE TABLE site_permissions(profile TEXT NOT NULL REFERENCES profiles(id), origin TEXT NOT NULL, kind TEXT NOT NULL, decision TEXT NOT NULL, PRIMARY KEY(profile,origin,kind));
+                CREATE TABLE session_backups(id INTEGER PRIMARY KEY, profile TEXT NOT NULL REFERENCES profiles(id), data TEXT NOT NULL);
+                PRAGMA user_version=2;").map_err(|e| e.to_string())?;
+            }
             tx.commit().map_err(|e| e.to_string())?;
         }
         let store = Self { conn };
@@ -173,7 +203,7 @@ impl Store {
             .unwrap_or_default()
     }
     pub fn entries(&self, profile: &str, kind: &str) -> Result<Vec<Entry>, String> {
-        let sql=match kind{"bookmarks"=>"SELECT id,url,title,time FROM bookmarks WHERE profile=?1 ORDER BY id DESC LIMIT 1000", "history"=>"SELECT id,url,title,time FROM history WHERE profile=?1 ORDER BY id DESC LIMIT 1000",_=>return Err("Ukjent liste".into())};
+        let sql=match kind{"bookmarks"=>"SELECT id,url,title,time,favicon FROM bookmarks WHERE profile=?1 ORDER BY id DESC LIMIT 5001", "history"=>"SELECT id,url,title,time,NULL FROM history WHERE profile=?1 ORDER BY id DESC LIMIT 1000",_=>return Err("Ukjent liste".into())};
         let mut q = self.conn.prepare(sql).map_err(|e| e.to_string())?;
         let rows = q
             .query_map([profile], |r| {
@@ -182,6 +212,7 @@ impl Store {
                     url: r.get(1)?,
                     title: r.get(2)?,
                     time: r.get(3)?,
+                    favicon: r.get(4)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -216,8 +247,95 @@ impl Store {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+    pub fn import_bookmarks(&self, p: &str, items: Vec<Entry>) -> Result<usize, String> {
+        if items.len() > 5000 {
+            return Err("Maksimalt 5000 bokmerker om gangen".into());
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        let mut count = 0;
+        for item in items {
+            let url = url::Url::parse(&item.url).map_err(|_| "Ugyldig bokmerkeadresse")?;
+            if !crate::security::remote_allowed(&url)
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || item.url.len() > 8192
+                || item.title.len() > 1000
+            {
+                return Err("Importen inneholder ugyldige bokmerker".into());
+            }
+            count += tx
+                .execute(
+                    "INSERT OR IGNORE INTO bookmarks(profile,url,title,time) VALUES(?1,?2,?3,?4)",
+                    params![p, url.as_str(), item.title, chrono::Utc::now().to_rfc3339()],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(count)
+    }
+    pub fn bookmark_icon(&self, p: &str, url: &str, icon: Option<&str>) -> Result<(), String> {
+        if icon.is_some_and(|i| !i.starts_with("data:image/png;base64,") || i.len() > 700_000) {
+            return Err("Ugyldig bokmerkeikon".into());
+        }
+        self.conn
+            .execute(
+                "UPDATE bookmarks SET favicon=?3 WHERE profile=?1 AND url=?2",
+                params![p, url, icon],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    pub fn permission(&self, p: &str, origin: &str, kind: &str) -> String {
+        self.conn
+            .query_row(
+                "SELECT decision FROM site_permissions WHERE profile=?1 AND origin=?2 AND kind=?3",
+                params![p, origin, kind],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "ask".into())
+    }
+    pub fn set_permission(
+        &self,
+        p: &str,
+        origin: &str,
+        kind: &str,
+        decision: &str,
+    ) -> Result<(), String> {
+        let url = url::Url::parse(origin).map_err(|_| "Ugyldig nettsted")?;
+        if !matches!(url.scheme(), "https" | "http")
+            || url.origin().ascii_serialization() != origin
+            || !["camera", "microphone", "location", "notifications"].contains(&kind)
+            || !["ask", "allow", "deny"].contains(&decision)
+        {
+            return Err("Ugyldig nettstedstillatelse".into());
+        }
+        self.conn.execute("INSERT INTO site_permissions VALUES(?1,?2,?3,?4) ON CONFLICT(profile,origin,kind) DO UPDATE SET decision=excluded.decision",params![p,origin,kind,decision]).map(|_|()).map_err(|e|e.to_string())
+    }
     pub fn save_session(&self, p: &str, data: &str) -> Result<(), String> {
-        self.conn.execute("INSERT INTO sessions VALUES(?1,?2) ON CONFLICT(profile) DO UPDATE SET data=excluded.data",params![p,data]).map(|_|()).map_err(|e|e.to_string())
+        // One SQLite transaction keeps the current snapshot and its fallback together.
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO session_backups(profile,data) SELECT profile,data FROM sessions WHERE profile=?1 AND data<>?2",params![p,data]).map_err(|e|e.to_string())?;
+        tx.execute("DELETE FROM session_backups WHERE profile=?1 AND id NOT IN (SELECT id FROM session_backups WHERE profile=?1 ORDER BY id DESC LIMIT 3)",[p]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO sessions VALUES(?1,?2) ON CONFLICT(profile) DO UPDATE SET data=excluded.data",params![p,data]).map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+    pub fn session_candidates(&self, p: &str) -> Vec<String> {
+        let mut result = self.load_session(p).into_iter().collect::<Vec<_>>();
+        if let Ok(mut q) = self
+            .conn
+            .prepare("SELECT data FROM session_backups WHERE profile=?1 ORDER BY id DESC")
+        {
+            if let Ok(rows) = q.query_map([p], |r| r.get::<_, String>(0)) {
+                result.extend(rows.flatten());
+            }
+        }
+        result
     }
     pub fn load_session(&self, p: &str) -> Option<String> {
         self.conn
@@ -321,6 +439,97 @@ mod tests {
         }
         settings.appearance.bookmark_bar = "outside".into();
         assert!(!settings.valid());
+    }
+    #[test]
+    fn import_is_atomic_deduplicated_and_profile_scoped() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("test.sqlite")).unwrap();
+        let p = s.profiles().unwrap()[0].id.clone();
+        let item = |url: &str| Entry {
+            id: 0,
+            url: url.into(),
+            title: "Imported".into(),
+            time: String::new(),
+            favicon: None,
+        };
+        assert!(s
+            .import_bookmarks(
+                &p,
+                vec![item("https://example.com/"), item("javascript:alert(1)")]
+            )
+            .is_err());
+        assert!(s.entries(&p, "bookmarks").unwrap().is_empty());
+        assert_eq!(
+            s.import_bookmarks(
+                &p,
+                vec![item("https://example.com"), item("https://example.com/")]
+            )
+            .unwrap(),
+            1
+        );
+        let other = s.create_profile("Other").unwrap();
+        assert!(s.entries(&other.id, "bookmarks").unwrap().is_empty());
+        s.bookmark_icon(
+            &p,
+            "https://example.com/",
+            Some("data:image/png;base64,iVBORw0KGgo="),
+        )
+        .unwrap();
+        assert!(s.entries(&p, "bookmarks").unwrap()[0].favicon.is_some());
+        assert!(s
+            .bookmark_icon(
+                &p,
+                "https://example.com/",
+                Some("https://tracker.example/icon")
+            )
+            .is_err());
+    }
+    #[test]
+    fn checkpoints_are_bounded_and_permission_choices_are_isolated() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("test.sqlite")).unwrap();
+        let p = s.profiles().unwrap()[0].id.clone();
+        for n in 0..10 {
+            s.save_session(&p, &format!("session-{n}")).unwrap();
+        }
+        assert_eq!(
+            s.session_candidates(&p),
+            vec!["session-9", "session-8", "session-7", "session-6"]
+        );
+        s.save_session(&p, "session-9").unwrap();
+        assert_eq!(s.session_candidates(&p).len(), 4);
+        s.set_permission(&p, "https://example.com", "camera", "allow")
+            .unwrap();
+        let other = s.create_profile("Other").unwrap();
+        assert_eq!(
+            s.permission(&other.id, "https://example.com", "camera"),
+            "ask"
+        );
+        assert_eq!(s.permission(&p, "https://example.com", "camera"), "allow");
+        assert!(s
+            .set_permission(&p, "https://example.com/path", "camera", "allow")
+            .is_err());
+    }
+    #[test]
+    fn schema_one_migration_creates_backup_and_preserves_bookmarks() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("test.sqlite");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE profiles(id TEXT PRIMARY KEY,name TEXT NOT NULL);CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);CREATE TABLE bookmarks(id INTEGER PRIMARY KEY,profile TEXT NOT NULL REFERENCES profiles(id),url TEXT NOT NULL,title TEXT NOT NULL,time TEXT NOT NULL,UNIQUE(profile,url));CREATE TABLE history(id INTEGER PRIMARY KEY,profile TEXT,url TEXT,title TEXT,time TEXT);CREATE TABLE sessions(profile TEXT PRIMARY KEY,data TEXT);INSERT INTO profiles VALUES('fixture','Original');INSERT INTO bookmarks VALUES(1,'fixture','https://example.com/','Original','old');PRAGMA user_version=1;").unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(
+            s.entries("fixture", "bookmarks").unwrap()[0].title,
+            "Original"
+        );
+        assert!(path.with_extension("v1.backup.sqlite").exists());
+        assert_eq!(
+            s.conn
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
     }
     #[test]
     fn newer_database_is_not_modified() {

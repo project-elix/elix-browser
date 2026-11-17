@@ -6,6 +6,406 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
+
+pub fn boot_stage(app: &AppHandle, stage: &str) {
+    let state = app.state::<AppState>();
+    if state.window_id == "main" || !std::env::args().any(|a| a == "--elix-smoke-window") {
+        return;
+    }
+    let path = state
+        .root
+        .join(format!("window-boot-{}.log", state.window_id));
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{} {stage}", chrono::Utc::now().to_rfc3339());
+    }
+}
+
+/// Detached test processes must share only the parent's disposable profile directory.
+pub fn detached_root() -> Result<std::path::PathBuf, String> {
+    let requested =
+        std::path::PathBuf::from(std::env::var_os("ELIX_SMOKE_ROOT").ok_or("Missing smoke root")?);
+    let root = std::fs::canonicalize(&requested).map_err(|e| e.to_string())?;
+    let temp = std::fs::canonicalize(std::env::temp_dir()).map_err(|e| e.to_string())?;
+    let suffix = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("elix-smoke-"))
+        .ok_or("Invalid smoke root")?;
+    if root.parent() != Some(temp.as_path()) || uuid::Uuid::parse_str(suffix).is_err() {
+        return Err("Detached test refused a non-test profile directory".into());
+    }
+    // Validate canonically, but keep the parent's identical WebView2 data-directory
+    // spelling. Windows canonicalization adds a verbatim-path prefix.
+    Ok(requested)
+}
+
+pub fn start_detached(app: AppHandle) {
+    boot_stage(&app, "detached_test_started");
+    std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            let state = app.state::<AppState>();
+            let id = state.session.lock().unwrap().active.clone();
+            wait_title_or_error(&app, &id, "ELIX native two")?;
+            wait(|| shell_bool(&app, "!!document.querySelector('.tab-strip')").unwrap_or(false))?;
+            let view = app
+                .get_webview(&id)
+                .ok_or("Missing transferred native page")?;
+            if !view_bool(&view, "document.cookie.includes('alpha6_handoff=shared')")? {
+                return Err("Transferred window lost profile cookies".into());
+            }
+            let session = state.session.lock().unwrap();
+            let tab = session
+                .tabs
+                .iter()
+                .find(|t| t.id == id)
+                .ok_or("Missing transferred tab")?;
+            if session.tabs.len() != 1 || !tab.pinned || !tab.muted || tab.group != "Handoff test" {
+                return Err("Transferred window lost tab metadata".into());
+            }
+            drop(session);
+            browser::persist(&app)?;
+            Ok(())
+        })();
+        let state = app.state::<AppState>();
+        let message = result
+            .map(|_| "PASS".to_string())
+            .unwrap_or_else(|e| format!("FAIL: {e}"));
+        let _ = state
+            .store
+            .lock()
+            .unwrap()
+            .set(&format!("smoke_window:{}", state.window_id), &message);
+        let _ = crate::window::perform(&app, crate::window::Action::Close);
+    });
+}
+
+#[cfg(windows)]
+fn detached_window_test(app: &AppHandle, origin: &str) -> Result<(), String> {
+    let id = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/two")))?;
+    wait_title_or_error(app, &id, "ELIX native two")?;
+    browser::pin(app, &id, true)?;
+    tauri::async_runtime::block_on(browser::organization::mute(app, &id, true))?;
+    let workspace = app
+        .state::<AppState>()
+        .session
+        .lock()
+        .unwrap()
+        .workspace
+        .clone();
+    browser::organization::group(app, &id, "Handoff test", &workspace)?;
+    if !view_bool(&app.get_webview(&id).ok_or("Missing transfer source")?,
+        "(()=>{document.cookie='alpha6_handoff=shared; Path=/';return document.cookie.includes('alpha6_handoff=shared')})()")? {
+        return Err("Transfer cookie fixture failed".into());
+    }
+    if tauri::async_runtime::block_on(browser::detach::rejected_detach_for_test(
+        app.clone(),
+        id.clone(),
+    ))
+    .is_ok()
+        || !app
+            .state::<AppState>()
+            .session
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == id)
+        || app.get_webview(&id).is_none()
+    {
+        return Err("Failed handoff did not preserve the source tab".into());
+    }
+    drag_tab_outside(app, &id)?;
+    let state = app.state::<AppState>();
+    {
+        let session = state.session.lock().unwrap();
+        if session
+            .tabs
+            .iter()
+            .chain(session.closed.iter())
+            .any(|t| t.id == id)
+        {
+            return Err("Transferred tab remained in source or reopen stack".into());
+        }
+    }
+    let mut report = None;
+    wait(|| {
+        let store = state.store.lock().unwrap();
+        report = store
+            .conn
+            .query_row(
+                "SELECT key,value FROM settings WHERE key LIKE 'smoke_window:%' LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .ok();
+        report.is_some()
+    })?;
+    let (key, message) = report.ok_or("Missing child window report")?;
+    if message != "PASS" {
+        return Err(message);
+    }
+    let child_id = key
+        .strip_prefix("smoke_window:")
+        .ok_or("Invalid child report")?;
+    wait(|| {
+        state
+            .store
+            .lock()
+            .unwrap()
+            .get(&format!("window_pid:{child_id}"))
+            .as_deref()
+            == Some("0")
+    })?;
+    let profile = state.profile.lock().unwrap().clone();
+    let data = state
+        .store
+        .lock()
+        .unwrap()
+        .get(&format!("window_session:{child_id}:{profile}"))
+        .ok_or("Transferred session was not durably saved in the same profile")?;
+    let saved: browser::Session = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    if saved.tabs.len() != 1
+        || saved.tabs[0].url != format!("{origin}/two")
+        || !saved.tabs[0].pinned
+        || !saved.tabs[0].muted
+    {
+        return Err("Saved transferred session lost tab metadata".into());
+    }
+    if browser::detach::recover_windows(app)? != 1 {
+        return Err("Detached session recovery failed".into());
+    }
+    let recovered = state
+        .session
+        .lock()
+        .unwrap()
+        .tabs
+        .iter()
+        .find(|t| t.group == "Handoff test")
+        .map(|t| t.id.clone())
+        .ok_or("Recovered transferred tab missing")?;
+    browser::close(app, &recovered)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
+    use windows::Win32::UI::{
+        Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+            MOUSEINPUT, MOUSE_EVENT_FLAGS,
+        },
+        WindowsAndMessaging::{GetSystemMetrics, SetCursorPos, SM_CXSCREEN},
+    };
+    fn mouse_button(flags: MOUSE_EVENT_FLAGS) -> bool {
+        let input = [INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dwFlags: flags,
+                    ..Default::default()
+                },
+            },
+        }];
+        unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) == 1 }
+    }
+    struct RestoreWindow {
+        window: tauri::Window,
+        position: tauri::PhysicalPosition<i32>,
+        size: tauri::PhysicalSize<u32>,
+        maximized: bool,
+    }
+    impl Drop for RestoreWindow {
+        fn drop(&mut self) {
+            let _ = self.window.set_size(self.size);
+            let _ = self.window.set_position(self.position);
+            if self.maximized {
+                let _ = self.window.maximize();
+            }
+        }
+    }
+    struct ReleaseMouse(bool);
+    impl Drop for ReleaseMouse {
+        fn drop(&mut self) {
+            if self.0 {
+                mouse_button(MOUSEEVENTF_LEFTUP);
+            }
+        }
+    }
+    let window = app.get_window("main").ok_or("Missing drag source window")?;
+    let _restore = RestoreWindow {
+        position: window.outer_position().map_err(|e| e.to_string())?,
+        size: window.inner_size().map_err(|e| e.to_string())?,
+        maximized: window.is_maximized().map_err(|e| e.to_string())?,
+        window: window.clone(),
+    };
+    window.unmaximize().map_err(|e| e.to_string())?;
+    window
+        .set_size(tauri::PhysicalSize::new(900, 600))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_position(tauri::PhysicalPosition::new(0, 0))
+        .map_err(|e| e.to_string())?;
+    let shell = app
+        .get_webview("shell")
+        .ok_or("Missing drag source shell")?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    shell.set_focus().map_err(|e| e.to_string())?;
+    wait(|| {
+        !window.is_maximized().unwrap_or(true)
+            && window
+                .inner_size()
+                .is_ok_and(|s| s.width == 900 && s.height == 600)
+            && shell_bool(
+                app,
+                "document.hasFocus() && Math.abs(innerWidth * devicePixelRatio - 900) < 2",
+            )
+            .unwrap_or(false)
+    })?;
+    let selector = format!("[data-tab-id=\"{id}\"]");
+    shell.eval(r#"(()=>{
+        window.__elixDragCleanup?.();
+        window.__elixDragEvents=[];
+        window.__elixDragNotices=[];
+        const record=e=>{
+            window.__elixDragEvents.push({type:e.type,x:e.clientX,y:e.clientY,screenX:e.screenX,screenY:e.screenY,buttons:e.buttons,pointerId:e.pointerId,target:e.target?.closest?.('[data-tab-id]')?.getAttribute('data-tab-id'),tag:e.target?.tagName,captured:e.target?.hasPointerCapture?.(e.pointerId),width:innerWidth,height:innerHeight});
+            if(window.__elixDragEvents.length>60)window.__elixDragEvents.shift();
+        };
+        const types=['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','dragstart','drop'];
+        types.forEach(type=>window.addEventListener(type,record,true));
+        const notices=()=>{
+            const text=Array.from(document.querySelectorAll('.notice,.boot-screen')).map(e=>e.innerText).join('\n');
+            const previous=window.__elixDragNotices.at(-1);
+            if(text!==previous?.text){window.__elixDragNotices.push({ms:performance.now(),text});if(window.__elixDragNotices.length>30)window.__elixDragNotices.shift();}
+        };
+        const observer=new MutationObserver(notices);
+        observer.observe(document.body,{subtree:true,childList:true,characterData:true});
+        notices();
+        window.__elixDragCleanup=()=>{types.forEach(type=>window.removeEventListener(type,record,true));observer.disconnect();};
+    })()"#).map_err(|e| e.to_string())?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    shell.eval_with_callback(
+        format!("(()=>{{const tab=document.querySelector('{selector}');const button=tab?.querySelector('[role=tab]');if(!button)return null;button.scrollIntoView({{block:'nearest',inline:'nearest'}});const r=button.getBoundingClientRect();window.__elixDragProbe=null;tab.addEventListener('pointerdown',e=>{{window.__elixDragProbe={{target:e.target,id:e.pointerId}}}},{{once:true}});return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()"),
+        move |value| { let _ = tx.send(value); },
+    ).map_err(|e| e.to_string())?;
+    let point: serde_json::Value = serde_json::from_str(
+        &rx.recv_timeout(Duration::from_secs(5))
+            .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let client = window.inner_position().map_err(|e| e.to_string())?;
+    let x = client.x + (point["x"].as_f64().ok_or("Missing drag source X")? * scale).round() as i32;
+    let y = client.y + (point["y"].as_f64().ok_or("Missing drag source Y")? * scale).round() as i32;
+    let outer = window.outer_position().map_err(|e| e.to_string())?;
+    let drop_x = outer.x + window.outer_size().map_err(|e| e.to_string())?.width as i32 + 24;
+    if drop_x >= unsafe { GetSystemMetrics(SM_CXSCREEN) } {
+        return Err(
+            "Native drag fixture needs screen space to the right of the 900px window".into(),
+        );
+    }
+    unsafe { SetCursorPos(x, y) }.map_err(|e| e.to_string())?;
+    // Release the physical button before restoring geometry, including on failures.
+    let mut held_mouse = ReleaseMouse(true);
+    if !mouse_button(MOUSEEVENTF_LEFTDOWN) {
+        return Err("Could not press native mouse button".into());
+    }
+    wait(|| {
+        shell_bool(app, "!!window.__elixDragProbe && window.__elixDragProbe.target.hasPointerCapture(window.__elixDragProbe.id)").unwrap_or(false)
+    }).map_err(|e| format!("{e}\n{}", drag_diagnostics(app, id)))?;
+    // First move leaves the tab and window entirely: delayed pointer capture loses it.
+    unsafe { SetCursorPos(drop_x, y) }.map_err(|e| e.to_string())?;
+    wait(|| {
+        shell_bool(
+            app,
+            &format!("document.querySelector('{selector}')?.classList.contains('dragging')===true"),
+        )
+        .unwrap_or(false)
+    })
+    .map_err(|e| format!("{e}\n{}", drag_diagnostics(app, id)))?;
+    if !mouse_button(MOUSEEVENTF_LEFTUP) {
+        return Err("Could not release native mouse button".into());
+    }
+    held_mouse.0 = false;
+    drop(held_mouse);
+    // The child has a 25-second ACK timeout after spawn/write. Give that existing
+    // failure time to reach the shell before collecting the diagnostic snapshot.
+    let until = Instant::now() + Duration::from_secs(35);
+    while Instant::now() < until {
+        if !app
+            .state::<AppState>()
+            .session
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == id)
+        {
+            let _ = shell.eval("window.__elixDragCleanup?.()");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let diagnostics = drag_diagnostics(app, id);
+    let _ = shell.eval("window.__elixDragCleanup?.()");
+    Err(format!(
+        "Native drag did not remove the source tab after 35 seconds\n{diagnostics}"
+    ))
+}
+
+#[cfg(windows)]
+fn drag_diagnostics(app: &AppHandle, id: &str) -> serde_json::Value {
+    let shell = (|| -> Result<serde_json::Value, String> {
+        let view = app.get_webview("shell").ok_or("Missing shell")?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        view.eval_with_callback(
+            "({events:window.__elixDragEvents,notices:window.__elixDragNotices,focused:document.hasFocus(),text:document.body.innerText.slice(0,4000)})",
+            move |value| { let _ = tx.send(value); },
+        ).map_err(|e| e.to_string())?;
+        serde_json::from_str(&rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())
+    })().unwrap_or_else(|e| serde_json::json!({"error": e}));
+    let state = app.state::<AppState>();
+    let windows = (|| -> Result<Vec<(String, String)>, String> {
+        let store = state.store.lock().unwrap();
+        let mut query = store.conn.prepare(
+            "SELECT key,value FROM settings WHERE key LIKE 'window_pid:%' OR key LIKE 'window_session:%' OR key LIKE 'smoke_window:%' OR key LIKE 'dirty:%' ORDER BY key",
+        ).map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    })();
+    let boot = std::fs::read_dir(&state.root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("window-boot-")
+        })
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                std::fs::read_to_string(entry.path()).unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "shell": shell,
+        "child_boot": boot,
+        "windows": windows,
+        "source": state.session.lock().unwrap().tabs.iter().find(|tab| tab.id == id).cloned(),
+        "logs": state.logs.list(),
+    })
+}
 #[track_caller]
 fn wait(mut condition: impl FnMut() -> bool) -> Result<(), String> {
     let caller = std::panic::Location::caller();
@@ -179,11 +579,122 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(windows)]
+fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_8;
+    use windows::core::Interface;
+    let original = app
+        .state::<AppState>()
+        .session
+        .lock()
+        .unwrap()
+        .active
+        .clone();
+    let a = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
+    wait_title_or_error(app, &a, "ELIX native one")?;
+    let b = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/two")))?;
+    wait_title_or_error(app, &b, "ELIX native two")?;
+    browser::organization::reorder(app, &b, &a)?;
+    {
+        let state = app.state::<AppState>();
+        let s = state.session.lock().unwrap();
+        if s.tabs.iter().position(|t| t.id == b) >= s.tabs.iter().position(|t| t.id == a) {
+            return Err("Tab reorder failed".into());
+        }
+    }
+    browser::organization::split(app, Some(a.clone()))?;
+    wait(|| {
+        shell_bool(app, "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.includes('Avslutt delt visning'))").unwrap_or(false)
+    })?;
+    let view = app.get_webview(&b).ok_or("Missing split view")?;
+    let other = app.get_webview(&a).ok_or("Missing split view")?;
+    let scale = app
+        .get_window("main")
+        .unwrap()
+        .scale_factor()
+        .map_err(|e| e.to_string())?;
+    let expected = app.state::<AppState>().bounds.lock().unwrap().width * scale / 2.;
+    if (view.size().map_err(|e| e.to_string())?.width as f64 - expected).abs() > 8.
+        || (other.size().map_err(|e| e.to_string())?.width as f64 - expected).abs() > 8.
+    {
+        return Err("Split view bounds are not half width".into());
+    }
+    tauri::async_runtime::block_on(browser::organization::mute(app, &b, true))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    view.with_webview(move |platform| {
+        let result = (|| -> windows::core::Result<bool> {
+            unsafe {
+                let mut muted = windows::core::BOOL(0);
+                platform
+                    .controller()
+                    .CoreWebView2()?
+                    .cast::<ICoreWebView2_8>()?
+                    .IsMuted(&mut muted)?;
+                Ok(muted.as_bool())
+            }
+        })();
+        let _ = tx.send(result.map_err(|e| e.to_string()));
+    })
+    .map_err(|e| e.to_string())?;
+    if !rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|e| e.to_string())??
+    {
+        return Err("Native tab mute failed".into());
+    }
+    browser::organization::split(app, None)?;
+    if !view_bool(
+        &view,
+        "(()=>{document.cookie='alpha6_cookie=1; Path=/';return true})()",
+    )? {
+        return Err("Cookie fixture failed".into());
+    }
+    let cookies =
+        tauri::async_runtime::block_on(browser::site_data::cookies(app, origin.into(), false))?;
+    if !cookies
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|r| r["name"] == "alpha6_cookie"))
+    {
+        return Err("Cookie manager did not list the fixture".into());
+    }
+    tauri::async_runtime::block_on(browser::site_data::cookies(app, origin.into(), true))?;
+    // WebView2 accepts DeleteCookie before its renderer observes the updated cookie store.
+    wait(|| {
+        view_bool(&view, "document.cookie.includes('alpha6_cookie=')").is_ok_and(|present| !present)
+    })
+    .map_err(|_| "Cookie deletion did not reach the native page within 25 seconds".to_string())?;
+    browser::close(app, &b)?;
+    browser::organization::reopen(app)?;
+    let reopened = app
+        .state::<AppState>()
+        .session
+        .lock()
+        .unwrap()
+        .active
+        .clone();
+    {
+        let state = app.state::<AppState>();
+        let s = state.session.lock().unwrap();
+        if !s
+            .tabs
+            .iter()
+            .any(|t| t.id == reopened && t.url == format!("{origin}/two") && t.muted)
+        {
+            return Err("Reopen lost tab state".into());
+        }
+    }
+    browser::close(app, &reopened)?;
+    browser::close(app, &a)?;
+    detached_window_test(app, origin)?;
+    browser::activate(app, &original)?;
+    Ok(())
+}
+
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
         let result = exercise(&app);
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        let message=match result{Ok(())=>"PASS: Alpha 6 reorder/reopen, native mute, split controls/bounds, cookie deletion, real child-window handoff with shared profile cookies and saved recovery, failed handoff retains source; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         #[cfg(windows)]
         let message = format!(
             "{message}\nDownload native diagnostics: {}",
@@ -1041,6 +1552,8 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             return Err("Bookmark not persisted".into());
         }
     }
+    #[cfg(windows)]
+    alpha6_test(app, &origin)?;
     browser::persist(app)?;
     browser::close(app, &second)?;
     for (label, view) in app.webviews() {

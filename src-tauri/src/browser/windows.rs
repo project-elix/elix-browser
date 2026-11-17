@@ -1,8 +1,8 @@
 use crate::{browser, AppState};
 use tauri::{Emitter, Manager, Webview};
 use webview2_com::{
-    AcceleratorKeyPressedEventHandler, Microsoft::Web::WebView2::Win32::*,
-    NavigationCompletedEventHandler, ProcessFailedEventHandler,
+    AcceleratorKeyPressedEventHandler, FocusChangedEventHandler,
+    Microsoft::Web::WebView2::Win32::*, NavigationCompletedEventHandler, ProcessFailedEventHandler,
 };
 use windows::{
     core::{Interface, PWSTR},
@@ -22,6 +22,14 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                 let value = version.to_string().ok();
                 windows::Win32::System::Com::CoTaskMemFree(Some(version.0.cast()));
                 *app.state::<AppState>().runtime_version.lock().unwrap() = value;
+                let muted=app.state::<AppState>().session.lock().unwrap().tabs.iter().find(|t|t.id==id).is_some_and(|t|t.muted);
+                core.cast::<ICoreWebView2_8>()?.SetIsMuted(muted)?;
+                let focus_app=app.clone();let focus_id=id.clone();let mut focus_token=0;
+                controller.add_GotFocus(&FocusChangedEventHandler::create(Box::new(move|_,_|{
+                    let state=focus_app.state::<AppState>();
+                    {let mut s=state.session.lock().unwrap();if s.split.as_ref().is_some_and(|pair|pair.contains(&focus_id)){s.active=focus_id.clone();}}
+                    browser::emit(&focus_app);Ok(())
+                })),&mut focus_token)?;
                 let settings = core.Settings()?;
                 settings.SetAreDefaultContextMenusEnabled(true)?;
                 crate::downloads::windows::attach(&core, app.clone(), id.clone())?;
@@ -86,7 +94,7 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                                         }
                                     });
                                 } else if ctrl
-                                    && ([72, 74, 76, 84, 87].contains(&key) || (shift && key == 78))
+                                    && ([72, 74, 76, 84, 87, 65].contains(&key) || (shift && key == 78)) && (key != 65 || shift)
                                 {
                                     args.SetHandled(true)?;
                                     let _ = keyboard_app.emit_to(
@@ -97,7 +105,10 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                                             74 => "downloads",
                                             76 => "address",
                                             78 => "private_tab",
+                                            84 if shift => "reopen_tab",
                                             84 => "new_tab",
+                                            65 if shift => "search_tabs",
+                                            65 => "select_all",
                                             _ => "close_tab",
                                         },
                                     );
@@ -178,6 +189,7 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                                 t.navigation_error =
                                     Some("Nettprosessen stoppet. Last inn fanen på nytt.".into());
                                 t.loading = false;
+                                t.crashed = true;
                             };
                         }
                         browser::emit(&fail_app);
@@ -207,6 +219,7 @@ pub async fn action(view: Webview, action: String, enabled: bool) -> Result<(), 
                     "forward" => core.GoForward()?,
                     "reload" => core.Reload()?,
                     "stop" => core.Stop()?,
+                    "mute" => core.cast::<ICoreWebView2_8>()?.SetIsMuted(enabled)?,
                     "devtools" => core.OpenDevToolsWindow()?,
                     "set_developer" => {
                         core.Settings()?.SetAreDevToolsEnabled(enabled)?;

@@ -1,7 +1,7 @@
 //! Favicons come from WebView2's already-fetched image stream, never an external icon service.
 use crate::{browser, AppState};
 use base64::Engine;
-use tauri::{Manager, Webview};
+use tauri::{Emitter, Manager, Webview};
 use webview2_com::{
     FaviconChangedEventHandler, GetFaviconCompletedHandler, Microsoft::Web::WebView2::Win32::*,
 };
@@ -82,6 +82,7 @@ unsafe fn update(
                     }
                 }
             }
+            let mut save = false;
             {
                 let state = app.state::<AppState>();
                 let mut session = state.session.lock().unwrap();
@@ -90,8 +91,19 @@ unsafe fn update(
                     .iter_mut()
                     .find(|t| t.id == id && t.url == source)
                 {
-                    tab.favicon = favicon;
+                    tab.favicon = favicon.clone();
+                    save = !tab.private;
                 }
+            }
+            if save {
+                let state = app.state::<AppState>();
+                let profile = state.profile.lock().unwrap().clone();
+                let _ = state.store.lock().unwrap().bookmark_icon(
+                    &profile,
+                    &source,
+                    favicon.as_deref(),
+                );
+                let _ = app.emit_to("shell", "bookmarks-changed", ());
             }
             browser::emit(&app);
             Ok(())

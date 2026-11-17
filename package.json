@@ -1,12 +1,13 @@
 {
   "name": "elix-browser",
-  "version": "0.1.1-beta.1",
+  "version": "0.1.2-dev.6",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:accounts",
+    "test:accounts": "node --test services/accounts/server.check.mjs services/accounts/brevo.check.mjs services/accounts/smtp.check.mjs services/accounts/deploy/install-smtp.check.mjs",
     "tauri": "tauri",
     "desktop": "tauri dev",
     "check:release": "node scripts/validate-release.mjs",
@@ -30,3 +31,4 @@
     "@tailwindcss/vite": "^4.1.0"
   }
 }
+
