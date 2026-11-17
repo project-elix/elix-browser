@@ -71,9 +71,34 @@ async function portFree(){return await new Promise(resolve=>{
   s.once('error',e=>resolve(e.code==='ECONNREFUSED'));
   s.once('timeout',()=>{s.destroy();resolve(false);});
 });}
-async function request(url){
-  const r=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(10000)});
+async function request(url,{timeoutMs=10000}={}){
+  const r=await fetch(url,{redirect:'error',headers:{Connection:'close'},signal:AbortSignal.timeout(timeoutMs)});
   return {status:r.status,type:r.headers.get('content-type')||'',body:await r.text()};
+}
+export async function verifyPublic(origin,{send=request,now=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms))}={}){
+  const deadline=now()+10000;
+  let result={ok:false,healthStatus:null,configStatus:null};
+  while(now()<deadline){
+    const timeoutMs=Math.max(1,Math.min(2000,deadline-now()));
+    const responses=await Promise.allSettled([
+      send(origin+'/elix-accounts-health',{timeoutMs}),send(origin+'/v1/config',{timeoutMs}),
+    ]);
+    const values=responses.map(response=>response.status==='fulfilled'?response.value:null);
+    const valid=(response,key)=>{try{return response?.status===200&&JSON.parse(response.body)[key]===true;}catch{return false;}};
+    result={ok:valid(values[0],'ok')&&valid(values[1],'email'),healthStatus:values[0]?.status??null,configStatus:values[1]?.status??null};
+    if(result.ok)return result;
+    const remaining=deadline-now();if(remaining>0)await sleep(Math.min(250,remaining));
+  }
+  return result;
+}
+export function assertReusableSnippet(stat,contents){
+  if(!stat.isFile()||stat.uid!==0||(stat.mode&0o022)||contents!==nginxSnippet())fail('Existing accounts snippet differs or is unsafe; no overwrite performed');
+}
+async function checkExistingSnippet(){
+  const stat=await lstat(SNIPPET);
+  // lstat rejects symlinks even when they point to an otherwise valid snippet.
+  if(!stat.isFile())fail('Existing accounts snippet differs or is unsafe; no overwrite performed');
+  assertReusableSnippet(stat,await readFile(SNIPPET,'utf8'));
 }
 export function nginxSnippet(){
   const common=`        client_max_body_size 6m;\n        access_log off;\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-Proto https;\n        proxy_set_header X-Forwarded-For $remote_addr;\n        proxy_set_header Connection "";\n        proxy_connect_timeout 5s;\n        proxy_read_timeout 40s;\n        proxy_send_timeout 40s;\n`;
@@ -161,26 +186,30 @@ async function publish(opts){
   const file=await realpath(opts['nginx-file']),original=await readFile(file,'utf8');
   const st=await lstat(file);if(!st.isFile()||st.uid!==0||(st.mode&0o022))fail('Nginx virtual-host file must be root-owned without group/world write');
   const replacement=addNginxInclude(original,origin);
-  if(await exists(SNIPPET))fail('Accounts snippet already exists; no overwrite performed');
+  const snippetExists=await exists(SNIPPET);
+  if(snippetExists)await checkExistingSnippet();
   await routesUnused(origin);
   const backup='/root/elix-accounts-nginx-'+Date.now()+'.conf';
   await writeFile(backup,original,{mode:0o600,flag:'wx'});
   await mkdir(dirname(SNIPPET),{recursive:true,mode:0o755});
-  await writeFile(SNIPPET,nginxSnippet(),{mode:0o644,flag:'wx'});
+  if(snippetExists)await checkExistingSnippet();
+  else await writeFile(SNIPPET,nginxSnippet(),{mode:0o644,flag:'wx'});
   const tmp=file+'.elix-accounts.tmp';
   await writeFile(tmp,replacement,{mode:0o644,flag:'wx'});
   if(await readFile(file,'utf8')!==original)fail('Nginx file changed during preparation; no replacement performed');
   await rename(tmp,file);
+  let phase='syntax check',publicResult;
   try{
-    run('nginx',['-t']);run('systemctl',['reload','nginx']);
-    const remote=await request(origin+'/elix-accounts-health'),capabilities=await request(origin+'/v1/config');
-    if(remote.status!==200||!JSON.parse(remote.body).ok||capabilities.status!==200||!JSON.parse(capabilities.body).email)fail('Public verification failed');
+    run('nginx',['-t']);phase='reload';run('systemctl',['reload','nginx']);
+    phase='public verification';publicResult=await verifyPublic(origin);
+    if(!publicResult.ok)fail('Public verification failed');
     console.log('HTTPS health/config verified. Existing membership proxy preserved. Backup: '+backup);
   }catch{
-    if(await readFile(file,'utf8')!==replacement)fail('Nginx file changed concurrently; automatic restore withheld. The protected backup is retained for review');
+    const diagnosis='Nginx '+phase+' failed'+(publicResult?` (health HTTP ${publicResult.healthStatus??'unavailable'}, config HTTP ${publicResult.configStatus??'unavailable'})`:'');
+    if(await readFile(file,'utf8')!==replacement)fail(diagnosis+'; Nginx file changed concurrently; automatic restore withheld. The protected backup is retained for review');
     await copyFile(backup,file);await chmod(file,0o644);
-    try{run('nginx',['-t']);run('systemctl',['reload','nginx']);}catch{fail('Nginx verification failed and rollback reload failed. Inspect Nginx immediately; original file restored');}
-    fail('Nginx verification failed; original virtual-host file restored and reloaded');
+    try{run('nginx',['-t']);run('systemctl',['reload','nginx']);}catch{fail(diagnosis+' and rollback reload failed. Inspect Nginx immediately; original file restored');}
+    fail(diagnosis+'; original virtual-host file restored and reloaded');
   }
 }
 export async function main(args){

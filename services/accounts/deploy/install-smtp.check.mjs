@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseEnv} from 'node:util';
-import {mappedMail,envText,originOf,nginxSnippet,addNginxInclude,serviceText,assertFirstInstall} from './install-smtp.mjs';
+import {mappedMail,envText,originOf,nginxSnippet,addNginxInclude,serviceText,assertFirstInstall,verifyPublic,assertReusableSnippet} from './install-smtp.mjs';
 
 test('existing SMTP mapping excludes unrelated application secrets and respects final overrides',()=>{
   const source={APP_SMTP_HOST:'smtp.example.com',APP_SMTP_PORT:'587',APP_SMTP_USER:'tester',APP_SMTP_PASSWORD:'synthetic-password',APP_MAIL_FROM:'no-reply@example.com',STRIPE_SECRET_KEY:'excluded',DATABASE_PATH:'excluded'};
@@ -47,4 +47,31 @@ test('first install refuses every partial-install artifact and reused service id
   assert.doesNotThrow(()=>assertFirstInstall(empty));
   assert.throws(()=>assertFirstInstall({...empty,portFree:false}));
   for(const field of ['environment','unit','current','data','user','group'])assert.throws(()=>assertFirstInstall({...empty,[field]:true}),field);
+});
+test('public verification waits for new workers after stale 404 responses',async()=>{
+  let clock=0;const calls=[];
+  const result=await verifyPublic('https://member.example.com',{
+    now:()=>clock,sleep:async ms=>{clock+=ms},
+    send:async(url,options)=>{calls.push({url,options});return clock===0?{status:404,body:'old membership response'}:{status:200,body:JSON.stringify(url.endsWith('/v1/config')?{email:true}:{ok:true})}},
+  });
+  assert.deepEqual(result,{ok:true,healthStatus:200,configStatus:200});
+  assert.equal(clock,250);assert.equal(calls.length,4);
+  assert.ok(calls.every(call=>call.options.timeoutMs<=2000));
+});
+test('public verification stops after ten seconds and returns only statuses on failure',async()=>{
+  let clock=0;
+  const result=await verifyPublic('https://member.example.com',{
+    now:()=>clock,sleep:async ms=>{clock+=ms},
+    send:async url=>{if(url.endsWith('/v1/config'))throw new Error('private diagnostic');return {status:502,body:'private upstream response'}},
+  });
+  assert.equal(clock,10000);assert.deepEqual(result,{ok:false,healthStatus:502,configStatus:null});
+  assert.doesNotMatch(JSON.stringify(result),/private/);
+});
+test('publication retry reuses only the exact root-owned protected regular snippet',()=>{
+  const stat={isFile:()=>true,uid:0,mode:0o100644},contents=nginxSnippet();
+  assert.doesNotThrow(()=>assertReusableSnippet(stat,contents));
+  assert.throws(()=>assertReusableSnippet({...stat,isFile:()=>false},contents));
+  assert.throws(()=>assertReusableSnippet({...stat,uid:1000},contents));
+  assert.throws(()=>assertReusableSnippet({...stat,mode:0o100664},contents));
+  assert.throws(()=>assertReusableSnippet(stat,contents+'# changed\n'));
 });

@@ -64,16 +64,22 @@ proxy headers. It does not expose loopback port 3210 through a firewall.
 The original virtual-host file is backed up under `/root` with mode 0600 before the
 atomic replacement. Nginx must pass `nginx -t` before reload. Failure of syntax,
 reload, or public health/config checks restores and reloads the original virtual-host
-file; the helper reports if that rollback reload also fails. Concurrent changes
+file; the helper reports the failed phase and, for public verification, HTTP statuses
+without response bodies. Public verification allows up to ten seconds for the new
+workers, using connections that close after each request. The helper reports if the
+rollback reload also fails. Concurrent changes
 to the virtual-host file stop automatic replacement or restoration instead of
 overwriting another operator's edits. It preserves the new
 snippet and backup for inspection. It never removes or restores account data.
+After a successful rollback, `publish` may be retried: an existing snippet is accepted
+only if it is a root-owned regular file without group/world write and exactly matches
+the helper's expected text. All route and virtual-host checks still apply.
 
 Successful SMTP authentication and `/v1/config` do not prove sender verification,
 inbox delivery or successful desktop login. Test those explicitly with an authorized
 tester before embedding the public origin in the desktop build or publishing a release.
-Do not use this helper for upgrades or retries with partially created state: inspect
+Do not use `install` for upgrades or retries with partially created state: inspect
 and plan the exact recovery first. No secret value belongs in CLI arguments, GitHub,
 chat or desktop build variables.
 
-Local pure-function checks: `node --test services/accounts/deploy/install-smtp.check.mjs`.
+Local checks: `node --test services/accounts/deploy/install-smtp.check.mjs`.
