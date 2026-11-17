@@ -1135,6 +1135,7 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     main.set_fullscreen(prior_fullscreen).map_err(|e| e.to_string())?;
     wait(|| main.is_fullscreen().is_ok_and(|value| value == prior_fullscreen))?;
     browser::organization::split(app, None)?;
+    if !view_bool(&view, "(window.__elixMediaStyle=document.querySelector('video').style.cssText,window.__elixWrapperStyle=document.querySelector('#media-wrapper').style.cssText,true)")? { return Err("Cannot record original media styles".into()); }
     focus_before_move("first open")?;
     browser::media::perform(app, "open", Some(&id))?;
     wait(|| view.window().label() == "media-player")?;
@@ -1146,6 +1147,15 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     wait(|| native_child_geometry(&view, &player).is_ok_and(|geometry| geometry["fills_parent"] == true))
         .map_err(|_| format!("Miniplayer native geometry mismatch: {:?}", native_child_geometry(&view, &player)))?;
     if peer.window().label() != "main" || !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Miniplayer recreated media or moved an unrelated view".into()); }
+    wait(|| view_bool(&view, "(()=>{const v=document.querySelector('video'),r=v.getBoundingClientRect();return window.__elixMediaPresentation?.kind==='video'&&v.controls&&Math.abs(r.x)<2&&Math.abs(r.y)<2&&Math.abs(r.width-innerWidth)<2&&Math.abs(r.height-innerHeight)<2&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='hidden'})()").unwrap_or(false))
+        .map_err(|_| "Popout did not isolate video and fill the viewport through clipped/transformed ancestors".to_string())?;
+    if browser::media::perform(app, "open", Some(return_tab)).is_ok() || !browser::media::is_player(app, &id) {
+        return Err("Opening a page without media replaced the existing miniplayer".into());
+    }
+    player.minimize().map_err(|e| e.to_string())?;
+    wait(|| player.is_minimized().unwrap_or(false))?;
+    player.unminimize().map_err(|e| e.to_string())?;
+    wait(|| !player.is_minimized().unwrap_or(true))?;
     app.state::<AppState>().permissions_visible.store(true, std::sync::atomic::Ordering::SeqCst);
     browser::organization::layout(app)?;
     wait(|| !player.is_visible().unwrap_or(true))?;
@@ -1167,7 +1177,7 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     progress("media: return completed; before ownership wait");
     wait(|| view.window().label() == "main" && !browser::media::is_player(app, &id))?;
     progress("media: return ownership verified; before page state check");
-    if !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Returning miniplayer recreated or paused media".into()); }
+    if !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused&&!window.__elixMediaPresentation&&document.querySelector('video').style.cssText===window.__elixMediaStyle&&document.querySelector('#media-wrapper').style.cssText===window.__elixWrapperStyle&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='visible'&&!document.querySelector('[data-elix-media-surface]')")? { return Err("Returning miniplayer did not preserve playback and restore original page styles".into()); }
     progress("media: returned page verified; before reopen");
     focus_before_move("reopen")?;
     browser::media::perform(app, "open", Some(&id))?;
@@ -1180,6 +1190,18 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     wait(|| !browser::media::is_player(app, &id) && view.window().label() == "main" && !player.is_visible().unwrap_or(true))?;
     progress("media: reset ownership verified; before page state check");
     if !view_bool(&view, "window.__elixMediaToken==='original'")? { return Err("Reset lost the live player page before profile cleanup".into()); }
+    // Audio-only sites use the actual audio element and native controls; the
+    // page itself must remain hidden, and removing controls must be reversible.
+    if !view_bool(&view, "(()=>{document.querySelector('video').remove();const audio=document.createElement('audio');audio.muted=true;audio.style.width='123px';document.body.append(audio);window.__elixAudioElement=audio;window.__elixAudioContext=new AudioContext();const output=window.__elixAudioContext.createMediaStreamDestination();audio.srcObject=output.stream;return true})()")? { return Err("Cannot create audio-only fixture".into()); }
+    browser::media::perform(app, "open", Some(&id))?;
+    wait(|| view_bool(&view, "window.__elixMediaPresentation?.kind==='audio'&&document.querySelector('audio')===window.__elixAudioElement&&window.__elixAudioElement.controls&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='hidden'").unwrap_or(false))?;
+    browser::media::perform(app, "return", None)?;
+    if !view_bool(&view, "!window.__elixMediaPresentation&&!window.__elixAudioElement.controls&&window.__elixAudioElement.style.width==='123px'&&!!window.__elixAudioElement.srcObject")? { return Err("Audio popout replaced its stream or failed to restore native controls".into()); }
+    browser::media::perform(app, "open", Some(&id))?;
+    // A destination document can never remain visible as a whole-page popout.
+    view.navigate(format!("{origin}/first").parse().map_err(|_| "Invalid media navigation URL")?).map_err(|e| e.to_string())?;
+    wait(|| !browser::media::is_player(app, &id) && view.window().label() == "main" && !player.is_visible().unwrap_or(true))
+        .map_err(|_| "Page navigation retained whole-site miniplayer ownership".to_string())?;
     progress("media: reset page verified; before activate original");
     browser::activate(app, return_tab)?;
     progress("media: original activated; before fixture close");
@@ -1573,7 +1595,9 @@ fn serve_fixture(mut stream: std::net::TcpStream) {
     if request.starts_with("GET /media ") {
         let html = r#"<!doctype html><html><head><title>ELIX media fixture</title></head>
             <body style="margin:0;background:#151515"><canvas hidden width="320" height="180"></canvas>
-            <video muted playsinline controls style="width:100vw;height:100vh"></video>
+            <p id="page-chrome">Page navigation and recommendations must disappear in popout.</p>
+            <section id="media-wrapper" style="transform:translate(5px);contain:paint;overflow:hidden;width:70vw;height:60vh">
+            <video muted playsinline controls style="width:100vw;height:100vh"></video></section>
             <button style="position:fixed;inset:0;width:100vw;height:100vh">Play fullscreen fixture</button>
             <script>
             window.__elixMediaToken='original';window.__elixMediaTicks=0;

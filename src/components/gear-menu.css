@@ -1,0 +1,30 @@
+/* Quick choices occupy the rail, so native page WebViews never cover them. */
+.rail-quick-open .rail-scroll{min-height:50px}
+.rail .rail-bottom{gap:9px;padding-top:10px;min-height:0;max-height:calc(100% - 160px)}
+.gear-panel{width:100%;min-height:0;overflow:auto;scrollbar-width:thin;padding:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--raised);box-shadow:0 5px 18px #0002}
+.gear-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 3px 7px;border-bottom:1px solid var(--border)}
+.gear-heading strong{font-size:11px;color:var(--muted);font-weight:600}
+.rail .gear-panel .gear-heading button{width:25px;min-height:25px;height:25px;padding:0;justify-content:center}
+.rail .gear-tools{margin:0;padding:5px 0;border:0;gap:3px}
+.rail .gear-panel button{height:auto;min-height:33px;font-size:11px;line-height:1.4;text-align:left}
+.rail .gear-panel button:hover{background:var(--hover);color:var(--accent)}
+.rail .gear-panel .gear-section-toggle{padding:8px 5px;gap:8px;color:var(--text)}
+.rail .gear-section-toggle>span{flex:1;font-size:11px}
+.gear-section-toggle[aria-expanded=true]{background:var(--accent-soft);color:var(--accent)!important}
+.gear-section-toggle[aria-expanded=true]>svg:last-child{transform:rotate(180deg)}
+.gear-section-content{display:flex;flex-direction:column;gap:7px;padding:4px 3px 10px}
+.rail .gear-section-content .rail-tool{padding:6px 4px;gap:8px}
+.rail .gear-section-content .rail-tool span{font-size:11px;white-space:normal}
+.rail .gear-section-content input,.rail .gear-section-content select{background:var(--surface)}
+.rail-group-form{display:flex;flex-direction:column;gap:6px}
+.rail .rail-group-form .subtle{width:auto;align-self:flex-start;padding:6px 10px;min-height:28px}
+.rail .gear-section-content .rail-shortcut{padding:0;line-height:1.5}
+.rail .gear-section-content .tab-search{padding:2px 0;border:0}
+.rail .gear-section-content .tab-search ul{max-height:180px}
+.rail .gear-section-content .tab-search li button{padding:7px 3px;gap:7px}
+.rail .gear-panel .gear-settings{border-top:1px solid var(--border);border-radius:0;margin-top:4px;padding:10px 5px 4px;gap:8px;color:var(--text)}
+.rail .gear-settings span{font-size:11px}
+.rail .gear-trigger{flex-shrink:0}
+.rail .rail-data-status{flex-shrink:0;white-space:nowrap}
+.rail.rail-quick-temporary .rail-data-status{display:none}
+@media(max-height:650px){.rail .rail-data-status{display:none}.rail .rail-bottom{padding-top:5px}.gear-panel{padding:6px}}

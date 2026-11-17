@@ -29,6 +29,11 @@ jobs:
       - run: npm test
       - run: npm run check:release
       - run: npm run build
+      - run: npx playwright install chromium
+      - name: Verify shell and media presentation in Chromium
+        run: npm run test:ui
+        env:
+          ELIX_UI_OUTPUT: alpha8-ui
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - run: npm run tauri build -- --features smoke-tests --bundles nsis -- --locked
       - name: Test installed app starts
@@ -95,6 +100,7 @@ jobs:
             windows-start.png
             native-*.txt
             native-*.png
+            alpha8-ui/**
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -104,5 +110,6 @@ jobs:
             windows-start.png
             native-*.txt
             native-*.png
+            alpha8-ui/**
           if-no-files-found: warn
 

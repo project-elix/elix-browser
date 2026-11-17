@@ -99,6 +99,8 @@ enum Request {
     SyncApply {
         profile: String,
         items: Vec<storage::Entry>,
+        #[serde(default)]
+        groups: Vec<String>,
         appearance: storage::Appearance,
     },
     Window {
@@ -141,7 +143,15 @@ enum Request {
     },
     RemoveBookmark {
         id: i64,
+        #[serde(default)]
+        profile: Option<String>,
     },
+    BookmarkGroups { profile: String },
+    CreateBookmarkGroup { profile: String, name: String },
+    RenameBookmarkGroup { profile: String, name: String, new_name: String },
+    RemoveBookmarkGroup { profile: String, name: String },
+    MoveBookmark { profile: String, id: i64, group: String },
+    EditBookmark { profile: String, id: i64, title: String, url: String },
     ClearHistory,
     Settings {
         settings: storage::Settings,
@@ -242,11 +252,12 @@ async fn dispatch(
             for item in &mut items {
                 item.favicon = None;
             }
-            Ok(json!({"version":1,"items":items,"appearance":store.settings().appearance}))
+            Ok(json!({"version":1,"items":items,"groups":store.bookmark_groups(&p)?,"appearance":store.settings().appearance}))
         }
         Request::SyncApply {
             profile,
             items,
+            groups,
             appearance,
         } => {
             if *state.profile.lock().unwrap() != profile {
@@ -259,7 +270,7 @@ async fn dispatch(
             if !settings.valid() {
                 return Err("Ugyldig synkronisert utseende".into());
             }
-            let count = store.import_bookmarks(&p, items)?;
+            let count = store.import_bookmark_collection(&p, items, groups)?;
             store.set(
                 "preferences",
                 &serde_json::to_string(&settings).map_err(|e| e.to_string())?,
@@ -449,9 +460,47 @@ async fn dispatch(
                 .bookmark_icon(&p, &tab.url, tab.favicon.as_deref())?;
             Ok(Value::Null)
         }
-        Request::RemoveBookmark { id } => {
+        Request::RemoveBookmark { id, profile } => {
             let p = state.profile.lock().unwrap().clone();
+            if profile.as_ref().is_some_and(|profile| profile != &p) {
+                return Err("Profilen ble endret".into());
+            }
             state.store.lock().unwrap().remove_bookmark(&p, id)?;
+            let _ = app.emit_to("shell", "bookmarks-changed", ());
+            Ok(Value::Null)
+        }
+        Request::BookmarkGroups { profile } => {
+            if *state.profile.lock().unwrap() != profile { return Err("Profilen ble endret".into()); }
+            Ok(json!(state.store.lock().unwrap().bookmark_groups(&profile)?))
+        }
+        Request::CreateBookmarkGroup { profile, name } => {
+            if *state.profile.lock().unwrap() != profile { return Err("Profilen ble endret".into()); }
+            state.store.lock().unwrap().create_bookmark_group(&profile, &name)?;
+            let _ = app.emit_to("shell", "bookmarks-changed", ());
+            Ok(Value::Null)
+        }
+        Request::RenameBookmarkGroup { profile, name, new_name } => {
+            if *state.profile.lock().unwrap() != profile { return Err("Profilen ble endret".into()); }
+            state.store.lock().unwrap().rename_bookmark_group(&profile, &name, &new_name)?;
+            let _ = app.emit_to("shell", "bookmarks-changed", ());
+            Ok(Value::Null)
+        }
+        Request::RemoveBookmarkGroup { profile, name } => {
+            if *state.profile.lock().unwrap() != profile { return Err("Profilen ble endret".into()); }
+            state.store.lock().unwrap().remove_bookmark_group(&profile, &name)?;
+            let _ = app.emit_to("shell", "bookmarks-changed", ());
+            Ok(Value::Null)
+        }
+        Request::MoveBookmark { profile, id, group } => {
+            if *state.profile.lock().unwrap() != profile { return Err("Profilen ble endret".into()); }
+            state.store.lock().unwrap().move_bookmark(&profile, id, &group)?;
+            let _ = app.emit_to("shell", "bookmarks-changed", ());
+            Ok(Value::Null)
+        }
+        Request::EditBookmark { profile, id, title, url } => {
+            if *state.profile.lock().unwrap() != profile { return Err("Profilen ble endret".into()); }
+            state.store.lock().unwrap().edit_bookmark(&profile, id, &title, &url)?;
+            let _ = app.emit_to("shell", "bookmarks-changed", ());
             Ok(Value::Null)
         }
         Request::ClearHistory => {

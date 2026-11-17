@@ -30,6 +30,7 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                 controller.add_GotFocus(&FocusChangedEventHandler::create(Box::new(move|_,_|{
                     let state=focus_app.state::<AppState>();
                     {let mut s=state.session.lock().unwrap();if s.split.as_ref().is_some_and(|pair|pair.contains(&focus_id)){s.active=focus_id.clone();}}
+                    let _=focus_app.emit("page-focused", &focus_id);
                     browser::emit(&focus_app);Ok(())
                 })),&mut focus_token)?;
                 let settings = core.Settings()?;
@@ -56,7 +57,7 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                 let mut leaving_token = 0;
                 core.add_NavigationStarting(
                     &NavigationStartingEventHandler::create(Box::new(move |_, _| {
-                        let _ = browser::media::exit(&leaving_app, &leaving_id);
+                        browser::media::navigation_started(&leaving_app, &leaving_id);
                         Ok(())
                     })),
                     &mut leaving_token,

@@ -4,7 +4,7 @@ export interface Appearance {accent:string;background:string;density:'comfortabl
 export interface Settings {appearance:Appearance;developer:boolean;gaming:boolean;channel:'stable'|'beta'|'developer';suspend_minutes:number;password_autosave:boolean;autofill:boolean}
 export interface Profile {id:string;name:string}
 export interface Snapshot {session:Session;profiles:Profile[];profile:string;settings:Settings;version:string;updater_configured:boolean;recovered?:boolean}
-export interface Entry {id:number;url:string;title:string;time:string;favicon?:string|null}
+export interface Entry {id:number;url:string;title:string;time:string;favicon?:string|null;group?:string}
 export interface Download {id:string;name:string;path:string;status:string;time:string;profile:string;private:boolean;url:string;bytes_received:number;total_bytes:number|null;can_resume:boolean;view_id:string}
 export interface Sample {time:string;cpu_percent:number|null;memory_bytes:number;processes:number}
 export interface Log {time:string;level:string;code:string}

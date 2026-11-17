@@ -4,7 +4,7 @@ Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript
 
 Product site: https://browser.projectelix.no
 
-**Current source: Alpha 7, version 0.1.2-dev.7.** See [Alpha 7 implementation and validation notes](docs/alpha7.md); published installers are available through [GitHub Releases](https://github.com/project-elix/elix-browser/releases). This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and the [current feature limitations](docs/alpha7.md#inherited-limits) before distribution.
+**Current source: Alpha 8, version 0.1.2-dev.8.** See [Alpha 8 implementation and validation notes](docs/alpha8.md); published installers are available through [GitHub Releases](https://github.com/project-elix/elix-browser/releases). This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and the [current feature limitations](docs/alpha8.md#inherited-limitations) before distribution.
 
 ## Beta test for Windows
 
@@ -36,7 +36,7 @@ The NSIS installer is written to `src-tauri/target/release/bundle/nsis/`. Ordina
 - Native download progress, pause/resume/cancel, per-profile persisted list and Show folder. Files are never automatically opened; interrupted transfers must restart after app exit.
 - Local address suggestions, native favicons, pinned tabs, configurable bookmark placement and Ctrl+H history.
 - Real InPrivate tabs, per-origin permission controls, opt-in native password saving/autofill and profile-scoped extension management. Alpha 7 adds publisher ZIP import with permission review and Chrome Web Store discovery; direct store installation, CRX import and extension toolbar popups are unavailable. See [Alpha 7](docs/alpha7.md) for scope and validation status.
-- Sidebar tab groups/reordering, internal pages in separate reusable tabs, new-tab address focus, Ctrl+Alt+S split view, and a live native miniplayer. Alpha 7's new native regressions cover media fullscreen and real PDF wheel scrolling; see its validation notes before treating these as accepted Windows behavior.
+- Bottom-gear quick controls, visible tab dragging, persistent bookmark groups/context actions, internal pages in separate reusable tabs, Ctrl+Alt+S split view, and a media-only live native miniplayer. Alpha 7's new native regressions cover media fullscreen and real PDF wheel scrolling; see its validation notes before treating these as accepted Windows behavior.
 - Start page, gaming dashboard, optional reload-based tab suspension, side panel.
 - Native minimize, maximize/restore, fullscreen (F11/Esc) and close controls.
 - Five theme presets, custom accent/background colors, density, corner radius and reduced motion; preferences persist locally and older settings remain readable.
