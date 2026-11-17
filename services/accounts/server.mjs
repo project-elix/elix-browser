@@ -1,9 +1,9 @@
 import {createServer} from 'node:http';
 import {DatabaseSync} from 'node:sqlite';
 import {randomBytes,randomInt,createHash,createHmac,timingSafeEqual} from 'node:crypto';
-import {mkdirSync} from 'node:fs';
+import {mkdirSync,realpathSync} from 'node:fs';
 import {dirname,resolve} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath} from 'node:url';
 import {BrevoError,validEmail} from './brevo.mjs';
 import {sendMail,mailConfigured} from './mail.mjs';
 import {readConfig,validateOrigin} from './config.mjs';
@@ -97,7 +97,12 @@ export function createAccounts(config,providers={}){
   server.requestTimeout=20000;server.headersTimeout=15000;
   return {server,db,close:async()=>{await new Promise(r=>server.close(r));db.close();}};
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
+function isMainModule(){
+  if(!process.argv[1])return false;
+  // Resolve both paths: production starts through the current release symlink.
+  try{return realpathSync(fileURLToPath(import.meta.url))===realpathSync(process.argv[1]);}catch{return false;}
+}
+if(isMainModule()){
   process.umask(0o077);
   try{
     const config=readConfig(),app=createAccounts(config);

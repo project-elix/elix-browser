@@ -1,6 +1,42 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdtemp,rm,symlink} from 'node:fs/promises';
+import {createServer as createSocketServer} from 'node:net';
+import {tmpdir} from 'node:os';
+import {dirname,join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {createAccounts} from './server.mjs';
+for(const preserveMain of [false,true])test(`CLI starts through the current directory symlink${preserveMain?' with preserved main symlinks':''}`,async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'elix-accounts-startup-'));
+ let child,closed;
+ try{
+  await symlink(dirname(fileURLToPath(import.meta.url)),join(directory,'current'),process.platform==='win32'?'junction':'dir');
+  const socket=createSocketServer();await new Promise(resolve=>socket.listen(0,'127.0.0.1',resolve));
+  const port=socket.address().port;await new Promise(resolve=>socket.close(resolve));
+  child=spawn(process.execPath,[...(preserveMain?['--preserve-symlinks-main']:[]),join(directory,'current','server.mjs')],{
+   env:{NODE_ENV:'development',PUBLIC_URL:'http://127.0.0.1',AUTH_PEPPER:'startup-test-pepper-with-at-least-32-characters',DATABASE_PATH:join(directory,'accounts.sqlite'),PORT:String(port)},
+   stdio:['ignore','pipe','pipe'],
+  });
+  closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));
+  let output='';child.stdout.on('data',chunk=>{output+=chunk});child.stderr.on('data',chunk=>{output+=chunk});
+  await new Promise((resolve,reject)=>{
+   const timer=setTimeout(()=>finish(new Error(`Startup timed out: ${output}`)),5000);
+   const finish=error=>{clearTimeout(timer);child.stdout.off('data',ready);child.off('exit',exited);child.off('error',finish);error?reject(error):resolve()};
+   const ready=()=>{if(output.includes('ELIX accounts ready'))finish()};
+   const exited=(code,signal)=>finish(new Error(`Exited before ready (${code??signal}): ${output}`));
+   child.stdout.on('data',ready);child.once('exit',exited);child.once('error',finish);
+  });
+  const response=await fetch(`http://127.0.0.1:${port}/health`,{signal:AbortSignal.timeout(3000)});
+  assert.equal(response.status,200);assert.deepEqual(await response.json(),{ok:true});
+  child.kill('SIGTERM');
+  const deadline=setTimeout(()=>child.kill('SIGKILL'),3000);
+  try{const exit=await closed;if(process.platform!=='win32')assert.deepEqual(exit,{code:0,signal:null});else assert.notEqual(exit.signal,'SIGKILL')}finally{clearTimeout(deadline)}
+ }finally{
+  if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGKILL');await closed}
+  await rm(directory,{recursive:true,force:true});
+ }
+});
 const fixture=async(overrides={})=>{
  const emails=[];let calls=0;
  const app=createAccounts({publicUrl:'http://127.0.0.1',development:true,database:':memory:',pepper:'test-only-pepper-not-for-production-123',discordId:'123',discordSecret:'test-secret'},{sendEmail:async(email,code)=>emails.push({email,code}),discordIdentity:async()=>{calls++;return {id:'123456789012345678',name:'Discord tester'}},...overrides});
@@ -92,3 +128,4 @@ test('email spelling is normalized, login responses never contain the code, and 
  assert.equal(f.emails.length,5);
  }finally{await f.close()}
 });
+
