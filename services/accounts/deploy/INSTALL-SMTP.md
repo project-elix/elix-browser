@@ -77,7 +77,9 @@ the helper's expected text. All route and virtual-host checks still apply.
 
 Successful SMTP authentication and `/v1/config` do not prove sender verification,
 inbox delivery or successful desktop login. Test those explicitly with an authorized
-tester before embedding the public origin in the desktop build or publishing a release.
+tester before publishing a release. A development installer can embed a verified
+service origin for that test; record inbox delivery and desktop login as outstanding
+until they have actually been observed.
 Do not use `install` for upgrades or retries with partially created state: inspect
 and plan the exact recovery first. No secret value belongs in CLI arguments, GitHub,
 chat or desktop build variables.

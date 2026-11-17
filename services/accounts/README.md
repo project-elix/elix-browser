@@ -5,6 +5,15 @@ for SMTP. This service supports Brevo SMTP or its HTTPS API. Local tests inject
 the mail provider or use a loopback SMTP server and verify that Discord routes
 stay disabled; they never send real mail or contact a real Discord account.
 
+As of 2026-11-17, the service is deployed at **https://medlem.projectelix.no** on the existing ELIX
+server. The systemd service is active, loopback `/health` returns HTTP 200, and the
+public HTTPS `/v1/config` reports `email:true`, `sync:true`, `discord:false`.
+Verified SMTP TLS and authentication checks pass. The environment file is root-owned
+with mode 0600; the service's state directory is 0700 and its SQLite files are 0600.
+One authorized email-code request through the public HTTPS endpoint was accepted
+by the SMTP relay. Inbox delivery and a complete Windows login/sync flow remain
+unverified. The deployed runtime is commit `1c60e6e273f4a1bae3de5989cba222f1f729e68f`.
+
 Run tests from the repository root:
 
 ```sh
@@ -41,10 +50,12 @@ handling, requests share the proxy's rate-limit bucket. Keep the SQLite volume
 persistent; do not run multiple replicas against separate files. The health route
 is `/health`; provider availability is `/v1/config`.
 
-The desktop build must explicitly embed `ELIX_ACCOUNTS_URL=https://YOUR_ACCOUNT_HOST/`.
-It rejects non-HTTPS origins and redirects. An unconfigured build continues to offer
-local profiles and explains that account login is unavailable. No provider secret
-is a compile-time desktop variable.
+The desktop embeds `ELIX_ACCOUNTS_URL` at build time and rejects non-HTTPS origins
+and redirects. Windows CI and signed release workflows default to
+`https://medlem.projectelix.no`; a nonempty repository variable overrides that origin.
+Local builds without this variable continue to offer local profiles and explain that
+account login is unavailable. Existing installers need rebuilding to gain the
+service address. No provider secret is a compile-time desktop variable.
 
 Email codes expire after ten minutes and five incorrect attempts. Only HMAC code
 verifiers are stored. Login sessions expire after 30 days and logout revokes the
@@ -64,19 +75,19 @@ contact, provider handling and operational ownership before public activation.
 Production acceptance must test real Brevo delivery,
 logout/relogin, separate Windows users and two-device encrypted sync, including a
 wrong phrase and competing edits. Browser tab/window features do not require this
-service. No live delivery or provider authorization has yet been verified.
+service. SMTP authentication is verified; inbox delivery and these Windows
+acceptance checks remain outstanding.
 
 ## Deploy on the existing ELIX Linux server
 
-The selected host is the **same server as `medlem.projectelix.no`**, and the selected
-sender is **`no-reply@projectelix.no`**. These are the user's confirmed choices;
-they do not indicate that the account service has already been deployed or that a
-live Brevo sender check has run.
+The live account service shares **`https://medlem.projectelix.no`** with the membership
+site through `/elix-accounts-health` and explicit `/v1/*` Nginx routes. Its configured sender is
+**`no-reply@projectelix.no`**. SMTP TLS/authentication and acceptance of one test
+message passed. Provider acceptance does not establish inbox delivery.
 
 The checked-in setup uses one Node 24 process, systemd and an Internet-facing Nginx
-TLS proxy. It does not provision a new hosting account. Adapt the proxy configuration
-to the existing server after confirming its hostname, TLS setup and Node location.
-`accounts.projectelix.no` is a possible hostname, not a domain already configured.
+TLS proxy. The deployed service uses the existing hosting account, hostname and
+certificate. No separate `accounts.projectelix.no` hostname is needed.
 
 The membership source documents SMTP variables (`APP_SMTP_HOST`, `APP_SMTP_PORT`,
 `APP_SMTP_USER`, `APP_SMTP_PASSWORD`, `APP_MAIL_FROM`). Reuse those protected server
@@ -100,10 +111,15 @@ The default `MAIL_TRANSPORT=brevo-api` preserves existing API deployments and us
 not an API key. Invalid configuration fails at startup; `/v1/config` reports the
 selected provider's configuration, not a live mail check.
 
-Deployment access is still required. The accessible membership repository describes
-deployment preparation and does not expose live server configuration or an active
-`.github/workflows/deploy.yml`. Reuse the existing deployment mechanism once its
-actual location/access is available; no new hosting account is needed.
+The reviewed deployment helper is documented in [deploy/INSTALL-SMTP.md](deploy/INSTALL-SMTP.md).
+It copies only the required SMTP fields from protected server configuration and
+adds isolated routes to the existing HTTPS vhost. Its first-install mode deliberately
+refuses an existing or partial installation. Inspect the existing state and plan
+an exact upgrade or recovery instead of repeating a first installation.
+
+The following manual alternative is for a separate, dedicated hostname. Adapt its
+Node executable path and certificate locations to that server; do not add a second
+vhost for the already deployed membership hostname.
 
 1. Make the chosen hostname point to the existing server and obtain its TLS
    certificate using that server's existing certificate process. Do not redirect
@@ -168,11 +184,13 @@ actual location/access is available; no new hosting account is needed.
    deliverability. Graceful shutdown finishes in-flight requests before closing SQLite.
    Code is root-owned; the unprivileged service writes persistent data in its protected
    state directory. Production creates database/WAL files with private permissions.
-6. Set GitHub **repository variable** `ELIX_ACCOUNTS_URL` to that same HTTPS origin
-   once the service passes verification, then build from `alpha-6`. The Windows CI
-   and signed release jobs now embed this public address; invalid origins fail the
-   release check. This is the only account-related value the desktop build receives.
-   Leave the variable unset until then: existing builds keep local profiles working.
+6. Build from `alpha-6` using the Windows verification workflow (`ci.yml`). Windows
+   CI and signed release jobs embed `https://medlem.projectelix.no` by default;
+   set repository variable `ELIX_ACCOUNTS_URL` only to override the origin.
+   Invalid origins fail the release check. An empty variable uses the default;
+   disabling this workflow default requires removing its fallback. This is the
+   only account-related value the desktop build receives. The older `alpha.yml`
+   publisher is pinned to Alpha 2 and is not the Alpha 6 build route.
 7. On a Windows test build, request a code for a tester-controlled address, verify
    actual receipt, log in, log out, and log back in. Verify expiry, wrong-code limits
    and code reuse rejection. Test a second local profile and another Windows device.
@@ -183,7 +201,7 @@ separately with restricted access. Use SQLite's online backup API or stop the se
 for a consistent snapshot; copying only `accounts.sqlite` while WAL is active is not
 a complete backup. Restore into a separate environment before relying on the backup.
 Keep one service instance. Restart after code/config changes; do not replace its data
-directory. No live server, sender or DNS was modified while preparing these files.
+directory.
 
 Primary API references used:
 - https://nodemailer.com/smtp

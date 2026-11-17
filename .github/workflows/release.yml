@@ -41,7 +41,7 @@ jobs:
       RELEASE_NOTES: ${{ inputs.notes }}
       ELIX_UPDATE_BASE: https://github.com/${{ github.repository }}/releases/download/channels
       ELIX_UPDATE_PUBLIC_KEY: ${{ vars.ELIX_UPDATE_PUBLIC_KEY }}
-      ELIX_ACCOUNTS_URL: ${{ vars.ELIX_ACCOUNTS_URL }}
+      ELIX_ACCOUNTS_URL: ${{ vars.ELIX_ACCOUNTS_URL || 'https://medlem.projectelix.no' }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       REQUIRE_RELEASE_SECRETS: 'true'

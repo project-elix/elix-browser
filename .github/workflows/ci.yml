@@ -13,7 +13,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     env:
-      ELIX_ACCOUNTS_URL: ${{ vars.ELIX_ACCOUNTS_URL }}
+      ELIX_ACCOUNTS_URL: ${{ vars.ELIX_ACCOUNTS_URL || 'https://medlem.projectelix.no' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
