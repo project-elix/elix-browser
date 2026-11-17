@@ -71,6 +71,25 @@ test('sync is account-isolated, encrypted-envelope only, and detects concurrent 
  assert.deepEqual((await f.request('/v1/sync',null,a.token)).value,{revision:3,envelope:null});
  }finally{await f.close()}
 });
+test('email relogin keeps the account and encrypted copy while device sessions revoke independently',async()=>{
+ const f=await fixture();try{
+ const first=await f.login('Person@EXAMPLE.com'),second=await f.login('person@example.com');
+ assert.equal(first.account.id,second.account.id);assert.notEqual(first.token,second.token);
+ const encrypted={version:1,algorithm:'AES-GCM',iterations:600000,salt:Buffer.alloc(16).toString('base64'),iv:Buffer.alloc(12).toString('base64'),ciphertext:Buffer.alloc(50,7).toString('base64')};
+ assert.equal((await f.request('/v1/sync',{revision:0,envelope:encrypted},first.token,'PUT')).status,200);
+ assert.equal((await f.request('/v1/auth/logout',{},first.token)).status,200);
+ assert.equal((await f.request('/v1/account',null,first.token)).status,401);
+ assert.equal((await f.request('/v1/account',null,second.token)).status,200);
+ const relogged=await f.login('person@example.com');
+ assert.equal(relogged.account.id,first.account.id);
+ assert.deepEqual((await f.request('/v1/sync',null,relogged.token)).value,{revision:1,envelope:encrypted});
+ f.db.exec('UPDATE sessions SET expires=0');
+ assert.equal((await f.request('/v1/sync',null,relogged.token)).status,401);
+ const refreshed=await f.login('person@example.com');
+ assert.equal(refreshed.account.id,first.account.id);
+ assert.deepEqual((await f.request('/v1/sync',null,refreshed.token)).value,{revision:1,envelope:encrypted});
+ }finally{await f.close()}
+});
 test('sync deletion keeps monotonic revisions and rejects stale uploads and deletes',async()=>{
  const f=await fixture();try{
  const a=await f.login('a@example.com');

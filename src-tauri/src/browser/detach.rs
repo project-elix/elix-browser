@@ -82,10 +82,10 @@ pub fn recover_windows(app: &AppHandle) -> Result<usize, String> {
         if s.tabs.len() + count > 100 {
             return Err("Lukk noen faner først. Gjenopprettingen vil overstige 100 faner.".into());
         }
+        let now = chrono::Utc::now().timestamp();
         for mut tab in tabs {
             tab.id = format!("tab-{}", uuid::Uuid::new_v4());
-            tab.suspended = !tab.url.starts_with("elix:");
-            tab.loading = false;
+            tab.reset_runtime_state(now);
             if !s.workspaces.contains(&tab.workspace) {
                 s.workspaces.push(tab.workspace.clone());
             }

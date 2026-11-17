@@ -231,6 +231,23 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
             LogicalSize::new(1000., 600.),
         )
         .map_err(|e| e.to_string())?;
+    // A dormant page can also be recreated as the second split pane, without
+    // activating it. Keep the runtime flag tied to this view in every wake path.
+    if let Some(current) = state
+        .session
+        .lock()
+        .unwrap()
+        .tabs
+        .iter_mut()
+        .find(|current| current.id == tab.id)
+    {
+        current.suspended = false;
+        current.crashed = false;
+        current.loading = true;
+        current.started = Some(std::time::Instant::now());
+        current.http_status = None;
+        current.navigation_error = None;
+    }
     #[cfg(windows)]
     {
         super::windows::attach(&view)?;

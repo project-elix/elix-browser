@@ -106,6 +106,9 @@ mod native {
         app.state::<AppState>()
             .permissions_visible
             .store(!prompts.is_empty(), std::sync::atomic::Ordering::SeqCst);
+        // A floating page must not cover the trusted permission prompt. HTML
+        // fullscreen also needs to restore the shell before it receives focus.
+        let _ = crate::browser::media::layout(app);
         let active = app
             .state::<AppState>()
             .session

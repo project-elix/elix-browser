@@ -1,6 +1,7 @@
 pub mod detach;
 pub mod engine;
 pub mod extensions;
+pub mod media;
 #[cfg(windows)]
 mod favicon;
 pub mod organization;
@@ -12,6 +13,7 @@ pub mod smoke;
 mod windows;
 use crate::{security, AppState};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tauri::{AppHandle, Emitter, Manager};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Tab {
@@ -34,7 +36,7 @@ pub struct Tab {
     pub favicon: Option<String>,
     #[serde(default)]
     pub loading: bool,
-    #[serde(default)]
+    #[serde(default, skip_deserializing)]
     pub suspended: bool,
     #[serde(default)]
     pub last_active: i64,
@@ -72,6 +74,18 @@ impl Tab {
             navigation_error: None,
             started: None,
         }
+    }
+
+    fn reset_runtime_state(&mut self, now: i64) {
+        self.loading = false;
+        self.suspended = false;
+        self.crashed = false;
+        self.favicon = None;
+        self.load_ms = None;
+        self.http_status = None;
+        self.navigation_error = None;
+        self.started = None;
+        self.last_active = now;
     }
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -143,32 +157,7 @@ pub fn restore(app: &AppHandle) {
         .into_iter()
         .find_map(|v| serde_json::from_str::<Session>(&v).ok())
         .unwrap_or_default();
-    s.tabs
-        .retain(|t| !t.private && security::destination(&t.url).is_ok());
-    s.tabs.truncate(100);
-    if s.workspaces.is_empty() {
-        s.workspaces = organization::default_workspaces();
-    }
-    s.closed
-        .retain(|t| !t.private && security::destination(&t.url).is_ok());
-    s.closed.truncate(20);
-    for tab in &s.tabs {
-        if !s.workspaces.contains(&tab.workspace) {
-            s.workspaces.push(tab.workspace.clone());
-        }
-    }
-    let active_index = s.tabs.iter().position(|t| t.id == s.active).unwrap_or(0);
-    for t in &mut s.tabs {
-        t.id = format!("tab-{}", uuid::Uuid::new_v4());
-        t.loading = false;
-        t.suspended = !t.url.starts_with("elix:");
-        t.started = None;
-    }
-    if s.tabs.is_empty() {
-        s.tabs.push(Tab::new("elix://start".into()));
-    }
-    s.active = s.tabs[active_index.min(s.tabs.len() - 1)].id.clone();
-    s.workspace = s.tabs[active_index.min(s.tabs.len() - 1)].workspace.clone();
+    s.prepare_restore(chrono::Utc::now().timestamp());
     *state.session.lock().unwrap() = s;
 }
 pub async fn create(app: AppHandle, input: String) -> Result<String, String> {
@@ -202,32 +191,21 @@ pub async fn create_with_mode(
     Ok(id)
 }
 pub fn activate(app: &AppHandle, id: &str) -> Result<(), String> {
+    media::before_activate(app, id)?;
     let state = app.state::<AppState>();
     #[cfg(windows)]
-    if state.session.lock().unwrap().active != id {
+    let previous = state.session.lock().unwrap().active.clone();
+    let tab = state
+        .session
+        .lock()
+        .unwrap()
+        .select_tab(id, chrono::Utc::now().timestamp())?;
+    #[cfg(windows)]
+    if previous != id {
         crate::security::permissions::cancel_all(app);
     }
-    let tab = {
-        let mut s = state.session.lock().unwrap();
-        let tab = s
-            .tabs
-            .iter_mut()
-            .find(|t| t.id == id)
-            .ok_or("Fant ikke fanen")?;
-        tab.last_active = chrono::Utc::now().timestamp();
-        let t = tab.clone();
-        s.active = id.into();
-        s.workspace = t.workspace.clone();
-        if s.split
-            .as_ref()
-            .is_some_and(|pair| !pair.iter().any(|x| x == id))
-        {
-            s.split = None;
-        }
-        t
-    };
     for (label, view) in app.webviews() {
-        if label.starts_with("tab-") {
+        if label.starts_with("tab-") && !media::is_player(app, &label) {
             view.hide().map_err(|e| e.to_string())?;
         }
     }
@@ -237,6 +215,7 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<(), String> {
                 let mut session = state.session.lock().unwrap();
                 if let Some(t) = session.tabs.iter_mut().find(|t| t.id == id) {
                     t.loading = true;
+                    t.suspended = false;
                     t.navigation_error = None;
                     t.started = Some(std::time::Instant::now());
                 }
@@ -272,6 +251,7 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<(), String> {
 }
 pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
     let url = security::destination(input)?;
+    media::before_navigation(app, id)?;
     // Internal panels must not close the native view that owns a live transfer.
     if url.starts_with("elix:") {
         let state = app.state::<AppState>();
@@ -323,7 +303,7 @@ pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
         tab.http_status = None;
         tab.navigation_error = None;
         if url.starts_with("elix:") {
-            s.split = None;
+            s.clear_split(chrono::Utc::now().timestamp());
         }
     }
     emit(app);
@@ -365,6 +345,7 @@ fn close_inner(app: &AppHandle, id: &str, remember: bool) -> Result<(), String> 
 
     #[cfg(windows)]
     crate::security::permissions::cancel(app, id);
+    media::release(app, id)?;
     if let Some(v) = app.get_webview(id) {
         v.close().map_err(|e| e.to_string())?;
     }
@@ -385,7 +366,7 @@ fn close_inner(app: &AppHandle, id: &str, remember: bool) -> Result<(), String> 
             .as_ref()
             .is_some_and(|pair| pair.iter().any(|x| x == id))
         {
-            s.split = None;
+            s.clear_split(chrono::Utc::now().timestamp());
         }
         if s.tabs.is_empty() {
             s.tabs.push(Tab::new("elix://start".into()));
@@ -400,6 +381,9 @@ fn close_inner(app: &AppHandle, id: &str, remember: bool) -> Result<(), String> 
     persist(app)
 }
 pub fn suspend(app: &AppHandle, id: &str) -> Result<(), String> {
+    if media::is_player(app, id) {
+        return Err("Minispilleren holdes våken. Flytt den tilbake til nettleseren før dvale.".into());
+    }
     let state = app.state::<AppState>();
     {
         let s = state.session.lock().unwrap();
@@ -438,17 +422,127 @@ pub fn suspend(app: &AppHandle, id: &str) -> Result<(), String> {
     {
         t.suspended = true;
         t.loading = false;
+        t.started = None;
     }
     emit(app);
     persist(app)
 }
 
-/// A snapshot suitable for disk; private URLs, titles and favicons never leave memory.
 impl Session {
+    /// Restored pages stay unloaded until selected, but are not sleeping views.
+    pub fn prepare_restore(&mut self, now: i64) {
+        self.tabs
+            .retain(|t| !t.private && security::destination(&t.url).is_ok());
+        self.tabs.truncate(100);
+        if self.tabs.is_empty() {
+            self.tabs.push(Tab::new("elix://start".into()));
+        }
+        if self.workspaces.is_empty() {
+            self.workspaces = organization::default_workspaces();
+        }
+        self.closed
+            .retain(|t| !t.private && security::destination(&t.url).is_ok());
+        self.closed.truncate(20);
+        for tab in &self.tabs {
+            if !self.workspaces.contains(&tab.workspace) {
+                self.workspaces.push(tab.workspace.clone());
+            }
+        }
+        let active_index = self
+            .tabs
+            .iter()
+            .position(|t| t.id == self.active)
+            .unwrap_or(0);
+        for tab in &mut self.tabs {
+            tab.id = format!("tab-{}", uuid::Uuid::new_v4());
+            tab.reset_runtime_state(now);
+        }
+        for tab in &mut self.closed {
+            tab.reset_runtime_state(now);
+        }
+        self.active = self.tabs[active_index].id.clone();
+        self.workspace = self.tabs[active_index].workspace.clone();
+        self.split = None;
+    }
+
+    /// Start the idle period when a visible tab moves into the background.
+    pub fn select_tab(&mut self, id: &str, now: i64) -> Result<Tab, String> {
+        let index = self
+            .tabs
+            .iter()
+            .position(|t| t.id == id)
+            .ok_or("Fant ikke fanen")?;
+        let leaving_split = self
+            .split
+            .as_ref()
+            .is_some_and(|pair| !pair.iter().any(|x| x == id));
+        for tab in &mut self.tabs {
+            if tab.id == self.active || tab.id == id {
+                tab.last_active = now;
+            }
+        }
+        let tab = self.tabs[index].clone();
+        self.active = id.into();
+        self.workspace = tab.workspace.clone();
+        if leaving_split {
+            self.clear_split(now);
+        }
+        Ok(tab)
+    }
+
+    pub fn clear_split(&mut self, now: i64) {
+        if let Some(pair) = self.split.take() {
+            for tab in &mut self.tabs {
+                if pair.contains(&tab.id) {
+                    tab.last_active = now;
+                }
+            }
+        }
+    }
+
+    /// Install a validated pair after its native views have been created.
+    pub fn replace_split(&mut self, pair: [String; 2], now: i64) {
+        self.clear_split(now);
+        self.split = Some(pair);
+    }
+
+    pub fn automatic_suspend_ids(
+        &self,
+        minutes: u32,
+        now: i64,
+        loaded: &HashSet<String>,
+        transfers: &HashSet<String>,
+    ) -> Vec<String> {
+        if minutes == 0 {
+            return Vec::new();
+        }
+        let threshold = i64::from(minutes) * 60;
+        self.tabs
+            .iter()
+            .filter(|tab| {
+                loaded.contains(&tab.id)
+                    && tab.id != self.active
+                    && !self
+                        .split
+                        .as_ref()
+                        .is_some_and(|pair| pair.contains(&tab.id))
+                    && !tab.private
+                    && !tab.pinned
+                    && !tab.suspended
+                    && !tab.url.starts_with("elix:")
+                    && !transfers.contains(&tab.id)
+                    && now.saturating_sub(tab.last_active) >= threshold
+            })
+            .map(|tab| tab.id.clone())
+            .collect()
+    }
+
+    /// A snapshot suitable for disk; private content and dormancy stay in memory.
     pub fn persistent(&self) -> Self {
         let mut tabs: Vec<_> = self.tabs.iter().filter(|t| !t.private).cloned().collect();
         for tab in &mut tabs {
             tab.favicon = None;
+            tab.suspended = false;
         }
         let active = if tabs.iter().any(|t| t.id == self.active) {
             self.active.clone()
@@ -464,6 +558,7 @@ impl Session {
             .collect();
         for tab in &mut closed {
             tab.favicon = None;
+            tab.suspended = false;
         }
         Self {
             tabs,
@@ -496,6 +591,7 @@ pub fn failed(app: &AppHandle, id: &str, message: &str) {
         let mut session = state.session.lock().unwrap();
         if let Some(tab) = session.tabs.iter_mut().find(|t| t.id == id) {
             tab.loading = false;
+            tab.suspended = false;
             tab.started = None;
             tab.navigation_error = Some(message.into());
         }
@@ -505,6 +601,244 @@ pub fn failed(app: &AppHandle, id: &str, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restoring_old_sleep_state_keeps_tabs_lazy_without_marking_them_dormant() {
+        let mut first = Tab::new("https://example.com/first".into());
+        first.loading = true;
+        first.suspended = true;
+        first.last_active = 1;
+        first.load_ms = Some(42);
+        first.http_status = Some(503);
+        first.navigation_error = Some("old failure".into());
+        let mut selected = first.clone();
+        selected.id = "selected-before-restart".into();
+        selected.url = "https://example.com/selected".into();
+        selected.workspace = "Work".into();
+        selected.pinned = true;
+        let old_ids = HashSet::from([first.id.clone(), selected.id.clone()]);
+        let session = Session {
+            active: selected.id.clone(),
+            tabs: vec![first.clone(), selected],
+            closed: vec![first],
+            ..Default::default()
+        };
+        // Old saved sessions contained the runtime flag; the shell still needs it.
+        let old_snapshot = serde_json::to_value(&session).unwrap();
+        assert_eq!(old_snapshot["tabs"][0]["suspended"], true);
+        let mut restored: Session = serde_json::from_value(old_snapshot).unwrap();
+        assert!(!restored.tabs[0].suspended);
+        restored.tabs[0].crashed = true;
+        restored.tabs[0].started = Some(std::time::Instant::now());
+        restored.prepare_restore(10_000);
+        let selected = restored
+            .tabs
+            .iter()
+            .find(|tab| tab.id == restored.active)
+            .unwrap();
+        assert_eq!(selected.url, "https://example.com/selected");
+        assert!(selected.pinned);
+        assert_eq!(restored.workspace, "Work");
+        assert!(restored.workspaces.contains(&"Work".to_string()));
+        assert!(restored.tabs.iter().all(|tab| !old_ids.contains(&tab.id)));
+        for tab in restored.tabs.iter().chain(&restored.closed) {
+            assert!(!tab.loading && !tab.suspended && !tab.crashed);
+            assert!(tab.load_ms.is_none() && tab.http_status.is_none());
+            assert!(tab.navigation_error.is_none() && tab.started.is_none());
+            assert_eq!(tab.last_active, 10_000);
+        }
+        // Background restoration does not create native views or make them candidates.
+        assert!(restored
+            .automatic_suspend_ids(15, 20_000, &HashSet::new(), &HashSet::new())
+            .is_empty());
+    }
+
+    #[test]
+    fn persistence_does_not_turn_runtime_dormancy_into_a_saved_preference() {
+        let mut tab = Tab::new("https://example.com/".into());
+        tab.suspended = true;
+        let session = Session {
+            active: tab.id.clone(),
+            tabs: vec![tab.clone()],
+            closed: vec![tab],
+            ..Default::default()
+        };
+        let saved = session.persistent();
+        assert!(!saved.tabs[0].suspended && !saved.closed[0].suspended);
+        assert!(session.tabs[0].suspended && session.closed[0].suspended);
+    }
+
+    #[test]
+    fn idle_time_starts_when_a_tab_moves_to_the_background() {
+        let mut first = Tab::new("https://example.com/first".into());
+        let mut second = Tab::new("https://example.com/second".into());
+        first.last_active = 0;
+        second.last_active = 0;
+        let first_id = first.id.clone();
+        let second_id = second.id.clone();
+        let loaded = HashSet::from([first_id.clone(), second_id.clone()]);
+        let mut session = Session {
+            active: first_id.clone(),
+            tabs: vec![first, second],
+            ..Default::default()
+        };
+        let selected = session.select_tab(&second_id, 3_600).unwrap();
+        assert_eq!(selected.id, second_id);
+        assert!(session.tabs.iter().all(|tab| tab.last_active == 3_600));
+        assert!(session
+            .automatic_suspend_ids(15, 4_499, &loaded, &HashSet::new())
+            .is_empty());
+        assert_eq!(
+            session.automatic_suspend_ids(15, 4_500, &loaded, &HashSet::new()),
+            vec![first_id]
+        );
+        // A failed selection must not change the selected tab or its idle clock.
+        let before = serde_json::to_value(&session).unwrap();
+        assert!(session.select_tab("missing", 9_999).is_err());
+        assert_eq!(serde_json::to_value(&session).unwrap(), before);
+    }
+
+    #[test]
+    fn leaving_split_view_starts_the_idle_period_for_both_visible_panes() {
+        let mut tabs: Vec<_> = ["left", "right", "other"]
+            .into_iter()
+            .map(|name| Tab::new(format!("https://example.com/{name}")))
+            .collect();
+        for tab in &mut tabs {
+            tab.last_active = 0;
+        }
+        let ids: Vec<_> = tabs.iter().map(|tab| tab.id.clone()).collect();
+        let loaded = ids.iter().cloned().collect();
+        let pair = [ids[0].clone(), ids[1].clone()];
+        let mut session = Session {
+            active: ids[0].clone(),
+            tabs,
+            split: Some(pair.clone()),
+            ..Default::default()
+        };
+        session.select_tab(&ids[1], 1_000).unwrap();
+        assert_eq!(session.split, Some(pair));
+        session.select_tab(&ids[2], 2_000).unwrap();
+        assert!(session.split.is_none());
+        assert_eq!(session.tabs[0].last_active, 2_000);
+        assert_eq!(session.tabs[1].last_active, 2_000);
+        assert!(session
+            .automatic_suspend_ids(15, 2_899, &loaded, &HashSet::new())
+            .is_empty());
+        assert_eq!(
+            session.automatic_suspend_ids(15, 2_900, &loaded, &HashSet::new()),
+            ids[..2].to_vec()
+        );
+    }
+
+    #[test]
+    fn replacing_split_starts_only_the_departing_peers_idle_period() {
+        let tabs: Vec<_> = ["active", "old-peer", "new-peer", "background"]
+            .into_iter()
+            .map(|name| {
+                let mut tab = Tab::new(format!("https://example.com/{name}"));
+                tab.id = name.into();
+                tab.last_active = 0;
+                tab
+            })
+            .collect();
+        let loaded = tabs.iter().map(|tab| tab.id.clone()).collect();
+        let mut session = Session {
+            active: "active".into(),
+            tabs,
+            split: Some(["active".into(), "old-peer".into()]),
+            ..Default::default()
+        };
+        session.replace_split(["active".into(), "new-peer".into()], 3_600);
+        assert_eq!(session.tabs[1].last_active, 3_600);
+        assert_eq!(session.tabs[3].last_active, 0);
+        assert_eq!(
+            session.automatic_suspend_ids(10, 4_199, &loaded, &HashSet::new()),
+            vec!["background".to_string()]
+        );
+        assert_eq!(
+            session.automatic_suspend_ids(10, 4_200, &loaded, &HashSet::new()),
+            vec!["old-peer".to_string(), "background".to_string()]
+        );
+    }
+
+    #[test]
+    fn automatic_dormancy_only_selects_loaded_unprotected_idle_tabs() {
+        let mut tabs: Vec<_> = [
+            "eligible", "active", "split", "private", "pinned", "sleeping", "transfer",
+            "unloaded", "internal", "recent", "future",
+        ]
+        .into_iter()
+        .map(|name| {
+            let mut tab = Tab::new(format!("https://example.com/{name}"));
+            tab.id = name.into();
+            tab.last_active = 0;
+            tab
+        })
+        .collect();
+        tabs[3].private = true;
+        tabs[4].pinned = true;
+        tabs[5].suspended = true;
+        tabs[8].url = "elix://settings".into();
+        tabs[9].last_active = 1;
+        tabs[10].last_active = 10_000;
+        let loaded = tabs
+            .iter()
+            .filter(|tab| tab.id != "unloaded")
+            .map(|tab| tab.id.clone())
+            .collect();
+        let transfers = HashSet::from(["transfer".into()]);
+        let session = Session {
+            active: "active".into(),
+            tabs,
+            split: Some(["active".into(), "split".into()]),
+            ..Default::default()
+        };
+        assert!(session
+            .automatic_suspend_ids(0, 900, &loaded, &transfers)
+            .is_empty());
+        assert_eq!(
+            session.automatic_suspend_ids(15, 900, &loaded, &transfers),
+            vec!["eligible".to_string()]
+        );
+    }
+
+    #[test]
+    fn ending_split_starts_peer_idle_time_without_resetting_unrelated_tabs() {
+        let tabs: Vec<_> = ["left", "right", "background"]
+            .into_iter()
+            .map(|id| {
+                let mut tab = Tab::new(format!("https://example.com/{id}"));
+                tab.id = id.into();
+                tab.last_active = 0;
+                tab
+            })
+            .collect();
+        let loaded = tabs.iter().map(|tab| tab.id.clone()).collect();
+        let mut session = Session {
+            active: "left".into(),
+            tabs,
+            split: Some(["left".into(), "right".into()]),
+            ..Default::default()
+        };
+        session.clear_split(2_000);
+        assert!(session.split.is_none());
+        assert_eq!(session.tabs[0].last_active, 2_000);
+        assert_eq!(session.tabs[1].last_active, 2_000);
+        assert_eq!(session.tabs[2].last_active, 0);
+        assert_eq!(
+            session.automatic_suspend_ids(15, 2_899, &loaded, &HashSet::new()),
+            vec!["background".to_string()]
+        );
+        assert_eq!(
+            session.automatic_suspend_ids(15, 2_900, &loaded, &HashSet::new()),
+            vec!["right".to_string(), "background".to_string()]
+        );
+        // Repeating the no-op must not keep an already hidden peer awake.
+        session.clear_split(3_000);
+        assert_eq!(session.tabs[1].last_active, 2_000);
+    }
+
     #[test]
     fn split_reaches_the_shell_but_is_not_restored_from_disk() {
         let left = Tab::new("https://example.com/left".into());

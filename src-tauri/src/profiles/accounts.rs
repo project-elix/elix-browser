@@ -143,6 +143,26 @@ fn save_token(app: &AppHandle, profile: &str, base: &url::Url, token: &str) -> R
     write_token(&path(app, profile), &data)
 }
 
+fn take_login_token(result: &mut Value) -> Result<String, String> {
+    result
+        .get_mut("token")
+        .map(Value::take)
+        .and_then(|v| v.as_str().map(String::from))
+        .filter(|token| {
+            (32..=128).contains(&token.len())
+                && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        .ok_or_else(|| "Kontotjenesten returnerte en ugyldig innlogging. Prøv igjen.".into())
+}
+
+fn remove_token(app: &AppHandle, profile: &str) -> Result<(), String> {
+    match std::fs::remove_file(path(app, profile)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Kunne ikke fjerne lokal innlogging".into()),
+    }
+}
+
 pub async fn request(
     app: AppHandle,
     profile: String,
@@ -200,10 +220,21 @@ pub async fn request(
     }
     let mut result: Value =
         serde_json::from_slice(&bytes).map_err(|_| "Ugyldig svar fra kontotjenesten")?;
+    // Keep profile selection stable while replacing/removing this profile's credential.
+    // No network await occurs while this lock is held.
+    let current_profile = state.profile.lock().unwrap();
+    if *current_profile != profile {
+        return Err("Profilen ble endret. Prøv innloggingen igjen i riktig profil.".into());
+    }
     if !status.is_success() {
-        if status.as_u16() == 401 && operation == "status" {
-            let _ = std::fs::remove_file(path(&app, &profile));
-            return Ok(json!({"configured":true,"account":null}));
+        if status.as_u16() == 401
+            && matches!(operation.as_str(), "status" | "logout" | "sync_get" | "sync_put" | "sync_delete")
+        {
+            remove_token(&app, &profile)?;
+            if operation == "status" || operation == "logout" {
+                return Ok(json!({"configured":true,"account":null}));
+            }
+            return Err("Kontosesjonen er utløpt. Logg inn på nytt.".into());
         }
         return Err(result["error"]
             .as_str()
@@ -212,23 +243,12 @@ pub async fn request(
             .take(200)
             .collect());
     }
-    if *state.profile.lock().unwrap() != profile {
-        return Err("Profilen ble endret. Prøv innloggingen igjen i riktig profil.".into());
-    }
     if operation == "email_verify" {
-        if let Some(token) = result
-            .get_mut("token")
-            .map(Value::take)
-            .and_then(|v| v.as_str().map(String::from))
-        {
-            save_token(&app, &profile, &base, &token)?;
-        }
+        let token = take_login_token(&mut result)?;
+        save_token(&app, &profile, &base, &token)?;
     }
     if operation == "logout" {
-        let p = path(&app, &profile);
-        if p.exists() {
-            std::fs::remove_file(p).map_err(|_| "Kunne ikke fjerne lokal innlogging")?;
-        }
+        remove_token(&app, &profile)?;
     }
     result
         .as_object_mut()
@@ -240,6 +260,21 @@ pub async fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_login_requires_a_valid_token_and_never_exposes_it_to_the_shell() {
+        let token = "a".repeat(43);
+        let mut result = json!({"token":token,"account":{"name":"person@example.com"}});
+        assert_eq!(take_login_token(&mut result).unwrap(), token);
+        assert!(result["token"].is_null());
+        assert_eq!(result["account"]["name"], "person@example.com");
+        for value in [Value::Null, json!("short"), json!("x".repeat(129)), json!(" ".repeat(43))] {
+            let mut result = json!({"token":value});
+            assert!(take_login_token(&mut result).is_err());
+            assert!(result["token"].is_null());
+        }
+        assert!(take_login_token(&mut json!({"account":{}})).is_err());
+    }
 
     #[test]
     fn atomic_credential_save_replaces_existing_file_and_keeps_profile_data() {

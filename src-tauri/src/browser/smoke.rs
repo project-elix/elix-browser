@@ -7,6 +7,18 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
+/// Independent breadcrumbs survive a blocked UI thread or an application-state
+/// mutex. Never use AppState or the normal logger from this diagnostic path.
+pub(crate) fn progress(stage: &str) {
+    let Some(result) = std::env::var_os("ELIX_SMOKE_RESULT") else { return; };
+    let path = std::path::PathBuf::from(result).with_file_name("native-progress.txt");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{} {stage}", chrono::Utc::now().to_rfc3339());
+        let _ = file.flush();
+        let _ = file.sync_data();
+    }
+}
+
 pub fn boot_stage(app: &AppHandle, stage: &str) {
     let state = app.state::<AppState>();
     if state.window_id == "main" || !std::env::args().any(|a| a == "--elix-smoke-window") {
@@ -474,6 +486,10 @@ fn view_bool(view: &tauri::Webview, script: &str) -> Result<bool, String> {
 }
 fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
     let shell = app.get_webview("shell").ok_or("Missing shell")?;
+    let original = app.get_webview(remote).ok_or("Missing settings source page")?;
+    if !view_bool(&original, "(window.__elixSettingsSource='preserved',true)")? {
+        return Err("Could not seed settings source state".into());
+    }
     wait(|| {
         shell_bool(
             app,
@@ -495,6 +511,8 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
             == "expanded"
     })?;
     wait(|| app.state::<AppState>().bounds.lock().unwrap().x >= 160.)?;
+    #[cfg(windows)]
+    capture_native_screen("native-sidebar-expanded.png")?;
     shell
         .eval("document.querySelector('[aria-label=\"Vis eller skjul sidemeny\"]').click()")
         .map_err(|e| e.to_string())?;
@@ -530,6 +548,11 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
         .eval("document.querySelector('.rail [aria-label=\"Innstillinger\"]').click()")
         .map_err(|e| e.to_string())?;
     wait(|| shell_bool(app, "!!document.querySelector('.settings-nav')").unwrap_or(false))?;
+    let settings_id = app.state::<AppState>().session.lock().unwrap().active.clone();
+    if settings_id == remote || app.get_webview(remote).is_none()
+        || !view_bool(&original, "window.__elixSettingsSource==='preserved'")? {
+        return Err("Opening settings replaced the original webpage".into());
+    }
     for placement in ["sidebar", "toolbar"] {
         shell.eval(format!("(()=>{{const select=document.querySelector('[aria-label=\"Bokmerkenes plassering\"]');select.value='{placement}';select.dispatchEvent(new Event('change',{{bubbles:true}}))}})()")).map_err(|e|e.to_string())?;
         shell
@@ -565,7 +588,7 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
     wait(|| {
         shell_bool(app, "Array.from(document.querySelectorAll('.settings-content h2')).some(h=>h.textContent==='Oppdateringer' && h.getClientRects().length>0) && document.querySelector('.appearance-settings').getClientRects().length===0").unwrap_or(false)
     })?;
-    browser::navigate(app, remote, "elix://start")?;
+    browser::navigate(app, &settings_id, "elix://start")?;
     if app
         .state::<AppState>()
         .session
@@ -573,9 +596,14 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
         .unwrap()
         .tabs
         .iter()
-        .any(|tab| tab.id == remote && tab.loading)
+        .any(|tab| tab.id == settings_id && tab.loading)
     {
         return Err("Internal page retained a stale loading indicator".into());
+    }
+    browser::activate(app, remote)?;
+    browser::close(app, &settings_id)?;
+    if !view_bool(&original, "window.__elixSettingsSource==='preserved'")? {
+        return Err("Returning from settings reloaded the original webpage".into());
     }
     Ok(())
 }
@@ -590,11 +618,17 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
         .unwrap()
         .active
         .clone();
+    // Isolate the shortcut's peer selection from earlier fixture tabs.
+    browser::organization::workspace(app, "Split shortcut test")?;
     let a = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
     wait_title_or_error(app, &a, "ELIX native one")?;
     let b = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/two")))?;
     wait_title_or_error(app, &b, "ELIX native two")?;
-    browser::organization::reorder(app, &b, &a)?;
+    browser::organization::group(app, &a, "Read later", "Split shortcut test")?;
+    if app.state::<AppState>().session.lock().unwrap().active != b {
+        return Err("Renaming another tab's group changed the selected tab".into());
+    }
+    browser::organization::reorder(app, &b, Some(&a))?;
     {
         let state = app.state::<AppState>();
         let s = state.session.lock().unwrap();
@@ -602,7 +636,17 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
             return Err("Tab reorder failed".into());
         }
     }
-    browser::organization::split(app, Some(a.clone()))?;
+    browser::suspend(app, &a)?;
+    native_split_shortcut(app, &b, true)?;
+    {
+        let state = app.state::<AppState>();
+        let session = state.session.lock().unwrap();
+        if session.split.as_ref() != Some(&[b.clone(), a.clone()])
+            || session.tabs.iter().any(|tab| tab.id == a && tab.suspended)
+        {
+            return Err("Ctrl+Alt+S did not wake and split the selected peer".into());
+        }
+    }
     wait(|| {
         shell_bool(app, "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.includes('Avslutt delt visning'))").unwrap_or(false)
     })?;
@@ -613,12 +657,12 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
         .unwrap()
         .scale_factor()
         .map_err(|e| e.to_string())?;
-    let expected = app.state::<AppState>().bounds.lock().unwrap().width * scale / 2.;
-    if (view.size().map_err(|e| e.to_string())?.width as f64 - expected).abs() > 8.
-        || (other.size().map_err(|e| e.to_string())?.width as f64 - expected).abs() > 8.
-    {
-        return Err("Split view bounds are not half width".into());
-    }
+    wait(|| {
+        let expected = app.state::<AppState>().bounds.lock().unwrap().width * scale / 2.;
+        view.size().is_ok_and(|size| (size.width as f64 - expected).abs() <= 8.)
+            && other.size().is_ok_and(|size| (size.width as f64 - expected).abs() <= 8.)
+    })
+    .map_err(|_| "Split view bounds are not half width".to_string())?;
     tauri::async_runtime::block_on(browser::organization::mute(app, &b, true))?;
     let (tx, rx) = std::sync::mpsc::channel();
     view.with_webview(move |platform| {
@@ -642,7 +686,12 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     {
         return Err("Native tab mute failed".into());
     }
-    browser::organization::split(app, None)?;
+    native_split_shortcut(app, &b, false)?;
+    wait(|| {
+        let expected = app.state::<AppState>().bounds.lock().unwrap().width * scale;
+        view.size().is_ok_and(|size| (size.width as f64 - expected).abs() <= 8.)
+    })
+    .map_err(|_| "Ctrl+Alt+S did not restore full page width".to_string())?;
     if !view_bool(
         &view,
         "(()=>{document.cookie='alpha6_cookie=1; Path=/';return true})()",
@@ -692,9 +741,16 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
+        progress("exercise: start");
         let result = exercise(&app);
+        match &result {
+            Ok(()) => progress("exercise: passed"),
+            Err(error) => progress(&format!("exercise: failed: {error}")),
+        }
         let code = if result.is_ok() { 0 } else { 1 };
-        let message=match result{Ok(())=>"PASS: Alpha 6 reorder/reopen, native mute, split controls/bounds, cookie deletion, real child-window handoff with shared profile cookies and saved recovery, failed handoff retains source; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history shortcut; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, suspension, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        #[cfg(windows)]
+        if code != 0 { let _ = capture_native_screen("native-failure.png"); }
+        let message=match result{Ok(())=>"PASS: Alpha 7 reorder/reopen, native mute, native Ctrl+Alt+S split toggle/wake/controls/bounds, cookie deletion, real child-window handoff with shared profile cookies and saved recovery, failed handoff retains source; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history reuse and settings preserve original page state; Ctrl+T/button address autofocus; real multipage PDF native wheel scroll down/up; video HTML fullscreen fills native window and restores split; miniplayer reparent/resize/hide/show/return preserves live page and playback; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, same-origin per-tab dormancy isolation/repeated wake/lazy restoration, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         #[cfg(windows)]
         let message = format!(
             "{message}\nDownload native diagnostics: {}",
@@ -706,6 +762,7 @@ pub fn start(app: AppHandle) {
         }
         if code == 0 {
             // Exercise the same persisted close path as the visible close button.
+            progress("shutdown: before close");
             if crate::window::perform(&app, crate::window::Action::Close).is_err() {
                 app.exit(1);
             }
@@ -715,37 +772,25 @@ pub fn start(app: AppHandle) {
     });
 }
 #[cfg(windows)]
-fn history_shortcut_test(app: &AppHandle, tab_id: &str) -> Result<(), String> {
+fn native_split_shortcut(app: &AppHandle, tab_id: &str, enabled: bool) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-        VIRTUAL_KEY, VK_CONTROL,
+        VIRTUAL_KEY, VK_CONTROL, VK_MENU,
     };
-    let view = app.get_webview(tab_id).ok_or("Missing shortcut view")?;
+    let view = app.get_webview(tab_id).ok_or("Missing split shortcut view")?;
     app.get_window("main")
         .ok_or("Missing main window")?
         .set_focus()
         .map_err(|e| e.to_string())?;
     view.set_focus().map_err(|e| e.to_string())?;
-    // Tauri queues focus changes onto the UI thread. Sending input before the
-    // native document actually owns focus races the dispatcher on CI machines.
     wait(|| view_bool(&view, "document.hasFocus()").unwrap_or(false))?;
-    wait(|| {
-        shell_bool(app, "document.querySelector('[role=tab][aria-selected=true]')?.getAttribute('aria-label')==='ELIX native one'").unwrap_or(false)
-    })?;
-    // Use native keyboard input, holding the modifier until the actual shortcut
-    // is acknowledged. Releasing Ctrl in the same input batch can happen before
-    // WebView2 marshals its accelerator event back from the renderer process.
     fn key(value: VIRTUAL_KEY, up: bool) -> INPUT {
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: value,
-                    dwFlags: if up {
-                        KEYEVENTF_KEYUP
-                    } else {
-                        KEYBD_EVENT_FLAGS(0)
-                    },
+                    dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
                     ..Default::default()
                 },
             },
@@ -754,32 +799,395 @@ fn history_shortcut_test(app: &AppHandle, tab_id: &str) -> Result<(), String> {
     struct ReleaseKeys;
     impl Drop for ReleaseKeys {
         fn drop(&mut self) {
-            let release = [key(VIRTUAL_KEY(72), true), key(VK_CONTROL, true)];
-            unsafe {
-                SendInput(&release, std::mem::size_of::<INPUT>() as i32);
-            }
+            let keys = [key(VIRTUAL_KEY(83), true), key(VK_MENU, true), key(VK_CONTROL, true)];
+            unsafe { SendInput(&keys, std::mem::size_of::<INPUT>() as i32); }
         }
     }
     let held_keys = ReleaseKeys;
-    let pressed = [key(VK_CONTROL, false), key(VIRTUAL_KEY(72), false)];
-    if unsafe { SendInput(&pressed, std::mem::size_of::<INPUT>() as i32) } != pressed.len() as u32 {
-        return Err("Could not press native Ctrl+H".into());
+    let keys = [key(VK_CONTROL, false), key(VK_MENU, false), key(VIRTUAL_KEY(83), false)];
+    if unsafe { SendInput(&keys, std::mem::size_of::<INPUT>() as i32) } != keys.len() as u32 {
+        return Err("Could not press native Ctrl+Alt+S".into());
     }
-    wait(|| {
-        app.state::<AppState>()
-            .session
-            .lock()
-            .unwrap()
-            .tabs
-            .iter()
-            .any(|tab| tab.id == tab_id && tab.url == "elix://history")
-    })?;
+    // Hold both modifiers until the native WebView accelerator reaches the shell.
+    wait(|| app.state::<AppState>().session.lock().unwrap().split.is_some() == enabled)?;
     drop(held_keys);
     wait(|| {
-        shell_bool(app, "Array.from(document.querySelectorAll('h1')).some(h=>h.textContent==='Logg.' && h.getClientRects().length>0)").unwrap_or(false)
+        shell_bool(app, "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.includes('Avslutt delt visning'))")
+            .is_ok_and(|visible| visible == enabled)
     })?;
     Ok(())
 }
+#[cfg(windows)]
+fn native_ctrl_shortcut(
+    app: &AppHandle,
+    tab_id: &str,
+    letter: u16,
+    acknowledged: impl Fn() -> bool,
+) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        VIRTUAL_KEY, VK_CONTROL,
+    };
+    let view = app.get_webview(tab_id).ok_or("Missing shortcut view")?;
+    app.get_window("main").ok_or("Missing main window")?
+        .set_focus().map_err(|e| e.to_string())?;
+    view.set_focus().map_err(|e| e.to_string())?;
+    wait(|| view_bool(&view, "document.hasFocus()").unwrap_or(false))?;
+    fn key(value: VIRTUAL_KEY, up: bool) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: value,
+                    dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                    ..Default::default()
+                },
+            },
+        }
+    }
+    struct ReleaseKeys(u16);
+    impl Drop for ReleaseKeys {
+        fn drop(&mut self) {
+            let keys = [key(VIRTUAL_KEY(self.0), true), key(VK_CONTROL, true)];
+            unsafe { SendInput(&keys, std::mem::size_of::<INPUT>() as i32); }
+        }
+    }
+    let held_keys = ReleaseKeys(letter);
+    let keys = [key(VK_CONTROL, false), key(VIRTUAL_KEY(letter), false)];
+    if unsafe { SendInput(&keys, std::mem::size_of::<INPUT>() as i32) } != keys.len() as u32 {
+        return Err(format!("Could not press native Ctrl+{}", char::from_u32(letter as u32).unwrap_or('?')));
+    }
+    // Hold Ctrl until WebView2's asynchronous accelerator reaches the shell.
+    wait(acknowledged)?;
+    drop(held_keys);
+    Ok(())
+}
+#[cfg(windows)]
+fn history_shortcut_test(app: &AppHandle, tab_id: &str) -> Result<(), String> {
+    let original = app.get_webview(tab_id).ok_or("Missing original view")?;
+    if !view_bool(&original, "(window.__elixOriginalPage='preserved',true)")? {
+        return Err("Could not seed original page state".into());
+    }
+    let original_url = {
+        let state = app.state::<AppState>();
+        let session = state.session.lock().unwrap();
+        session.tabs.iter().find(|tab| tab.id == tab_id).ok_or("Missing original tab")?.url.clone()
+    };
+    let mut history_id = None;
+    for _ in 0..2 {
+        browser::activate(app, tab_id)?;
+        native_ctrl_shortcut(app, tab_id, 72, || {
+            let state = app.state::<AppState>();
+            let session = state.session.lock().unwrap();
+            session.active != tab_id && session.tabs.iter().any(|tab| tab.id == session.active && tab.url == "elix://history" && !tab.private)
+        })?;
+        let active = app.state::<AppState>().session.lock().unwrap().active.clone();
+        if history_id.as_ref().is_some_and(|id| id != &active) {
+            return Err("Repeated Ctrl+H created a duplicate history tab".into());
+        }
+        history_id = Some(active);
+        wait(|| shell_bool(app, "Array.from(document.querySelectorAll('h1')).some(h=>h.textContent==='Logg.' && h.getClientRects().length>0)").unwrap_or(false))?;
+        let unchanged = {
+            let state = app.state::<AppState>();
+            let session = state.session.lock().unwrap();
+            session.tabs.iter().any(|tab| tab.id == tab_id && tab.url == original_url)
+        };
+        if !unchanged || app.get_webview(tab_id).is_none()
+            || !view_bool(&original, "window.__elixOriginalPage==='preserved'")? {
+            return Err("Opening history replaced or reloaded the original webpage".into());
+        }
+    }
+    browser::activate(app, tab_id)?;
+    browser::close(app, history_id.as_deref().ok_or("Missing history tab")?)?;
+    Ok(())
+}
+#[cfg(windows)]
+fn new_tab_focus_test(app: &AppHandle, tab_id: &str) -> Result<(), String> {
+    let shell = app.get_webview("shell").ok_or("Missing shell")?;
+    for shortcut in [true, false] {
+        browser::activate(app, tab_id)?;
+        if shortcut {
+            native_ctrl_shortcut(app, tab_id, 84, || {
+                let state = app.state::<AppState>();
+                let session = state.session.lock().unwrap();
+                session.active != tab_id && session.tabs.iter().any(|tab| tab.id == session.active && tab.url == "elix://start")
+            })?;
+        } else {
+            shell.eval("document.querySelector('button[aria-label=\"Ny fane\"]').click()").map_err(|e| e.to_string())?;
+            wait(|| app.state::<AppState>().session.lock().unwrap().active != tab_id)?;
+        }
+        let new_id = app.state::<AppState>().session.lock().unwrap().active.clone();
+        wait(|| shell_bool(app, "(()=>{const input=document.querySelector('input[aria-label=\"Adressefelt\"]');return document.activeElement===input&&input.selectionStart===0&&input.selectionEnd===input.value.length})()").unwrap_or(false))?;
+        if app.get_webview(tab_id).is_none() {
+            return Err("Creating a new tab closed the original webpage".into());
+        }
+        browser::activate(app, tab_id)?;
+        browser::close(app, &new_id)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn capture_native_screen(name: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let Some(result) = std::env::var_os("ELIX_SMOKE_RESULT") else { return Ok(()); };
+    let path = std::path::PathBuf::from(result).with_file_name(name);
+    // Native child WebViews are separate HWNDs; capturing only the shell's DOM
+    // would omit the actual PDF, page and split panes under test.
+    let status = std::process::Command::new("powershell.exe")
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW: do not steal native input focus.
+        .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+            $ErrorActionPreference = 'Stop'
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+                $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+                $bitmap.Save($env:ELIX_SMOKE_SCREENSHOT, [System.Drawing.Imaging.ImageFormat]::Png)
+            } finally { $graphics.Dispose(); $bitmap.Dispose() }
+        "#])
+        .env("ELIX_SMOKE_SCREENSHOT", &path)
+        .status().map_err(|e| e.to_string())?;
+    if !status.success() || !path.is_file() {
+        return Err("Could not capture native regression screenshot".into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn pdf_scroll_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), String> {
+    use windows::Win32::{
+        Graphics::Gdi::{GetDC, GetPixel, ReleaseDC},
+        UI::{Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_WHEEL}, WindowsAndMessaging::SetCursorPos},
+    };
+    fn color_at(x: i32, y: i32) -> u32 {
+        unsafe {
+            let dc = GetDC(None);
+            let pixel = GetPixel(dc, x, y).0;
+            ReleaseDC(None, dc);
+            pixel
+        }
+    }
+    fn mouse(flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS, data: i32) -> Result<(), String> {
+        let input = [INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: flags, mouseData: data as u32, ..Default::default() } } }];
+        if unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) } != 1 {
+            return Err("Could not send native PDF mouse input".into());
+        }
+        Ok(())
+    }
+    let id = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/scroll.pdf")))?;
+    wait(|| {
+        let state = app.state::<AppState>();
+        let session = state.session.lock().unwrap();
+        session.tabs.iter().any(|tab| tab.id == id && !tab.loading && tab.http_status == Some(200))
+    })?;
+    let window = app.get_window("main").ok_or("Missing PDF window")?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let client = window.inner_position().map_err(|e| e.to_string())?;
+    let bounds = *app.state::<AppState>().bounds.lock().unwrap();
+    let x = client.x + ((bounds.x + bounds.width / 2.) * scale).round() as i32;
+    let y = client.y + ((bounds.y + bounds.height / 2.) * scale).round() as i32;
+    let red = || { let pixel = color_at(x, y); pixel & 0xff > 200 && (pixel >> 8) & 0xff < 60 && (pixel >> 16) & 0xff < 60 };
+    let blue = || { let pixel = color_at(x, y); pixel & 0xff < 60 && (pixel >> 8) & 0xff < 60 && (pixel >> 16) & 0xff > 200 };
+    // A real PDF viewer paints solid red/green/blue pages. Screen pixels are
+    // independent of the HTML DOM and prove the native wheel moves PDF pages.
+    wait(red).map_err(|_| "Native PDF viewer did not render its first page".to_string())?;
+    capture_native_screen("native-pdf-first-page.png")?;
+    unsafe { SetCursorPos(x, y) }.map_err(|e| e.to_string())?;
+    mouse(MOUSEEVENTF_LEFTDOWN, 0)?;
+    mouse(MOUSEEVENTF_LEFTUP, 0)?;
+    mouse(MOUSEEVENTF_WHEEL, -120 * 60)?;
+    wait(blue).map_err(|_| "Native PDF mouse wheel did not reach the last page".to_string())?;
+    capture_native_screen("native-pdf-last-page.png")?;
+    mouse(MOUSEEVENTF_WHEEL, 120 * 60)?;
+    wait(red).map_err(|_| "Native PDF mouse wheel did not return to the first page".to_string())?;
+    browser::activate(app, return_tab)?;
+    browser::close(app, &id)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn native_view_visible(view: &tauri::Webview) -> Result<bool, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    view.with_webview(move |platform| {
+        let result = unsafe {
+            let mut value = windows::core::BOOL(0);
+            platform.controller().IsVisible(&mut value).map(|_| value.as_bool())
+        };
+        let _ = tx.send(result.map_err(|e| e.to_string()));
+    }).map_err(|e| e.to_string())?;
+    rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
+fn native_child_geometry(view: &tauri::Webview, window: &tauri::Window) -> Result<serde_json::Value, String> {
+    use windows::Win32::{
+        Foundation::{HWND, POINT, RECT},
+        Graphics::Gdi::MapWindowPoints,
+        UI::WindowsAndMessaging::{GetClientRect, GetParent},
+    };
+    let expected_parent = window.hwnd().map_err(|e| e.to_string())?.0 as isize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    view.with_webview(move |platform| {
+        let result = (|| -> windows::core::Result<serde_json::Value> {
+            unsafe {
+                let expected_parent = HWND(expected_parent as _);
+                let controller = platform.controller();
+                let mut container = HWND::default();
+                controller.ParentWindow(&mut container)?;
+                let actual_parent = GetParent(container)?;
+                let mut child_rect = RECT::default();
+                let mut parent_rect = RECT::default();
+                let mut controller_rect = RECT::default();
+                GetClientRect(container, &mut child_rect)?;
+                GetClientRect(expected_parent, &mut parent_rect)?;
+                controller.Bounds(&mut controller_rect)?;
+                let mut origin = [POINT { x: 0, y: 0 }];
+                MapWindowPoints(Some(container), Some(expected_parent), &mut origin);
+                let child_size = [child_rect.right - child_rect.left, child_rect.bottom - child_rect.top];
+                let parent_size = [parent_rect.right - parent_rect.left, parent_rect.bottom - parent_rect.top];
+                let controller_size = [controller_rect.right - controller_rect.left, controller_rect.bottom - controller_rect.top];
+                Ok(serde_json::json!({
+                    "fills_parent": actual_parent == expected_parent && origin[0].x == 0 && origin[0].y == 0
+                        && parent_size[0] > 0 && parent_size[1] > 0 && child_size == parent_size
+                        && controller_rect.left == 0 && controller_rect.top == 0 && controller_size == parent_size,
+                    "parent": actual_parent.0 as usize, "expected_parent": expected_parent.0 as usize,
+                    "origin": [origin[0].x, origin[0].y], "child_size": child_size, "parent_size": parent_size,
+                    "controller_origin": [controller_rect.left, controller_rect.top], "controller_size": controller_size,
+                }))
+            }
+        })();
+        let _ = tx.send(result.map_err(|e| e.to_string()));
+    }).map_err(|e| e.to_string())?;
+    rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
+fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), String> {
+    use windows::Win32::UI::{
+        Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, INPUT_KEYBOARD, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, KEYBDINPUT, KEYEVENTF_KEYUP, VK_ESCAPE},
+        WindowsAndMessaging::SetCursorPos,
+    };
+    let id = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/media")))?;
+    wait_title_or_error(app, &id, "ELIX media fixture")?;
+    let view = app.get_webview(&id).ok_or("Missing media view")?;
+    let peer = app.get_webview(return_tab).ok_or("Missing media peer")?;
+    let shell = app.get_webview("shell").ok_or("Missing shell")?;
+    browser::organization::split(app, Some(return_tab.into()))?;
+    let main = app.get_window("main").ok_or("Missing media window")?;
+    let focus_before_move = |stage: &str| -> Result<(), String> {
+        progress(&format!("media: focus before {stage}: begin"));
+        view.window().set_focus().map_err(|e| e.to_string())?;
+        view.set_focus().map_err(|e| e.to_string())?;
+        wait(|| view_bool(&view, "document.hasFocus()").unwrap_or(false))
+            .map_err(|_| format!("Native media page did not acquire focus before {stage}"))?;
+        progress(&format!("media: focus before {stage}: confirmed"));
+        Ok(())
+    };
+    let prior_fullscreen = main.is_fullscreen().map_err(|e| e.to_string())?;
+    let scale = main.scale_factor().map_err(|e| e.to_string())?;
+    wait(|| view.size().is_ok_and(|size| (size.width as f64 - app.state::<AppState>().bounds.lock().unwrap().width * scale / 2.).abs() <= 8.))?;
+    main.set_focus().map_err(|e| e.to_string())?;
+    view.set_focus().map_err(|e| e.to_string())?;
+    let click_fullscreen = || -> Result<(), String> {
+        let client = main.inner_position().map_err(|e| e.to_string())?;
+        let position = view.position().map_err(|e| e.to_string())?;
+        let size = view.size().map_err(|e| e.to_string())?;
+        unsafe { SetCursorPos(client.x + position.x + size.width as i32 / 2, client.y + position.y + size.height as i32 / 2) }.map_err(|e| e.to_string())?;
+        let clicks = [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP].map(|flags| INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: flags, ..Default::default() } } });
+        if unsafe { SendInput(&clicks, std::mem::size_of::<INPUT>() as i32) } != 2 { return Err("Could not click native fullscreen video".into()); }
+        Ok(())
+    };
+    click_fullscreen()?;
+    wait(|| browser::media::is_fullscreen(app, &id))?;
+    wait(|| {
+        view.position().is_ok_and(|position| position.x == 0 && position.y == 0)
+            && view.size().ok() == main.inner_size().ok()
+            && native_view_visible(&peer).is_ok_and(|visible| !visible)
+            && native_view_visible(&shell).is_ok_and(|visible| !visible)
+    }).map_err(|_| "HTML fullscreen did not fill native window and hide shell/split peer".to_string())?;
+    wait(|| view_bool(&view, "document.fullscreenElement===document.querySelector('video')&&!document.querySelector('video').paused&&document.querySelector('video').currentTime>0").unwrap_or(false))?;
+    capture_native_screen("native-video-fullscreen.png")?;
+    let escape = [false, true].map(|up| INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_ESCAPE, dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() }, ..Default::default() } } });
+    if unsafe { SendInput(&escape, std::mem::size_of::<INPUT>() as i32) } != 2 { return Err("Could not exit native fullscreen".into()); }
+    wait(|| !browser::media::is_fullscreen(app, &id) && main.is_fullscreen().is_ok_and(|value| value == prior_fullscreen))?;
+    wait(|| {
+        view.size().is_ok_and(|size| (size.width as f64 - app.state::<AppState>().bounds.lock().unwrap().width * scale / 2.).abs() <= 8.)
+            && native_view_visible(&peer).unwrap_or(false) && native_view_visible(&shell).unwrap_or(false)
+    }).map_err(|_| "Exiting video fullscreen did not restore split bounds".to_string())?;
+    if !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Fullscreen exit replaced or paused media fixture".into()); }
+    // HTML fullscreen must preserve an already active F11 window mode on exit.
+    main.set_fullscreen(true).map_err(|e| e.to_string())?;
+    wait(|| main.is_fullscreen().unwrap_or(false))?;
+    wait(|| view.size().is_ok_and(|size| (size.width as f64 - app.state::<AppState>().bounds.lock().unwrap().width * scale / 2.).abs() <= 8.))?;
+    if !view_bool(&view, "(document.querySelector('button').hidden=false,true)")? { return Err("Cannot reset fullscreen fixture button".into()); }
+    click_fullscreen()?;
+    wait(|| browser::media::is_fullscreen(app, &id) && view.size().ok() == main.inner_size().ok())?;
+    if unsafe { SendInput(&escape, std::mem::size_of::<INPUT>() as i32) } != 2 { return Err("Could not exit video inside F11 mode".into()); }
+    wait(|| !browser::media::is_fullscreen(app, &id)
+        && main.is_fullscreen().unwrap_or(false)
+        && native_view_visible(&shell).unwrap_or(false)
+        && view.size().is_ok_and(|size| (size.width as f64 - app.state::<AppState>().bounds.lock().unwrap().width * scale / 2.).abs() <= 8.))
+        .map_err(|_| "Exiting HTML fullscreen lost the prior F11 window mode".to_string())?;
+    main.set_fullscreen(prior_fullscreen).map_err(|e| e.to_string())?;
+    wait(|| main.is_fullscreen().is_ok_and(|value| value == prior_fullscreen))?;
+    browser::organization::split(app, None)?;
+    focus_before_move("first open")?;
+    browser::media::perform(app, "open", Some(&id))?;
+    wait(|| view.window().label() == "media-player")?;
+    let player = app.get_window("media-player").ok_or("Missing miniplayer window")?;
+    player.set_size(tauri::LogicalSize::new(720., 440.)).map_err(|e| e.to_string())?;
+    // Pinned Wry 0.57.2 keeps the original parent in its child-view position()
+    // getter after reparent. Check actual HWND parent/origin and both the host
+    // client rect and WebView2 viewport, preserving the full-window requirement.
+    wait(|| native_child_geometry(&view, &player).is_ok_and(|geometry| geometry["fills_parent"] == true))
+        .map_err(|_| format!("Miniplayer native geometry mismatch: {:?}", native_child_geometry(&view, &player)))?;
+    if peer.window().label() != "main" || !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Miniplayer recreated media or moved an unrelated view".into()); }
+    app.state::<AppState>().permissions_visible.store(true, std::sync::atomic::Ordering::SeqCst);
+    browser::organization::layout(app)?;
+    wait(|| !player.is_visible().unwrap_or(true))?;
+    app.state::<AppState>().permissions_visible.store(false, std::sync::atomic::Ordering::SeqCst);
+    browser::organization::layout(app)?;
+    wait(|| player.is_visible().unwrap_or(false))?;
+    if !view_bool(&view, "window.__elixMediaToken==='original'")? { return Err("Permission shielding recreated the player page".into()); }
+    browser::media::perform(app, "hide", None)?;
+    wait(|| !player.is_visible().unwrap_or(true))?;
+    if browser::suspend(app, &id).is_ok() || app.get_webview(&id).is_none() { return Err("Hidden miniplayer was allowed to sleep".into()); }
+    if !view_bool(&view, "(window.__elixHiddenTicks=window.__elixMediaTicks,true)")? { return Err("Cannot observe hidden miniplayer".into()); }
+    wait(|| view_bool(&view, "window.__elixMediaTicks>window.__elixHiddenTicks&&window.__elixMediaToken==='original'&&!document.querySelector('video').paused").unwrap_or(false))?;
+    browser::media::perform(app, "show", None)?;
+    wait(|| player.is_visible().unwrap_or(false))?;
+    capture_native_screen("native-video-miniplayer.png")?;
+    focus_before_move("return")?;
+    progress("media: before return");
+    browser::media::perform(app, "return", None)?;
+    progress("media: return completed; before ownership wait");
+    wait(|| view.window().label() == "main" && !browser::media::is_player(app, &id))?;
+    progress("media: return ownership verified; before page state check");
+    if !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Returning miniplayer recreated or paused media".into()); }
+    progress("media: returned page verified; before reopen");
+    focus_before_move("reopen")?;
+    browser::media::perform(app, "open", Some(&id))?;
+    progress("media: reopened; before ownership wait");
+    wait(|| browser::media::is_player(app, &id))?;
+    focus_before_move("reset")?;
+    progress("media: before reset");
+    browser::media::reset(app)?;
+    progress("media: reset completed; before ownership wait");
+    wait(|| !browser::media::is_player(app, &id) && view.window().label() == "main" && !player.is_visible().unwrap_or(true))?;
+    progress("media: reset ownership verified; before page state check");
+    if !view_bool(&view, "window.__elixMediaToken==='original'")? { return Err("Reset lost the live player page before profile cleanup".into()); }
+    progress("media: reset page verified; before activate original");
+    browser::activate(app, return_tab)?;
+    progress("media: original activated; before fixture close");
+    browser::close(app, &id)?;
+    progress("media: fixture closed");
+    Ok(())
+}
+
 fn private_test(app: &AppHandle, regular_id: &str, origin: &str) -> Result<(), String> {
     let regular = app.get_webview(regular_id).ok_or("Missing regular view")?;
     if !view_bool(&regular, "(()=>{document.cookie='elix_regular=1; Path=/';return document.cookie.includes('elix_regular=1')})()")? {
@@ -1126,12 +1534,59 @@ fn record_cancel_fixture(index: Option<usize>, sent: usize, ended: bool, aborted
     }
 }
 
+fn pdf_fixture() -> Vec<u8> {
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>".to_owned(),
+    ];
+    for (index, color) in ["1 0 0", "0 1 0", "0 0 1"].iter().enumerate() {
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 900] /Resources << >> /Contents {} 0 R >>", 4 + index * 2));
+        let commands = format!("{color} rg\n0 0 600 900 re f\n");
+        objects.push(format!("<< /Length {} >>\nstream\n{commands}endstream", commands.len()));
+    }
+    let mut bytes = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref = bytes.len();
+    bytes.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in offsets { bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes()); }
+    bytes.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
+    bytes
+}
+
 fn serve_fixture(mut stream: std::net::TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
     let mut request = [0; 8192];
     let size = stream.read(&mut request).unwrap_or(0);
     let request = String::from_utf8_lossy(&request[..size]);
+    if request.starts_with("GET /scroll.pdf ") {
+        let pdf = pdf_fixture();
+        let headers = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/pdf\r\nContent-Disposition: inline; filename=elix-scroll.pdf\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", pdf.len());
+        let _ = stream.write_all(headers.as_bytes());
+        let _ = stream.write_all(&pdf);
+        return;
+    }
+    if request.starts_with("GET /media ") {
+        let html = r#"<!doctype html><html><head><title>ELIX media fixture</title></head>
+            <body style="margin:0;background:#151515"><canvas hidden width="320" height="180"></canvas>
+            <video muted playsinline controls style="width:100vw;height:100vh"></video>
+            <button style="position:fixed;inset:0;width:100vw;height:100vh">Play fullscreen fixture</button>
+            <script>
+            window.__elixMediaToken='original';window.__elixMediaTicks=0;
+            const canvas=document.querySelector('canvas'),context=canvas.getContext('2d'),video=document.querySelector('video');
+            setInterval(()=>{window.__elixMediaTicks++;context.fillStyle=window.__elixMediaTicks%2?'#218c57':'#2254a6';context.fillRect(0,0,320,180)},50);
+            video.srcObject=canvas.captureStream(20);
+            document.querySelector('button').onclick=()=>{document.querySelector('button').hidden=true;video.play();video.requestFullscreen()};
+            </script></body></html>"#;
+        let headers = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n", html.len());
+        let _ = stream.write_all(headers.as_bytes());
+        let _ = stream.write_all(html.as_bytes());
+        return;
+    }
     if request.starts_with("GET /broken ") {
         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=broken.txt\r\nConnection: close\r\n\r\n");
         // Commit the download before disconnecting mid-transfer. An already
@@ -1245,6 +1700,73 @@ fn serve_fixture(mut stream: std::net::TcpStream) {
     );
     let _ = stream.write_all(response.as_bytes());
 }
+fn dormancy_isolation_test(app: &AppHandle, origin: &str) -> Result<(), String> {
+    let original = app.state::<AppState>().session.lock().unwrap().active.clone();
+    let mut ids = Vec::new();
+    for path in ["dormancy-active", "dormancy-target", "dormancy-sibling"] {
+        let id = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/{path}")))?;
+        wait_title_or_error(app, &id, "ELIX native one")?;
+        ids.push(id);
+    }
+    let active = &ids[0];
+    let target = &ids[1];
+    let sibling = &ids[2];
+    browser::activate(app, active)?;
+    let active_view = app.get_webview(active).ok_or("Missing dormancy active view")?;
+    let sibling_view = app.get_webview(sibling).ok_or("Missing dormancy sibling view")?;
+    if !view_bool(&active_view, "(()=>{window.__elixDormancyTicks=0;window.__elixDormancyToken='active';setInterval(()=>window.__elixDormancyTicks++,50);return true})()")?
+        || !view_bool(&sibling_view, "(()=>{window.__elixDormancyToken='sibling';return true})()")?
+    {
+        return Err("Could not initialize same-origin dormancy fixture".into());
+    }
+    // Rejected operations must preserve both the page and its running state.
+    if browser::suspend(app, active).is_ok() || app.get_webview(active).is_none() {
+        return Err("Dormancy accepted the active page".into());
+    }
+    browser::pin(app, sibling, true)?;
+    if browser::suspend(app, sibling).is_ok() || app.get_webview(sibling).is_none() {
+        return Err("Dormancy accepted a pinned sibling".into());
+    }
+    browser::pin(app, sibling, false)?;
+    for _ in 0..2 {
+        view_bool(&active_view, "(()=>{window.__elixDormancyBefore=window.__elixDormancyTicks;return true})()")?;
+        browser::suspend(app, target)?;
+        {
+            let state = app.state::<AppState>();
+            let session = state.session.lock().unwrap();
+            if session.active != *active
+                || !session.tabs.iter().any(|tab| tab.id == *target && tab.suspended)
+                || session.tabs.iter().any(|tab| (tab.id == *active || tab.id == *sibling) && tab.suspended)
+                || app.get_webview(target).is_some()
+                || app.get_webview(active).is_none()
+                || app.get_webview(sibling).is_none()
+            {
+                return Err("Dormancy changed a sibling or retained the selected view".into());
+            }
+        }
+        wait(|| view_bool(&active_view, "window.__elixDormancyToken==='active' && window.__elixDormancyTicks>window.__elixDormancyBefore").unwrap_or(false))
+            .map_err(|_| "Active same-origin sibling stopped running after dormancy".to_string())?;
+        if !view_bool(&sibling_view, "window.__elixDormancyToken==='sibling'")? {
+            return Err("Dormancy recreated or damaged a background sibling".into());
+        }
+        browser::activate(app, target)?;
+        wait_title_or_error(app, target, "ELIX native one")?;
+        if app.get_webview(target).is_none()
+            || app.state::<AppState>().session.lock().unwrap().tabs.iter().any(|tab| tab.id == *target && tab.suspended)
+            || !view_bool(&sibling_view, "window.__elixDormancyToken==='sibling'")?
+        {
+            return Err("Waking one page changed a sibling or retained dormancy".into());
+        }
+        browser::activate(app, active)?;
+    }
+    // Keep one deliberately dormant tab in the final persisted-session test.
+    browser::suspend(app, target)?;
+    browser::activate(app, &original)?;
+    browser::close(app, sibling)?;
+    browser::close(app, active)?;
+    Ok(())
+}
+
 fn exercise(app: &AppHandle) -> Result<(), String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let origin = format!(
@@ -1259,6 +1781,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         }
     });
     std::thread::sleep(Duration::from_secs(2));
+    progress("window controls: before");
     let main = app.get_window("main").ok_or("Missing main window")?;
     crate::window::perform(app, crate::window::Action::Minimize)?;
     wait(|| main.is_minimized().unwrap_or(false))?;
@@ -1275,6 +1798,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     crate::window::perform(app, crate::window::Action::ExitFullscreen)?;
     wait(|| !main.is_fullscreen().unwrap_or(true))?;
     main.maximize().map_err(|e| e.to_string())?;
+    progress("window controls: after; initial navigation: before");
     let first =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
     wait(|| title(app, &first, "ELIX native one"))?;
@@ -1292,13 +1816,30 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
                         .is_some_and(|icon| icon.starts_with("data:image/png;base64,"))
             })
     })?;
+    progress("history shortcut: before");
     #[cfg(windows)]
     history_shortcut_test(app, &first)?;
+    progress("history shortcut: after");
+    progress("new-tab focus: before");
+    #[cfg(windows)]
+    new_tab_focus_test(app, &first)?;
+    progress("new-tab focus: after");
     browser::navigate(app, &first, &format!("{origin}/one"))?;
     wait(|| title(app, &first, "ELIX native one"))?;
+    progress("sidebar: before");
     sidebar_test(app, &first)?;
+    progress("sidebar: after");
+    progress("PDF scroll: before");
+    #[cfg(windows)]
+    pdf_scroll_test(app, &origin, &first)?;
+    progress("PDF scroll: after");
+    progress("media: before");
+    #[cfg(windows)]
+    media_test(app, &origin, &first)?;
+    progress("media: after");
     browser::navigate(app, &first, &format!("{origin}/one"))?;
     wait(|| title(app, &first, "ELIX native one"))?;
+    progress("HTTP navigation reload/back/forward: before");
     let view = app.get_webview(&first).ok_or("Missing native view")?;
     view.reload().map_err(|e| e.to_string())?;
     wait(|| {
@@ -1320,6 +1861,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         false,
     ))?;
     wait(|| title(app, &first, "ELIX native two"))?;
+    progress("HTTP navigation reload/back/forward: after; navigation failure/recovery: before");
     let unused = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let unavailable = format!(
         "http://{}/unavailable",
@@ -1348,6 +1890,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
                 .iter()
                 .any(|tab| tab.id == first && tab.navigation_error.is_none())
     })?;
+    progress("navigation failure/recovery: after; DevTools/IPC: before");
     tauri::async_runtime::block_on(browser::engine::action(
         view.clone(),
         "set_developer".into(),
@@ -1367,9 +1910,17 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     view.eval("(async()=>{document.title='ELIX IPC pending';if(!window.__TAURI_INTERNALS__?.invoke){document.title='ELIX IPC denied';return}const result=await Promise.race([window.__TAURI_INTERNALS__.invoke('dispatch',{request:{action:'snapshot'}}).then(()=> 'allowed',()=> 'denied'),new Promise(resolve=>setTimeout(()=>resolve('unreachable'),2000))]);document.title='ELIX IPC '+result})()")
         .map_err(|e| e.to_string())?;
     wait(|| title(app, &first, "ELIX IPC denied") || title(app, &first, "ELIX IPC unreachable"))?;
+    progress("DevTools/IPC: after");
+    progress("extensions: before");
     tauri::async_runtime::block_on(browser::extensions::smoke(app.clone()))?;
+    progress("extensions: after");
+    progress("private profile: before");
     private_test(app, &first, &origin)?;
+    progress("private profile: after");
+    progress("permission prompt: before");
     permission_test(app, &origin)?;
+    progress("permission prompt: after");
+    progress("download complete bytes: before");
     browser::pin(app, &first, true)?;
     let second =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
@@ -1396,9 +1947,17 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     if std::fs::read_to_string(&path).map_err(|e| e.to_string())? != "elix-native-download" {
         return Err("Downloaded bytes differ".into());
     }
+    progress("download complete bytes: after");
+    progress("resumable download: before");
     resumable_download_test(app, &second, &origin)?;
+    progress("resumable download: after");
+    progress("concurrent downloads: before");
     concurrent_download_test(app, &origin, &second)?;
+    progress("concurrent downloads: after");
+    progress("download cancellation: before");
     canceled_download_test(app, &origin, &second)?;
+    progress("download cancellation: after");
+    progress("broken download/retry cleanup: before");
     let broken_url = format!("{origin}/broken");
     browser::navigate(app, &second, &broken_url)?;
     wait(|| {
@@ -1534,11 +2093,16 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             serde_json::to_string(&phantom).map_err(|e| e.to_string())?
         ));
     }
+    progress("broken download/retry cleanup: after; basic suspension: before");
     browser::activate(app, &first)?;
     browser::suspend(app, &second)?;
     if app.get_webview(&second).is_some() {
         return Err("Suspended view remains alive".into());
     }
+    progress("basic suspension: after");
+    progress("dormancy isolation: before");
+    dormancy_isolation_test(app, &origin)?;
+    progress("dormancy isolation: after; profile storage: before");
     {
         let state = app.state::<AppState>();
         let p = state.profile.lock().unwrap().clone();
@@ -1552,16 +2116,23 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             return Err("Bookmark not persisted".into());
         }
     }
+    progress("profile storage: after");
+    progress("split cookies detach: before");
     #[cfg(windows)]
     alpha6_test(app, &origin)?;
+    progress("split cookies detach: after");
+    progress("session restoration: before persist");
     browser::persist(app)?;
+    progress("session restoration: before close views");
     browser::close(app, &second)?;
     for (label, view) in app.webviews() {
         if label.starts_with("tab-") {
             view.close().map_err(|e| e.to_string())?;
         }
     }
+    progress("session restoration: before restore");
     browser::restore(app);
+    progress("session restoration: before verify state");
     let state = app.state::<AppState>();
     let session = state.session.lock().unwrap();
     if !session.tabs.iter().any(|t| {
@@ -1569,5 +2140,22 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     }) {
         return Err("Pinned active tab was not restored".into());
     }
+    let restored_target = session.tabs.iter().find(|tab| tab.url == format!("{origin}/dormancy-target"))
+        .ok_or("Dormant tab was lost during session restore")?;
+    if session.tabs.iter().any(|tab| tab.suspended)
+        || app.get_webview(&restored_target.id).is_some()
+        || !session.automatic_suspend_ids(1, chrono::Utc::now().timestamp() + 3600, &Default::default(), &Default::default()).is_empty()
+    {
+        return Err("Restoration confused unloaded tabs with dormant native pages".into());
+    }
+    let active = session.active.clone();
+    drop(session);
+    progress("session restoration: before activate restored page");
+    browser::activate(app, &active)?;
+    wait_title_or_error(app, &active, "ELIX native two")?;
+    if app.webviews().keys().filter(|id| id.starts_with("tab-")).count() != 1 {
+        return Err("Restoring the active page eagerly reloaded background tabs".into());
+    }
+    progress("session restoration: after");
     Ok(())
 }

@@ -25,6 +25,7 @@ pub struct AppState {
     profile: Mutex<String>,
     session: Mutex<browser::Session>,
     bounds: Mutex<browser::Bounds>,
+    media: Mutex<browser::media::State>,
     metrics: Mutex<developer::Metrics>,
     runtime_version: Mutex<Option<String>>,
     downloads: Mutex<Vec<downloads::Download>>,
@@ -40,7 +41,7 @@ enum Request {
     RecoverWindows,
     ReorderTab {
         id: String,
-        before: String,
+        before: Option<String>,
     },
     DetachTab {
         id: String,
@@ -57,6 +58,10 @@ enum Request {
     },
     Split {
         other: Option<String>,
+    },
+    Media {
+        operation: String,
+        id: Option<String>,
     },
     MuteTab {
         id: String,
@@ -148,7 +153,10 @@ enum Request {
         id: String,
     },
     Extensions,
-    AddExtension,
+    AddExtension {
+        #[serde(default)]
+        package: bool,
+    },
     EnableExtension {
         id: String,
         enabled: bool,
@@ -213,6 +221,9 @@ async fn dispatch(
     authorize(&webview)?;
     let state = app.state::<AppState>();
     match request {
+        Request::Media { operation, id } => {
+            browser::media::perform(&app, &operation, id.as_deref())
+        }
         Request::Account {
             profile,
             operation,
@@ -268,7 +279,7 @@ async fn dispatch(
             Ok(Value::Null)
         }
         Request::ReorderTab { id, before } => {
-            browser::organization::reorder(&app, &id, &before)?;
+            browser::organization::reorder(&app, &id, before.as_deref())?;
             Ok(Value::Null)
         }
         Request::DetachTab { id, outside_only } => Ok(json!(
@@ -512,6 +523,7 @@ async fn dispatch(
             security::permissions::cancel_all(&app);
             downloads::persist(&app);
             downloads::clear_private(&app);
+            browser::media::reset(&app)?;
             for (label, v) in app.webviews() {
                 if label.starts_with("tab-") {
                     v.close().map_err(|e| e.to_string())?;
@@ -528,7 +540,7 @@ async fn dispatch(
         Request::Extensions => {
             browser::extensions::execute(app.clone(), browser::extensions::Operation::List).await
         }
-        Request::AddExtension => browser::extensions::pick_and_add(app.clone()).await,
+        Request::AddExtension { package } => browser::extensions::pick_and_add(app.clone(), package).await,
         Request::EnableExtension { id, enabled } => {
             browser::extensions::execute(
                 app.clone(),
@@ -716,6 +728,7 @@ pub fn run() {
                 profile: Mutex::new(profile),
                 session: Mutex::new(browser::Session::default()),
                 bounds: Mutex::new(browser::Bounds::default()),
+                media: Mutex::new(browser::media::State::default()),
                 metrics: Mutex::new(developer::Metrics::default()),
                 runtime_version: Mutex::new(None),
                 downloads: Mutex::new(downloads),
@@ -797,27 +810,25 @@ pub fn run() {
                 let _ = handle.emit_to("shell", "metrics", &sample);
                 let minutes = state.store.lock().unwrap().settings().suspend_minutes;
                 if minutes > 0 {
-                    let ids = {
-                        let s = state.session.lock().unwrap();
-                        s.tabs
-                            .iter()
-                            .filter(|t| {
-                                t.id != s.active
-                                    && !t.suspended
-                                    && !t.private
-                                    && !state.downloads.lock().unwrap().iter().any(|d| {
-                                        d.view_id == t.id
-                                            && (d.can_resume
-                                                || ["downloading", "paused"]
-                                                    .contains(&d.status.as_str()))
-                                    })
-                                    && !t.url.starts_with("elix:")
-                                    && chrono::Utc::now().timestamp() - t.last_active
-                                        > minutes as i64 * 60
-                            })
-                            .map(|t| t.id.clone())
-                            .collect::<Vec<_>>()
-                    };
+                    // Unloaded session tabs consume no native page resources and
+                    // must not acquire a dormancy flag from a previous run's age.
+                    let loaded = handle.webviews().into_keys().collect();
+                    let transfers = state
+                        .downloads
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|d| {
+                            d.can_resume || matches!(d.status.as_str(), "downloading" | "paused")
+                        })
+                        .map(|d| d.view_id.clone())
+                        .collect();
+                    let ids = state.session.lock().unwrap().automatic_suspend_ids(
+                        minutes,
+                        chrono::Utc::now().timestamp(),
+                        &loaded,
+                        &transfers,
+                    );
                     for id in ids {
                         let _ = browser::suspend(&handle, &id);
                     }
@@ -826,10 +837,14 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if browser::media::window_event(window, event) {
+                return;
+            }
             if matches!(event, tauri::WindowEvent::Resized(_)) {
                 window::emit(window.app_handle());
             }
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                browser::media::shutdown(window.app_handle());
                 let _ = browser::persist(window.app_handle());
                 downloads::persist(window.app_handle());
                 #[cfg(windows)]

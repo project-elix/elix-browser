@@ -10,6 +10,7 @@ pub fn default_workspaces() -> Vec<String> {
 }
 
 pub fn layout(app: &AppHandle) -> Result<(), String> {
+    if super::media::layout(app)? { return Ok(()); }
     let state = app.state::<AppState>();
     let s = state.session.lock().unwrap().clone();
     let b = *state.bounds.lock().unwrap();
@@ -17,6 +18,7 @@ pub fn layout(app: &AppHandle) -> Result<(), String> {
         if !id.starts_with("tab-") {
             continue;
         }
+        if super::media::is_player(app, &id) { continue; }
         if state
             .permissions_visible
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -85,7 +87,7 @@ pub fn workspace(app: &AppHandle, name: &str) -> Result<(), String> {
             s.workspaces.push(name.into());
         }
         s.workspace = name.into();
-        s.split = None;
+        s.clear_split(chrono::Utc::now().timestamp());
         if let Some(t) = s.tabs.iter().find(|t| t.workspace == name) {
             t.id.clone()
         } else {
@@ -104,12 +106,14 @@ pub fn workspace(app: &AppHandle, name: &str) -> Result<(), String> {
 }
 
 pub fn group(app: &AppHandle, id: &str, group: &str, workspace: &str) -> Result<(), String> {
-    {
+    let moved = {
         let state = app.state::<AppState>();
         let mut s = state.session.lock().unwrap();
-        update_group(&mut s, id, group, workspace)?;
-    }
-    super::activate(app, id)?;
+        update_group(&mut s, id, group, workspace)?
+    };
+    // Saving a group name on blur can arrive after another tab was selected.
+    // Only an explicit workspace move changes the user's current selection.
+    if moved { super::activate(app, id)?; } else { super::emit(app); }
     super::persist(app)
 }
 
@@ -118,7 +122,7 @@ fn update_group(
     id: &str,
     group: &str,
     workspace: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if group.chars().count() > 40 {
         return Err("Gruppenavnet er for langt".into());
     }
@@ -138,31 +142,44 @@ fn update_group(
             .as_ref()
             .is_some_and(|pair| pair.iter().any(|member| member == id))
     {
-        s.split = None;
+        s.clear_split(chrono::Utc::now().timestamp());
     }
-    Ok(())
+    Ok(moved)
 }
 
-pub fn reorder(app: &AppHandle, id: &str, before: &str) -> Result<(), String> {
-    {
-        let state = app.state::<AppState>();
-        let mut s = state.session.lock().unwrap();
-        let source = s.tabs.iter().find(|t| t.id == id).ok_or("Ukjent fane")?;
-        let target = s
-            .tabs
-            .iter()
-            .find(|t| t.id == before)
-            .ok_or("Ukjent fane")?;
+fn reorder_tabs(tabs: &mut Vec<Tab>, id: &str, before: Option<&str>) -> Result<(), String> {
+    let from = tabs.iter().position(|t| t.id == id).ok_or("Ukjent fane")?;
+    let source = &tabs[from];
+    if let Some(before) = before {
+        let target = tabs.iter().find(|t| t.id == before).ok_or("Ukjent fane")?;
         if source.workspace != target.workspace || source.pinned != target.pinned {
             return Err("Flytt innenfor samme arbeidsområde og festede/vanlige faner".into());
         }
         if id == before {
             return Ok(());
         }
-        let from = s.tabs.iter().position(|t| t.id == id).unwrap();
-        let to = s.tabs.iter().position(|t| t.id == before).unwrap();
-        let tab = s.tabs.remove(from);
-        s.tabs.insert(to, tab);
+    }
+    let workspace = source.workspace.clone();
+    let pinned = source.pinned;
+    let tab = tabs.remove(from);
+    // Resolve the insertion point after removal: earlier -> later must still
+    // insert before the target. A null target appends to this partition only.
+    let to = match before {
+        Some(target) => tabs.iter().position(|t| t.id == target).unwrap(),
+        None => tabs
+            .iter()
+            .rposition(|t| t.workspace == workspace && t.pinned == pinned)
+            .map_or(from.min(tabs.len()), |index| index + 1),
+    };
+    tabs.insert(to, tab);
+    Ok(())
+}
+
+pub fn reorder(app: &AppHandle, id: &str, before: Option<&str>) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut s = state.session.lock().unwrap();
+        reorder_tabs(&mut s.tabs, id, before)?;
     }
     super::emit(app);
     super::persist(app)
@@ -171,6 +188,10 @@ pub fn reorder(app: &AppHandle, id: &str, before: &str) -> Result<(), String> {
 pub fn split(app: &AppHandle, other: Option<String>) -> Result<(), String> {
     let state = app.state::<AppState>();
     if let Some(id) = other {
+        let active = state.session.lock().unwrap().active.clone();
+        if super::media::is_player(app, &id) || super::media::is_player(app, &active) {
+            return Err("Flytt minispilleren tilbake før du bruker fanen i delt visning.".into());
+        }
         let (active, tab) = {
             let s = state.session.lock().unwrap();
             let a = s
@@ -192,9 +213,17 @@ pub fn split(app: &AppHandle, other: Option<String>) -> Result<(), String> {
         if app.get_webview(&id).is_none() {
             engine::create(app, &tab)?;
         }
-        state.session.lock().unwrap().split = Some([active, id]);
+        state
+            .session
+            .lock()
+            .unwrap()
+            .replace_split([active, id], chrono::Utc::now().timestamp());
     } else {
-        state.session.lock().unwrap().split = None;
+        state
+            .session
+            .lock()
+            .unwrap()
+            .clear_split(chrono::Utc::now().timestamp());
     }
     layout(app)?;
     super::emit(app);
@@ -237,6 +266,7 @@ pub fn recover(app: &AppHandle, id: &str) -> Result<(), String> {
     {
         return Err("Ukjent fane".into());
     }
+    super::media::release(app, id)?;
     if let Some(view) = app.get_webview(id) {
         view.close().map_err(|e| e.to_string())?;
     }
@@ -257,6 +287,49 @@ pub fn recover(app: &AppHandle, id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn ordered_tab(id: &str, workspace: &str, pinned: bool) -> Tab {
+        let mut tab = Tab::new(format!("https://example.com/{id}"));
+        tab.id = id.into();
+        tab.workspace = workspace.into();
+        tab.pinned = pinned;
+        tab
+    }
+
+    fn ids(tabs: &[Tab]) -> Vec<&str> {
+        tabs.iter().map(|tab| tab.id.as_str()).collect()
+    }
+
+    #[test]
+    fn reorder_inserts_before_target_in_both_directions() {
+        let mut tabs = vec![ordered_tab("a", "Home", false), ordered_tab("b", "Home", false), ordered_tab("c", "Home", false)];
+        reorder_tabs(&mut tabs, "a", Some("c")).unwrap();
+        assert_eq!(ids(&tabs), ["b", "a", "c"]);
+        reorder_tabs(&mut tabs, "c", Some("b")).unwrap();
+        assert_eq!(ids(&tabs), ["c", "b", "a"]);
+        reorder_tabs(&mut tabs, "b", Some("b")).unwrap();
+        assert_eq!(ids(&tabs), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn reorder_appends_within_partition_and_preserves_unrelated_order() {
+        let mut tabs = vec![ordered_tab("a", "Home", false), ordered_tab("p", "Home", true), ordered_tab("b", "Home", false), ordered_tab("w", "Work", false), ordered_tab("c", "Home", false), ordered_tab("x", "Work", false)];
+        reorder_tabs(&mut tabs, "a", None).unwrap();
+        assert_eq!(ids(&tabs), ["p", "b", "w", "c", "a", "x"]);
+        reorder_tabs(&mut tabs, "p", None).unwrap();
+        assert_eq!(ids(&tabs), ["p", "b", "w", "c", "a", "x"]);
+        reorder_tabs(&mut tabs, "w", None).unwrap();
+        assert_eq!(ids(&tabs), ["p", "b", "c", "a", "x", "w"]);
+    }
+
+    #[test]
+    fn invalid_reorder_does_not_mutate_tabs() {
+        let mut tabs = vec![ordered_tab("a", "Home", false), ordered_tab("p", "Home", true), ordered_tab("w", "Work", false)];
+        for (id, target) in [("missing", None), ("a", Some("missing")), ("a", Some("p")), ("a", Some("w"))] {
+            assert!(reorder_tabs(&mut tabs, id, target).is_err());
+            assert_eq!(ids(&tabs), ["a", "p", "w"]);
+        }
+    }
+
     #[test]
     fn moving_a_split_tab_to_another_workspace_ends_the_split() {
         let left = Tab::new("https://example.com/left".into());
@@ -270,9 +343,10 @@ mod tests {
             split: Some(pair.clone()),
             ..Default::default()
         };
-        update_group(&mut session, &id, "Lesing", &default_workspace()).unwrap();
+        assert!(!update_group(&mut session, &id, "Lesing", &default_workspace()).unwrap());
         assert_eq!(session.split, Some(pair));
-        update_group(&mut session, &id, "Prosjekt", "Jobb").unwrap();
+        assert_eq!(session.active, id);
+        assert!(update_group(&mut session, &id, "Prosjekt", "Jobb").unwrap());
         assert!(session.split.is_none());
         assert_eq!(session.tabs[0].workspace, "Jobb");
         assert_eq!(session.tabs[0].group, "Prosjekt");
