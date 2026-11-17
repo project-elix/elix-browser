@@ -67,7 +67,20 @@ jobs:
         run: |
           $env:ELIX_SMOKE_RESULT = Join-Path $PWD "native-smoke.txt"
           $test = Start-Process "$env:RUNNER_TEMP/ELIX-smoke/elix-browser.exe" -ArgumentList "--self-test" -PassThru
-          if (!$test.WaitForExit(240000)) { Stop-Process -Id $test.Id; throw "Native smoke test timed out" }
+          $finished = $test.WaitForExit(240000)
+          if (!$finished) {
+            Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+            $screen = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $image = [Drawing.Bitmap]::new($screen.Width,$screen.Height)
+            $graphics = [Drawing.Graphics]::FromImage($image)
+            try {
+              $graphics.CopyFromScreen($screen.Location,[Drawing.Point]::Empty,$screen.Size)
+              $image.Save((Join-Path $PWD 'native-timeout.png'),[Drawing.Imaging.ImageFormat]::Png)
+            } finally { $graphics.Dispose(); $image.Dispose() }
+            Stop-Process -Id $test.Id
+          }
+          if (Test-Path 'native-progress.txt') { Get-Content 'native-progress.txt' }
+          if (!$finished) { throw "Native smoke test timed out" }
           if (Test-Path $env:ELIX_SMOKE_RESULT) { Get-Content $env:ELIX_SMOKE_RESULT }
           if ($test.ExitCode -ne 0 -or !(Test-Path $env:ELIX_SMOKE_RESULT)) { throw "Native smoke test failed" }
       - name: Measure idle resource budget
@@ -80,7 +93,7 @@ jobs:
             src-tauri/target/release/bundle/nsis/*-setup.exe
             performance.csv
             windows-start.png
-            native-smoke.txt
+            native-*.txt
             native-*.png
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
@@ -89,7 +102,7 @@ jobs:
           name: ELIX-Windows-test-diagnostics
           path: |
             windows-start.png
-            native-smoke.txt
+            native-*.txt
             native-*.png
           if-no-files-found: warn
 

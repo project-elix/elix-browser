@@ -7,6 +7,14 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const PLAYER_WINDOW: &str = "media-player";
 
+#[inline]
+fn checkpoint(stage: &str) {
+    #[cfg(feature = "smoke-tests")]
+    super::smoke::progress(stage);
+    #[cfg(not(feature = "smoke-tests"))]
+    let _ = stage;
+}
+
 #[derive(Clone, Serialize)]
 pub struct Player {
     pub id: String,
@@ -216,6 +224,7 @@ pub fn before_navigation(app: &AppHandle, id: &str) -> Result<(), String> { exit
 
 /// Release presentation state before the owning tab is destroyed or recovered.
 pub fn release(app: &AppHandle, id: &str) -> Result<(), String> {
+    checkpoint("media.release.begin");
     let _ = exit(app, id);
     let removed = {
         let state = app.state::<AppState>();
@@ -226,27 +235,38 @@ pub fn release(app: &AppHandle, id: &str) -> Result<(), String> {
         // Teardown/recovery must remain possible even after a controller crash.
         // Returning a live player is strict; destroying one clears ownership first.
         if let Some(view) = app.get_webview(id) {
+            checkpoint("media.release.reparent.begin");
             let reparented = app.get_window("main").is_some_and(|window| view.reparent(&window).is_ok());
+            checkpoint("media.release.reparent.end");
             if !reparented { let _ = view.close(); }
         }
         if let Some(window) = app.get_window(PLAYER_WINDOW) { let _ = window.hide(); }
         emit(app);
     }
+    checkpoint("media.release.end");
     Ok(())
 }
 
 fn return_to_browser(app: &AppHandle) -> Result<Option<String>, String> {
+    checkpoint("media.return.begin");
     let player = app.state::<AppState>().media.lock().unwrap().player.clone();
     let Some(player) = player else { return Ok(None); };
     exit(app, &player.id)?;
+    checkpoint("media.return.fullscreen.exit.done");
     if let Some(view) = app.get_webview(&player.id) {
         let main = app.get_window("main").ok_or("Fant ikke hovedvinduet")?;
+        checkpoint("media.return.reparent.begin");
         view.reparent(&main).map_err(|e| e.to_string())?;
+        checkpoint("media.return.reparent.end");
     }
     app.state::<AppState>().media.lock().unwrap().player = None;
+    checkpoint("media.return.ownership.cleared");
     if let Some(window) = app.get_window(PLAYER_WINDOW) { window.hide().map_err(|e| e.to_string())?; }
+    checkpoint("media.return.window.hidden");
     super::organization::layout(app)?;
+    checkpoint("media.return.layout.done");
     emit(app);
+    checkpoint("media.return.emit.done");
     Ok(Some(player.id))
 }
 
@@ -268,7 +288,9 @@ fn open(app: &AppHandle, id: &str) -> Result<(), String> {
             .build().map_err(|e| e.to_string())?
     };
     window.set_title(&format!("ELIX Minispiller · {}", tab.title)).map_err(|e| e.to_string())?;
+    checkpoint("media.open.reparent.begin");
     view.reparent(&window).map_err(|e| e.to_string())?;
+    checkpoint("media.open.reparent.end");
     app.state::<AppState>().media.lock().unwrap().player = Some(Player { id: id.into(), hidden: false });
     // Keep the return control available even if a later window/focus call fails.
     emit(app);
@@ -323,7 +345,11 @@ pub fn perform(app: &AppHandle, operation: &str, id: Option<&str>) -> Result<Val
         "hide" => set_hidden(app, true)?,
         "show" => set_hidden(app, false)?,
         "return" => {
-            if let Some(id) = return_to_browser(app)? { super::activate(app, &id)?; }
+            if let Some(id) = return_to_browser(app)? {
+                checkpoint("media.return.activate.begin");
+                super::activate(app, &id)?;
+                checkpoint("media.return.activate.end");
+            }
         },
         _ => return Err("Ukjent mediehandling".into()),
     }
@@ -331,10 +357,12 @@ pub fn perform(app: &AppHandle, operation: &str, id: Option<&str>) -> Result<Val
 }
 
 pub fn reset(app: &AppHandle) -> Result<(), String> {
+    checkpoint("media.reset.begin");
     let fullscreen = app.state::<AppState>().media.lock().unwrap().fullscreen.clone();
     if let Some(fullscreen) = fullscreen { let _ = exit(app, &fullscreen.id); }
     let player = app.state::<AppState>().media.lock().unwrap().player.clone();
     if let Some(player) = player { release(app, &player.id)?; }
+    checkpoint("media.reset.end");
     Ok(())
 }
 

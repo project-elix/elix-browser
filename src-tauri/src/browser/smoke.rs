@@ -7,6 +7,18 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
+/// Independent breadcrumbs survive a blocked UI thread or an application-state
+/// mutex. Never use AppState or the normal logger from this diagnostic path.
+pub(crate) fn progress(stage: &str) {
+    let Some(result) = std::env::var_os("ELIX_SMOKE_RESULT") else { return; };
+    let path = std::path::PathBuf::from(result).with_file_name("native-progress.txt");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{} {stage}", chrono::Utc::now().to_rfc3339());
+        let _ = file.flush();
+        let _ = file.sync_data();
+    }
+}
+
 pub fn boot_stage(app: &AppHandle, stage: &str) {
     let state = app.state::<AppState>();
     if state.window_id == "main" || !std::env::args().any(|a| a == "--elix-smoke-window") {
@@ -729,7 +741,12 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
+        progress("exercise: start");
         let result = exercise(&app);
+        match &result {
+            Ok(()) => progress("exercise: passed"),
+            Err(error) => progress(&format!("exercise: failed: {error}")),
+        }
         let code = if result.is_ok() { 0 } else { 1 };
         #[cfg(windows)]
         if code != 0 { let _ = capture_native_screen("native-failure.png"); }
@@ -745,6 +762,7 @@ pub fn start(app: AppHandle) {
         }
         if code == 0 {
             // Exercise the same persisted close path as the visible close button.
+            progress("shutdown: before close");
             if crate::window::perform(&app, crate::window::Action::Close).is_err() {
                 app.exit(1);
             }
@@ -1133,16 +1151,27 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     browser::media::perform(app, "show", None)?;
     wait(|| player.is_visible().unwrap_or(false))?;
     capture_native_screen("native-video-miniplayer.png")?;
+    progress("media: before return");
     browser::media::perform(app, "return", None)?;
+    progress("media: return completed; before ownership wait");
     wait(|| view.window().label() == "main" && !browser::media::is_player(app, &id))?;
+    progress("media: return ownership verified; before page state check");
     if !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Returning miniplayer recreated or paused media".into()); }
+    progress("media: returned page verified; before reopen");
     browser::media::perform(app, "open", Some(&id))?;
+    progress("media: reopened; before ownership wait");
     wait(|| browser::media::is_player(app, &id))?;
+    progress("media: before reset");
     browser::media::reset(app)?;
+    progress("media: reset completed; before ownership wait");
     wait(|| !browser::media::is_player(app, &id) && view.window().label() == "main" && !player.is_visible().unwrap_or(true))?;
+    progress("media: reset ownership verified; before page state check");
     if !view_bool(&view, "window.__elixMediaToken==='original'")? { return Err("Reset lost the live player page before profile cleanup".into()); }
+    progress("media: reset page verified; before activate original");
     browser::activate(app, return_tab)?;
+    progress("media: original activated; before fixture close");
     browser::close(app, &id)?;
+    progress("media: fixture closed");
     Ok(())
 }
 
@@ -1739,6 +1768,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         }
     });
     std::thread::sleep(Duration::from_secs(2));
+    progress("window controls: before");
     let main = app.get_window("main").ok_or("Missing main window")?;
     crate::window::perform(app, crate::window::Action::Minimize)?;
     wait(|| main.is_minimized().unwrap_or(false))?;
@@ -1755,6 +1785,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     crate::window::perform(app, crate::window::Action::ExitFullscreen)?;
     wait(|| !main.is_fullscreen().unwrap_or(true))?;
     main.maximize().map_err(|e| e.to_string())?;
+    progress("window controls: after; initial navigation: before");
     let first =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
     wait(|| title(app, &first, "ELIX native one"))?;
@@ -1772,19 +1803,30 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
                         .is_some_and(|icon| icon.starts_with("data:image/png;base64,"))
             })
     })?;
+    progress("history shortcut: before");
     #[cfg(windows)]
     history_shortcut_test(app, &first)?;
+    progress("history shortcut: after");
+    progress("new-tab focus: before");
     #[cfg(windows)]
     new_tab_focus_test(app, &first)?;
+    progress("new-tab focus: after");
     browser::navigate(app, &first, &format!("{origin}/one"))?;
     wait(|| title(app, &first, "ELIX native one"))?;
+    progress("sidebar: before");
     sidebar_test(app, &first)?;
+    progress("sidebar: after");
+    progress("PDF scroll: before");
     #[cfg(windows)]
     pdf_scroll_test(app, &origin, &first)?;
+    progress("PDF scroll: after");
+    progress("media: before");
     #[cfg(windows)]
     media_test(app, &origin, &first)?;
+    progress("media: after");
     browser::navigate(app, &first, &format!("{origin}/one"))?;
     wait(|| title(app, &first, "ELIX native one"))?;
+    progress("HTTP navigation reload/back/forward: before");
     let view = app.get_webview(&first).ok_or("Missing native view")?;
     view.reload().map_err(|e| e.to_string())?;
     wait(|| {
@@ -1806,6 +1848,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         false,
     ))?;
     wait(|| title(app, &first, "ELIX native two"))?;
+    progress("HTTP navigation reload/back/forward: after; navigation failure/recovery: before");
     let unused = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let unavailable = format!(
         "http://{}/unavailable",
@@ -1834,6 +1877,7 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
                 .iter()
                 .any(|tab| tab.id == first && tab.navigation_error.is_none())
     })?;
+    progress("navigation failure/recovery: after; DevTools/IPC: before");
     tauri::async_runtime::block_on(browser::engine::action(
         view.clone(),
         "set_developer".into(),
@@ -1853,9 +1897,17 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     view.eval("(async()=>{document.title='ELIX IPC pending';if(!window.__TAURI_INTERNALS__?.invoke){document.title='ELIX IPC denied';return}const result=await Promise.race([window.__TAURI_INTERNALS__.invoke('dispatch',{request:{action:'snapshot'}}).then(()=> 'allowed',()=> 'denied'),new Promise(resolve=>setTimeout(()=>resolve('unreachable'),2000))]);document.title='ELIX IPC '+result})()")
         .map_err(|e| e.to_string())?;
     wait(|| title(app, &first, "ELIX IPC denied") || title(app, &first, "ELIX IPC unreachable"))?;
+    progress("DevTools/IPC: after");
+    progress("extensions: before");
     tauri::async_runtime::block_on(browser::extensions::smoke(app.clone()))?;
+    progress("extensions: after");
+    progress("private profile: before");
     private_test(app, &first, &origin)?;
+    progress("private profile: after");
+    progress("permission prompt: before");
     permission_test(app, &origin)?;
+    progress("permission prompt: after");
+    progress("download complete bytes: before");
     browser::pin(app, &first, true)?;
     let second =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
@@ -1882,9 +1934,17 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     if std::fs::read_to_string(&path).map_err(|e| e.to_string())? != "elix-native-download" {
         return Err("Downloaded bytes differ".into());
     }
+    progress("download complete bytes: after");
+    progress("resumable download: before");
     resumable_download_test(app, &second, &origin)?;
+    progress("resumable download: after");
+    progress("concurrent downloads: before");
     concurrent_download_test(app, &origin, &second)?;
+    progress("concurrent downloads: after");
+    progress("download cancellation: before");
     canceled_download_test(app, &origin, &second)?;
+    progress("download cancellation: after");
+    progress("broken download/retry cleanup: before");
     let broken_url = format!("{origin}/broken");
     browser::navigate(app, &second, &broken_url)?;
     wait(|| {
@@ -2020,12 +2080,16 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             serde_json::to_string(&phantom).map_err(|e| e.to_string())?
         ));
     }
+    progress("broken download/retry cleanup: after; basic suspension: before");
     browser::activate(app, &first)?;
     browser::suspend(app, &second)?;
     if app.get_webview(&second).is_some() {
         return Err("Suspended view remains alive".into());
     }
+    progress("basic suspension: after");
+    progress("dormancy isolation: before");
     dormancy_isolation_test(app, &origin)?;
+    progress("dormancy isolation: after; profile storage: before");
     {
         let state = app.state::<AppState>();
         let p = state.profile.lock().unwrap().clone();
@@ -2039,16 +2103,23 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             return Err("Bookmark not persisted".into());
         }
     }
+    progress("profile storage: after");
+    progress("split cookies detach: before");
     #[cfg(windows)]
     alpha6_test(app, &origin)?;
+    progress("split cookies detach: after");
+    progress("session restoration: before persist");
     browser::persist(app)?;
+    progress("session restoration: before close views");
     browser::close(app, &second)?;
     for (label, view) in app.webviews() {
         if label.starts_with("tab-") {
             view.close().map_err(|e| e.to_string())?;
         }
     }
+    progress("session restoration: before restore");
     browser::restore(app);
+    progress("session restoration: before verify state");
     let state = app.state::<AppState>();
     let session = state.session.lock().unwrap();
     if !session.tabs.iter().any(|t| {
@@ -2066,10 +2137,12 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     }
     let active = session.active.clone();
     drop(session);
+    progress("session restoration: before activate restored page");
     browser::activate(app, &active)?;
     wait_title_or_error(app, &active, "ELIX native two")?;
     if app.webviews().keys().filter(|id| id.starts_with("tab-")).count() != 1 {
         return Err("Restoring the active page eagerly reloaded background tabs".into());
     }
+    progress("session restoration: after");
     Ok(())
 }
