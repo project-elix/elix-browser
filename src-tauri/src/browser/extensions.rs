@@ -2,27 +2,31 @@
 use crate::AppState;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, Webview};
+#[path = "extension_package.rs"]
+mod package;
 
 #[derive(Clone)]
 pub enum Operation {
     List,
-    Add(std::path::PathBuf),
+    Add { path: std::path::PathBuf, profile: String },
     Enable { id: String, enabled: bool },
     Remove { id: String },
     ClearPasswords,
 }
 
-/// The user selects an unpacked extension; the path is never supplied by a webpage.
-pub async fn pick_and_add(app: AppHandle) -> Result<Value, String> {
-    use tauri_plugin_dialog::DialogExt;
+/// Native pickers are the only source of paths. ZIP imports are publisher source,
+/// not a replacement for the Chrome Web Store's signed CRX installation flow.
+pub async fn pick_and_add(app: AppHandle, package: bool) -> Result<Value, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
     let selected_profile = app.state::<AppState>().profile.lock().unwrap().clone();
     let picker = app.clone();
     let selected = tauri::async_runtime::spawn_blocking(move || {
-        picker
-            .dialog()
-            .file()
-            .set_title("Velg utvidelsesmappe med manifest.json")
-            .blocking_pick_folder()
+        if package {
+            picker.dialog().file().set_title("Velg ZIP med utvidelsens kildefiler fra utgiveren")
+                .add_filter("Utvidelsens kildefiler (ZIP)", &["zip"]).blocking_pick_file()
+        } else {
+            picker.dialog().file().set_title("Velg utvidelsesmappe med manifest.json").blocking_pick_folder()
+        }
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -33,11 +37,27 @@ pub async fn pick_and_add(app: AppHandle) -> Result<Value, String> {
         return Err("Profilen ble endret. Velg utvidelsen på nytt i riktig profil.".into());
     }
     let path = selected.into_path().map_err(|e| e.to_string())?;
-    let manifest = path.join("manifest.json");
-    if !manifest.is_file() {
-        return Err("Velg den utpakkede utvidelsesmappen som inneholder manifest.json.".into());
+    uuid::Uuid::parse_str(&selected_profile).map_err(|_| "Ugyldig profil.")?;
+    let managed = app.state::<AppState>().root.join("extension-sources").join(&selected_profile);
+    let mut prepared = tauri::async_runtime::spawn_blocking(move || {
+        if package { package::prepare_zip(&path, &managed) } else { package::prepare_folder(path) }
+    }).await.map_err(|e| e.to_string())??;
+    let review = &prepared.review;
+    let permissions = if review.permissions.is_empty() { "Ingen ekstra tillatelser oppgitt".to_string() } else { review.permissions.join(", ") };
+    let optional = if review.optional_permissions.is_empty() { "Ingen".to_string() } else { review.optional_permissions.join(", ") };
+    let message = format!("{} · {}\n\nOppgitte tillatelser og nettsider:\n{}\n\nValgfrie tillatelser:\n{}\n\nInstaller bare kildefiler fra en utgiver du stoler på. Tilgang kan omfatte innhold på nettsidene dine. ELIX bekrefter ikke butikkens signatur eller utgiveridentitet for denne lokale installasjonen. Utvidelsen installeres i den valgte profilen og er av i private faner.", review.name, review.version, permissions, optional);
+    let dialog = app.clone();
+    let approved = tauri::async_runtime::spawn_blocking(move || dialog.dialog().message(message)
+        .title("Installer lokal utvidelse")
+        .buttons(MessageDialogButtons::OkCancelCustom("Installer".into(), "Avbryt".into()))
+        .blocking_show()).await.map_err(|e| e.to_string())?;
+    if !approved { return Ok(Value::Null); }
+    if *app.state::<AppState>().profile.lock().unwrap() != selected_profile {
+        return Err("Profilen ble endret. Velg utvidelsen på nytt i riktig profil.".into());
     }
-    execute(app, Operation::Add(path)).await
+    let path = prepared.path.clone();
+    prepared.retain_source();
+    execute(app, Operation::Add { path, profile: selected_profile }).await
 }
 
 /// Configure every new view, including private views. Called immediately after creation.
@@ -243,19 +263,23 @@ mod native {
     // when all visible tabs are internal pages. It has no shell IPC authorization,
     // cannot navigate, and is closed after the native operation completes.
     pub(super) fn profile_view(app: &AppHandle) -> Result<(Webview, bool), String> {
+        profile_view_for(app, None)
+    }
+
+    fn profile_view_for(app: &AppHandle, target_profile: Option<&str>) -> Result<(Webview, bool), String> {
         let state = app.state::<AppState>();
-        let existing = state
+        let existing = target_profile.is_none().then(|| state
             .session
             .lock()
             .unwrap()
             .tabs
             .iter()
             .filter(|tab| !tab.private)
-            .find_map(|tab| app.get_webview(&tab.id));
+            .find_map(|tab| app.get_webview(&tab.id))).flatten();
         if let Some(view) = existing {
             return Ok((view, false));
         }
-        let profile = state.profile.lock().unwrap().clone();
+        let profile = target_profile.map(str::to_string).unwrap_or_else(|| state.profile.lock().unwrap().clone());
         let directory = crate::profiles::directory(&state.root, &profile)?;
         let preferences = state.store.lock().unwrap().settings();
         let builder = tauri::webview::WebviewBuilder::new(
@@ -268,6 +292,10 @@ mod native {
         .on_navigation(|url| url.as_str() == "about:blank")
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .on_permission_request(|_, _| tauri::webview::PermissionResponse::Deny);
+        #[cfg(feature = "smoke-tests")]
+        let builder = if std::env::args().any(|arg| arg == "--self-test" || arg == "--elix-smoke-window") {
+            builder.additional_browser_args("--use-fake-device-for-media-stream")
+        } else { builder };
         let window = app.get_window("main").ok_or("Fant ikke hovedvinduet")?;
         let view = window
             .add_child(
@@ -287,7 +315,8 @@ mod native {
     }
 
     pub async fn execute(app: AppHandle, operation: Operation) -> Result<Value, String> {
-        let (view, temporary) = profile_view(&app)?;
+        let target_profile = match &operation { Operation::Add { profile, .. } => Some(profile.as_str()), _ => None };
+        let (view, temporary) = profile_view_for(&app, target_profile)?;
         let (tx, rx) = std::sync::mpsc::channel();
         let started = view.with_webview(move |platform| {
             let result = (|| -> windows::core::Result<()> { unsafe {
@@ -303,7 +332,7 @@ mod native {
                             })),
                         )?;
                     }
-                    Operation::Add(path) => {
+                    Operation::Add { path, .. } => {
                         let callback_tx = tx.clone();
                         profile.cast::<ICoreWebView2Profile7>()?.AddBrowserExtension(
                             &HSTRING::from(path.as_os_str()),
@@ -473,14 +502,23 @@ mod native {
         preferences_result?;
         restore?;
 
-        let path = app.state::<AppState>().root.join("extension-smoke-fixture");
-        std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
-        std::fs::write(
-            path.join("manifest.json"),
-            r#"{"manifest_version":3,"name":"ELIX native extension test","version":"1.0"}"#,
-        )
-        .map_err(|e| e.to_string())?;
-        let installed = execute(app.clone(), Operation::Add(path.clone())).await?;
+        // Exercise the publisher ZIP path before the real WebView2 install;
+        // this catches a source path that disappears after preparation.
+        use std::io::{Cursor, Write};
+        let root = app.state::<AppState>().root.join("extension-smoke-fixture");
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        archive.start_file("publisher/manifest.json", zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)).map_err(|e| e.to_string())?;
+        archive.write_all(br#"{"manifest_version":3,"name":"ELIX native extension test","version":"1.0"}"#).map_err(|e| e.to_string())?;
+        let source = root.join("publisher.zip");
+        std::fs::write(&source, archive.finish().map_err(|e| e.to_string())?.into_inner()).map_err(|e| e.to_string())?;
+        let mut prepared = package::prepare_zip(&source, &root.join("managed"))?;
+        let path = prepared.path.clone();
+        prepared.retain_source();
+        drop(prepared);
+        let profile = app.state::<AppState>().profile.lock().unwrap().clone();
+        let installed = execute(app.clone(), Operation::Add { path: path.clone(), profile }).await?;
         let id = installed["id"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -529,7 +567,7 @@ mod native {
         .await;
         let removed = execute(app.clone(), Operation::Remove { id: id.clone() }).await;
         if removed.is_ok() {
-            let _ = std::fs::remove_dir_all(path);
+            let _ = std::fs::remove_dir_all(root);
         }
         result?;
         removed?;

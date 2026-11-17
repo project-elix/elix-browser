@@ -1,5 +1,5 @@
-import {useCallback,useEffect,useState} from 'react';
-import {FolderOpen,Puzzle,RefreshCw,Trash2} from 'lucide-react';
+import {useCallback,useEffect,useRef,useState} from 'react';
+import {FolderOpen,FileArchive,ExternalLink,Puzzle,RefreshCw,Trash2} from 'lucide-react';
 import {desktop,rpc} from '../browser/bridge';
 
 interface Extension {id:string;name:string;enabled:boolean}
@@ -10,24 +10,32 @@ export default function ExtensionsSettings({profile,onError}:{profile:string;onE
   const [busy,setBusy]=useState(false);
   const [failure,setFailure]=useState('');
   const [remove,setRemove]=useState<string|null>(null);
+  const [search,setSearch]=useState('');
+  const profileRef=useRef(profile),request=useRef(0);profileRef.current=profile;
   const refresh=useCallback(async()=>{
     if(!desktop)return;
+    const sequence=++request.current;
     setLoading(true);setFailure('');
-    try{setItems(await rpc<Extension[]>('extensions'));}
-    catch(error){setFailure(error instanceof Error?error.message:String(error));}
-    finally{setLoading(false);}
+    try{const items=await rpc<Extension[]>('extensions');if(profileRef.current===profile&&request.current===sequence)setItems(items);}
+    catch(error){if(profileRef.current===profile&&request.current===sequence)setFailure(error instanceof Error?error.message:String(error));}
+    finally{if(profileRef.current===profile&&request.current===sequence)setLoading(false);}
   },[profile]);
-  useEffect(()=>{setItems([]);void refresh();},[refresh]);
+  useEffect(()=>{setItems([]);setRemove(null);void refresh();},[refresh]);
   async function act(action:string,data:Record<string,unknown>={}){
     setBusy(true);
     try{await rpc(action,data);setRemove(null);await refresh();}catch(error){onError(error);}finally{setBusy(false);}
   }
   return <div className="settings-block">
     <h2><Puzzle size={22}/>Utvidelser</h2>
-    <p>Installer utpakkede utvidelser for denne profilen. Utvidelser er av i private faner.</p>
-    <p className="notice">Velg en mappe med manifest.json fra en kilde du stoler på. Utvidelser kan lese og endre nettsider. Behold mappen på samme sted etter installering.</p>
+    <p>Finn utvidelser i Chrome Nettmarked, og installer kompatible kildefiler som utgiveren tilbyr som ZIP eller mappe. Utvidelser er av i private faner.</p>
+    <form className="inline-actions" onSubmit={event=>{event.preventDefault();void act('new_tab',{url:search.trim()?`https://chromewebstore.google.com/search/${encodeURIComponent(search.trim())}`:'https://chromewebstore.google.com/category/extensions'});}}>
+      <input aria-label="Søk i Chrome Nettmarked" placeholder="Søk etter en utvidelse …" value={search} maxLength={160} onChange={event=>setSearch(event.target.value)}/>
+      <button disabled={!desktop||busy}><ExternalLink size={16}/>Åpne Chrome Nettmarked</button>
+    </form>
+    <p className="notice">«Legg til i Chrome» installerer ikke i ELIX. Bruk ZIP med utvidelsens kildefiler fra utgiveren, eller en utpakket mappe med manifest.json. Du får se tillatelsene før installering.</p>
     <div className="setting-row"><span>Utvidelser i aktiv profil</span><div className="inline-actions">
       <button disabled={!desktop||busy||loading} onClick={()=>void refresh()}><RefreshCw size={16}/>Oppdater liste</button>
+      <button disabled={!desktop||busy} onClick={()=>void act('add_extension',{package:true})}><FileArchive size={16}/>Importer ZIP fra utgiver</button>
       <button disabled={!desktop||busy} onClick={()=>void act('add_extension')}><FolderOpen size={16}/>Velg utvidelsesmappe</button>
     </div></div>
     {loading&&<p role="status">Henter utvidelser …</p>}
@@ -40,6 +48,7 @@ export default function ExtensionsSettings({profile,onError}:{profile:string;onE
       </div>
       {remove===item.id&&<div className="notice"><p>Fjerne {item.name} fra denne profilen?</p><div className="inline-actions"><button disabled={busy} onClick={()=>void act('remove_extension',{id:item.id})}>Fjern utvidelse</button><button disabled={busy} onClick={()=>setRemove(null)}>Avbryt</button></div></div>}
     </div>)}
-    <p className="muted">Installasjon direkte fra Chrome Nettmarked er ikke støttet. Utvidelser som krever en egen verktøylinjeknapp eller popup, kan ha begrenset funksjonalitet i ELIX.</p>
+    <p className="muted">ZIP-kildefiler lagres sammen med profilen. En mappe du velger selv må bli liggende på samme sted og ikke endres mens utvidelsen brukes. Installer bare fra utgivere du stoler på; utvidelser kan lese og endre nettsider.</p>
+    <p className="muted">ELIX kontrollerer ikke Chrome Nettmarked-signaturer og importerer ikke CRX-filer. Butikkoppdateringer, full Chrome-kompatibilitet og utvidelsenes egne verktøylinjeknapper/popup-vinduer er ikke tilgjengelige. Nettmarkedet åpnes for å finne utvidelser og utgiverens informasjon.</p>
   </div>;
 }

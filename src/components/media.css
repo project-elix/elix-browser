@@ -1,0 +1,5 @@
+.rail-media{border-top:1px solid var(--border);padding:10px 0;margin-top:8px;min-width:0}
+.rail-media p{margin:5px 12px 9px;color:var(--muted);font-size:11px;line-height:1.5}
+.rail-media .media-title{color:var(--text);overflow-wrap:anywhere}
+.rail-media .media-title small{display:block;color:var(--muted);font-size:10px;margin-top:3px}
+.rail-media-compact .rail-tool span{display:none}
