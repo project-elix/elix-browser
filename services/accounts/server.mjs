@@ -4,7 +4,8 @@ import {randomBytes,randomInt,createHash,createHmac,timingSafeEqual} from 'node:
 import {mkdirSync} from 'node:fs';
 import {dirname,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {BrevoError,sendLoginEmail,validEmail} from './brevo.mjs';
+import {BrevoError,validEmail} from './brevo.mjs';
+import {sendMail,mailConfigured} from './mail.mjs';
 import {readConfig,validateOrigin} from './config.mjs';
 const digest=s=>createHash('sha256').update(s).digest('hex');
 const random=()=>randomBytes(32).toString('base64url');
@@ -41,7 +42,7 @@ export function createAccounts(config,providers={}){
   const publicUser=u=>({id:u.id,provider:u.provider,name:u.name});
   const issue=u=>{const token=random();q('INSERT INTO sessions VALUES(?,?,?)').run(digest(token),u.id,seconds()+30*86400);return {token,account:publicUser(u)};};
   const authenticate=req=>{const token=req.headers.authorization?.replace(/^Bearer /,'');if(!token||token.length>100)throw fault(401,'Logg inn på nytt');const u=q('SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?').get(digest(token),seconds());if(!u)throw fault(401,'Logg inn på nytt');return u;};
-  const sendEmail=providers.sendEmail??((email,code)=>sendLoginEmail(config,email,code));
+  const sendEmail=providers.sendEmail??((email,code)=>sendMail(config,email,code));
   let cleaned=0;
   const server=createServer(async(req,res)=>{
     try{
@@ -51,7 +52,7 @@ export function createAccounts(config,providers={}){
       if(req.headers.origin&&req.headers.origin!==base.origin)throw fault(403,'Ugyldig opprinnelse');
       limit('all:'+ip,1200,600);
       if(path==='/health'&&req.method==='GET')return json(res,200,{ok:true});
-      if(path==='/v1/config'&&req.method==='GET')return json(res,200,{email:!!(providers.sendEmail||(config.brevoKey&&config.senderEmail)),discord:false,sync:true});
+      if(path==='/v1/config'&&req.method==='GET')return json(res,200,{email:!!providers.sendEmail||mailConfigured(config),discord:false,sync:true});
       if(path==='/v1/auth/email/start'&&req.method==='POST'){
         const b=await body(req),email=emailOf(b.email);limit('email:'+email,5);limit('email-ip:'+ip,20);
         const id=random(),code=String(randomInt(10000000,100000000));
@@ -106,3 +107,4 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
     process.once('SIGTERM',stop);process.once('SIGINT',stop);
   }catch(error){console.error(error instanceof BrevoError?`ELIX accounts configuration: ${error.reason}`:error.message);process.exitCode=1;}
 }
+

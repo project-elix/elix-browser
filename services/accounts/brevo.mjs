@@ -1,6 +1,7 @@
 // This module runs only on the account server. Never import it into the desktop UI.
 const API = 'https://api.brevo.com/v3';
-export const validEmail = value => typeof value === 'string' && value.length <= 254 && /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value);
+// Accept unquoted dot-atoms only, so mail libraries cannot reinterpret the localpart.
+export const validEmail = value => typeof value === 'string' && value.length <= 254 && /^[\p{L}\p{N}\p{M}!#$%&'*+/=?^_`{|}~-]+(?:\.[\p{L}\p{N}\p{M}!#$%&'*+/=?^_`{|}~-]+)*@[^\s@<>(),;:\\"\[\]\x00-\x1f\x7f]+\.[^\s@<>(),;:\\"\[\]\x00-\x1f\x7f]+$/u.test(value);
 const escape = value => value.replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 
 export class BrevoError extends Error {
@@ -13,12 +14,16 @@ export class BrevoError extends Error {
 
 export function validateBrevo(config) {
   if (!config.brevoKey || /\s/.test(config.brevoKey)) throw new BrevoError('missing-api-key');
+  validateSender(config);
+}
+
+export function validateSender(config) {
   if (!validEmail(config.senderEmail)) throw new BrevoError('invalid-sender');
-  if (config.senderName && (config.senderName.length > 100 || /[\r\n]/.test(config.senderName))) throw new BrevoError('invalid-sender-name');
+  if (config.senderName && (typeof config.senderName !== 'string' || config.senderName.length > 100 || /[\x00-\x1f\x7f]/.test(config.senderName))) throw new BrevoError('invalid-sender-name');
 }
 
 export function loginMessage(config, email, code) {
-  validateBrevo(config);
+  validateSender(config);
   if (!validEmail(email) || !/^\d{8}$/.test(code)) throw new BrevoError('invalid-message');
   const name = config.senderName || 'ELIX Browser';
   return {
@@ -54,6 +59,7 @@ async function request(config, path, payload, fetchImpl) {
 }
 
 export async function sendLoginEmail(config, email, code, fetchImpl = fetch) {
+  validateBrevo(config);
   const result = await request(config, '/smtp/email', loginMessage(config, email, code), fetchImpl);
   if (typeof result?.messageId !== 'string' || !result.messageId) throw new BrevoError('missing-message-id');
   // Acceptance by Brevo is not proof of inbox delivery. Never return the message ID to the UI.
@@ -75,3 +81,4 @@ export async function checkBrevo(config, {sandbox = false, fetchImpl = fetch} = 
   }
   return {sender: 'active', sandbox, deliveryVerified: false};
 }
+

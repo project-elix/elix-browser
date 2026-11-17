@@ -1,0 +1,7 @@
+{
+  "name": "elix-browser-accounts",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=24"},
+  "dependencies": {"nodemailer": "10.6.0"}
+}

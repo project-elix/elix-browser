@@ -1,4 +1,4 @@
-import {validateBrevo} from './brevo.mjs';
+import {validateMail} from './mail.mjs';
 
 export function validateOrigin(value, development = false) {
   let url;
@@ -22,11 +22,18 @@ export function readConfig(env = process.env) {
     publicUrl: base.origin, pepper, development, port,
     database: env.DATABASE_PATH || './data/accounts.sqlite',
     brevoKey: env.BREVO_API_KEY?.trim(),
+    mailTransport: env.MAIL_TRANSPORT || 'brevo-api',
+    smtpHost: env.SMTP_HOST?.trim(),
+    smtpPort: Number(env.SMTP_PORT ?? 587),
+    smtpUser: env.SMTP_USER,
+    smtpPassword: env.SMTP_PASSWORD,
     senderEmail: env.BREVO_SENDER_EMAIL?.trim().toLowerCase(),
     senderName: env.BREVO_SENDER_NAME?.trim() || 'ELIX Browser',
     trustProxy: env.TRUST_PROXY === '1',
   };
-  if (!development || config.brevoKey || config.senderEmail) validateBrevo(config);
+  if (!['brevo-api','smtp'].includes(config.mailTransport)) throw new Error('MAIL_TRANSPORT must be brevo-api or smtp');
+  if (!development || config.brevoKey || config.senderEmail || config.mailTransport === 'smtp') validateMail(config);
   if (!development && config.database === ':memory:') throw new Error('Production requires a persistent DATABASE_PATH');
   return config;
 }
+

@@ -25,6 +25,7 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
+      - run: npm ci --prefix services/accounts --omit=dev --ignore-scripts
       - run: npm test
       - run: npm run check:release
       - run: npm run build
@@ -89,3 +90,4 @@ jobs:
             windows-start.png
             native-smoke.txt
           if-no-files-found: warn
+

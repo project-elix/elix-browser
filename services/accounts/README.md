@@ -1,19 +1,21 @@
 # ELIX account service
 
-Node 24, built-in HTTP/SQLite/crypto, no runtime npm dependencies. This service is
-implemented but not deployed. Local tests inject the mail provider and verify that
-Discord routes stay disabled; they never send mail or contact a real Discord account.
+Node 24, built-in HTTP/SQLite/crypto and a separately pinned Nodemailer dependency
+for SMTP. This service supports Brevo SMTP or its HTTPS API. Local tests inject
+the mail provider or use a loopback SMTP server and verify that Discord routes
+stay disabled; they never send real mail or contact a real Discord account.
 
 Run tests from the repository root:
 
 ```sh
+npm ci --prefix services/accounts --omit=dev --ignore-scripts
 npm run test:accounts
 ```
 
 Provision one persistent server with TLS reverse proxy, a protected data directory,
 backups and a dedicated unprivileged service account. Copy `.env.example` to a
 server-only environment file; set a real HTTPS origin, a cryptographically random
-AUTH_PEPPER (at least 32 characters), the existing Brevo API key and verified sender.
+AUTH_PEPPER (at least 32 characters), the existing Brevo credentials and verified sender.
 Do not paste secrets into commits, logs or the frontend.
 
 Discord login is disabled in both the desktop and service, even if old Discord
@@ -77,14 +79,26 @@ to the existing server after confirming its hostname, TLS setup and Node locatio
 `accounts.projectelix.no` is a possible hostname, not a domain already configured.
 
 The membership source documents SMTP variables (`APP_SMTP_HOST`, `APP_SMTP_PORT`,
-`APP_SMTP_USER`, `APP_SMTP_PASSWORD`, `APP_MAIL_FROM`). This browser service currently
-uses Brevo's **HTTPS API**, so its `BREVO_API_KEY` must be an API key for the existing
-Brevo account, not an SMTP password. Check the actual protected server configuration:
-if an API key already exists, supply that value to the new service's protected
-environment; if the membership server only has SMTP credentials, an API key must be
-configured or an SMTP adapter added before activation. Do not import the membership
-service's entire environment into this process. Keep its database, session secrets
-and existing mail configuration separate from the browser account service.
+`APP_SMTP_USER`, `APP_SMTP_PASSWORD`, `APP_MAIL_FROM`). Reuse those protected server
+values by setting `MAIL_TRANSPORT=smtp` and mapping them to `SMTP_HOST`, `SMTP_PORT`,
+`SMTP_USER`, `SMTP_PASSWORD`, and `BREVO_SENDER_EMAIL` respectively. Set
+`BREVO_SENDER_NAME=ELIX Browser`. For the existing Brevo relay use
+`SMTP_HOST=smtp-relay.brevo.com` and `SMTP_PORT=587`. No API key is required in SMTP
+mode. Copy only these mail fields; do not import the membership service's entire
+environment or change its existing configuration.
+
+SMTP requires STARTTLS on port 587 (and other explicit ports), or implicit TLS on
+465, with certificate verification and at least TLS 1.2. Authentication is required;
+there is no plaintext fallback. A send has an 18-second deadline that aborts its
+connection, bounded connection/greeting/socket timeouts, and no automatic retry
+because a timeout can follow provider acceptance. Provider acceptance does not
+prove inbox delivery. Raw SMTP responses, credentials and login codes are never
+logged. SMTP credentials remain server-only.
+
+The default `MAIL_TRANSPORT=brevo-api` preserves existing API deployments and uses
+`BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, and `BREVO_SENDER_NAME`. An SMTP password is
+not an API key. Invalid configuration fails at startup; `/v1/config` reports the
+selected provider's configuration, not a live mail check.
 
 Deployment access is still required. The accessible membership repository describes
 deployment preparation and does not expose live server configuration or an active
@@ -101,7 +115,8 @@ actual location/access is available; no new hosting account is needed.
    /usr/bin/node --version  # must be Node 24
    getent passwd elix-accounts || sudo useradd --system --home /var/lib/elix-accounts --shell /usr/sbin/nologin elix-accounts
    sudo install -d -m 0755 /opt/elix-accounts
-   sudo install -m 0644 server.mjs config.mjs brevo.mjs check-brevo.mjs /opt/elix-accounts/
+   sudo install -m 0644 server.mjs config.mjs brevo.mjs smtp.mjs mail.mjs check-mail.mjs check-brevo.mjs package.json package-lock.json /opt/elix-accounts/
+   sudo npm ci --prefix /opt/elix-accounts --omit=dev --ignore-scripts
    sudo install -m 0644 deploy/elix-accounts.service /etc/systemd/system/elix-accounts.service
    # First installation only; never overwrite an existing environment file.
    sudo sh -c 'test -e /etc/elix-accounts.env || install -m 0600 .env.example /etc/elix-accounts.env'
@@ -110,25 +125,29 @@ actual location/access is available; no new hosting account is needed.
 
 3. In that server-only file, set `PUBLIC_URL` to the chosen HTTPS origin,
    `DATABASE_PATH=/var/lib/elix-accounts/accounts.sqlite`, `PORT=3210`,
-   `TRUST_PROXY=1`, and the existing verified `BREVO_SENDER_EMAIL` and
-   `BREVO_API_KEY`. Keep the key out of chat, GitHub variables, logs and the desktop.
+   `TRUST_PROXY=1`, the existing verified `BREVO_SENDER_EMAIL`, and the selected
+   transport's credentials as described above. Keep credentials out of chat,
+   GitHub variables, logs and the desktop.
    Generate `AUTH_PEPPER` locally on the server with
    `node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"`
    and copy it directly into that protected file. Keep it stable across restarts.
    Production refuses a missing provider, the placeholder pepper or an in-memory DB.
-4. Check Brevo credentials and the active sender without sending an email:
+4. Check the selected provider without sending an email:
 
    ```sh
-   sudo /usr/bin/node --env-file=/etc/elix-accounts.env /opt/elix-accounts/check-brevo.mjs
-   # Optional API-format test: Brevo drops this dummy message, no mail is delivered.
+   sudo /usr/bin/node --env-file=/etc/elix-accounts.env /opt/elix-accounts/check-mail.mjs
+   # API mode only, optional: Brevo drops this dummy message, no mail is delivered.
    sudo /usr/bin/node --env-file=/etc/elix-accounts.env /opt/elix-accounts/check-brevo.mjs --sandbox
    ```
 
-   The first command only reads `/v3/senders`. The second also checks the exact
-   transactional payload with Brevo's `X-Sib-Sandbox: drop` message header. Neither
-   creates a login code or proves inbox delivery. Check Brevo's sending-domain
-   authentication and the server's allowed IP in Brevo if required by the account.
-   Failure diagnostics never print the provider response, API key or code.
+   In SMTP mode the first command checks DNS, TCP, verified TLS and SMTP
+   authentication only. SMTP cannot verify that Brevo will accept the sender;
+   check its approved sender/domain in Brevo and then confirm real delivery.
+   In API mode the first command reads `/v3/senders` to check the active sender.
+   The optional API command also checks the transactional payload with Brevo's
+   `X-Sib-Sandbox: drop` header. Neither creates a login challenge or proves inbox
+   delivery. Check the server's allowed IP in Brevo if required by the account.
+   Failure diagnostics never print provider responses, credentials or codes.
 5. Add a separate Nginx vhost from `deploy/nginx.conf.example`, replacing the example
    hostname and certificate paths. Its `X-Forwarded-For` **overwrites** client input.
    It assumes no extra CDN/load balancer; if one exists, configure trusted client IP
@@ -167,7 +186,9 @@ Keep one service instance. Restart after code/config changes; do not replace its
 directory. No live server, sender or DNS was modified while preparing these files.
 
 Primary API references used:
+- https://nodemailer.com/smtp
 - https://developers.brevo.com/docs/send-a-transactional-email
 - https://developers.brevo.com/reference/get-senders
 - https://developers.brevo.com/docs/using-sandbox-mode
 - https://github.com/discord/discord-api-docs/blob/main/developers/topics/oauth2.mdx
+
