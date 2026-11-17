@@ -545,9 +545,14 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
         x >= 50. && x <= 65.
     })?;
     shell
-        .eval("document.querySelector('.rail [aria-label=\"Innstillinger\"]').click()")
+        .eval("document.querySelector('.gear-trigger').click()")
         .map_err(|e| e.to_string())?;
-    wait(|| shell_bool(app, "!!document.querySelector('.settings-nav')").unwrap_or(false))?;
+    wait(|| shell_bool(app, "!!document.querySelector('.gear-panel') && document.querySelector('.gear-trigger').getAttribute('aria-expanded')==='true'").unwrap_or(false))?;
+    if app.state::<AppState>().session.lock().unwrap().active != remote {
+        return Err("Single gear click navigated away instead of opening quick settings".into());
+    }
+    shell.eval("document.querySelector('.gear-settings').click()").map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "!!document.querySelector('.settings-nav') && !document.querySelector('.gear-panel')").unwrap_or(false))?;
     let settings_id = app.state::<AppState>().session.lock().unwrap().active.clone();
     if settings_id == remote || app.get_webview(remote).is_none()
         || !view_bool(&original, "window.__elixSettingsSource==='preserved'")? {
@@ -772,6 +777,20 @@ pub fn start(app: AppHandle) {
     });
 }
 #[cfg(windows)]
+fn open_split_controls(app: &AppHandle) -> Result<(), String> {
+    let shell = app.get_webview("shell").ok_or("Missing shell for quick settings")?;
+    // Alpha 8 keeps controls behind the bottom gear. Native page focus closes
+    // that panel, so reopen it after the shortcut before inspecting its state.
+    shell.set_focus().map_err(|e| e.to_string())?;
+    shell.eval("(()=>{const gear=document.querySelector('.gear-trigger');if(gear?.getAttribute('aria-expanded')!=='true')gear?.click()})()")
+        .map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "!!document.querySelector('.gear-section-toggle[aria-controls=\"gear-split\"]')").unwrap_or(false))?;
+    shell.eval("(()=>{const section=document.querySelector('.gear-section-toggle[aria-controls=\"gear-split\"]');if(section?.getAttribute('aria-expanded')!=='true')section?.click()})()")
+        .map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "document.querySelector('#gear-split')?.getClientRects().length>0").unwrap_or(false))?;
+    Ok(())
+}
+#[cfg(windows)]
 fn native_split_shortcut(app: &AppHandle, tab_id: &str, enabled: bool) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
@@ -811,6 +830,7 @@ fn native_split_shortcut(app: &AppHandle, tab_id: &str, enabled: bool) -> Result
     // Hold both modifiers until the native WebView accelerator reaches the shell.
     wait(|| app.state::<AppState>().session.lock().unwrap().split.is_some() == enabled)?;
     drop(held_keys);
+    open_split_controls(app)?;
     wait(|| {
         shell_bool(app, "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.includes('Avslutt delt visning'))")
             .is_ok_and(|visible| visible == enabled)

@@ -178,6 +178,7 @@ try {
  await library.getByRole('button',{name:'Bokmerkegruppe Spill',exact:true}).click({button:'right'});
  await library.getByRole('menuitem',{name:'Fjern gruppe – behold bokmerker',exact:true}).click();
  await page.waitForFunction(()=>!window.__uiTest.libraries['test-profile'].groups.includes('Spill'));
+ await library.getByRole('button',{name:'Bokmerkegruppe Spill',exact:true}).waitFor({state:'hidden'});
  assert.equal(await page.evaluate(()=>window.__uiTest.libraries['test-profile'].items.length),2,'removing group preserves all bookmarks');
  assert.equal(await page.evaluate(()=>window.__uiTest.libraries['test-profile'].items.find(i=>i.id===1).group),'');
  await bookmark.focus();await page.keyboard.press('Shift+F10');
@@ -194,6 +195,7 @@ try {
  await page.waitForFunction(n=>window.__uiTest.state.session.tabs.length===n+1,countBeforeOpen);
  assert.equal(await page.evaluate(()=>window.__uiTest.state.session.tabs.at(-1).url),'https://projectelix.no/');
  assert.equal(await page.evaluate(()=>window.__uiTest.state.session.tabs.find(t=>t.id==='original').url),'https://example.com/form');
+ await page.locator('.native-view').waitFor();
  // The toolbar context panel pushes native content down and stays inside shell bounds.
  const toolbar=page.locator('.bookmark-collection-toolbar');
  await toolbar.locator('.bookmark-open').filter({hasText:'ELIX saved'}).click({button:'right'});
@@ -201,11 +203,13 @@ try {
  const actionsBox=await toolbar.locator('.bookmark-actions').boundingBox(),nativeBox=await page.locator('.native-view').boundingBox();
  assert.ok(actionsBox.y+actionsBox.height<=nativeBox.y+1,'bookmark menu stays above native webpage');
  await page.keyboard.press('Escape');
+ await toolbar.getByRole('menu',{name:'Bokmerkevalg',exact:true}).waitFor({state:'hidden'});
  assert.equal(await toolbar.getByRole('menu',{name:'Bokmerkevalg',exact:true}).count(),0,'Escape closes bookmark menu');
  // Profile UI refresh must never reuse the previous profile bookmarks/groups.
  await page.locator('button.profile-avatar[title="Profiler"]').click();
  await page.locator('.profile-card').filter({has:page.getByText('Andre',{exact:true})}).click();
  await page.waitForFunction(()=>window.__uiTest.state.profile==='other-profile');
+ await page.locator('.profile-card.current').filter({has:page.getByText('Andre',{exact:true})}).waitFor();
  await page.getByRole('button',{name:'Bokmerker',exact:true}).click();
  await library.locator('.bookmark-open').filter({hasText:'Other profile bookmark'}).waitFor();
  assert.equal(await library.locator('.bookmark-open').filter({hasText:'ELIX saved'}).count(),0);
