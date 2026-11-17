@@ -1005,6 +1005,49 @@ fn native_view_visible(view: &tauri::Webview) -> Result<bool, String> {
 }
 
 #[cfg(windows)]
+fn native_child_geometry(view: &tauri::Webview, window: &tauri::Window) -> Result<serde_json::Value, String> {
+    use windows::Win32::{
+        Foundation::{HWND, POINT, RECT},
+        Graphics::Gdi::MapWindowPoints,
+        UI::WindowsAndMessaging::{GetClientRect, GetParent},
+    };
+    let expected_parent = window.hwnd().map_err(|e| e.to_string())?.0 as isize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    view.with_webview(move |platform| {
+        let result = (|| -> windows::core::Result<serde_json::Value> {
+            unsafe {
+                let expected_parent = HWND(expected_parent as _);
+                let controller = platform.controller();
+                let mut container = HWND::default();
+                controller.ParentWindow(&mut container)?;
+                let actual_parent = GetParent(container)?;
+                let mut child_rect = RECT::default();
+                let mut parent_rect = RECT::default();
+                let mut controller_rect = RECT::default();
+                GetClientRect(container, &mut child_rect)?;
+                GetClientRect(expected_parent, &mut parent_rect)?;
+                controller.Bounds(&mut controller_rect)?;
+                let mut origin = [POINT { x: 0, y: 0 }];
+                MapWindowPoints(Some(container), Some(expected_parent), &mut origin);
+                let child_size = [child_rect.right - child_rect.left, child_rect.bottom - child_rect.top];
+                let parent_size = [parent_rect.right - parent_rect.left, parent_rect.bottom - parent_rect.top];
+                let controller_size = [controller_rect.right - controller_rect.left, controller_rect.bottom - controller_rect.top];
+                Ok(serde_json::json!({
+                    "fills_parent": actual_parent == expected_parent && origin[0].x == 0 && origin[0].y == 0
+                        && parent_size[0] > 0 && parent_size[1] > 0 && child_size == parent_size
+                        && controller_rect.left == 0 && controller_rect.top == 0 && controller_size == parent_size,
+                    "parent": actual_parent.0 as usize, "expected_parent": expected_parent.0 as usize,
+                    "origin": [origin[0].x, origin[0].y], "child_size": child_size, "parent_size": parent_size,
+                    "controller_origin": [controller_rect.left, controller_rect.top], "controller_size": controller_size,
+                }))
+            }
+        })();
+        let _ = tx.send(result.map_err(|e| e.to_string()));
+    }).map_err(|e| e.to_string())?;
+    rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
 fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), String> {
     use windows::Win32::UI::{
         Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, INPUT_KEYBOARD, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, KEYBDINPUT, KEYEVENTF_KEYUP, VK_ESCAPE},
@@ -1069,7 +1112,11 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     wait(|| view.window().label() == "media-player")?;
     let player = app.get_window("media-player").ok_or("Missing miniplayer window")?;
     player.set_size(tauri::LogicalSize::new(720., 440.)).map_err(|e| e.to_string())?;
-    wait(|| view.position().is_ok_and(|p| p.x == 0 && p.y == 0) && view.size().ok() == player.inner_size().ok())?;
+    // Pinned Wry 0.57.2 keeps the original parent in its child-view position()
+    // getter after reparent. Check actual HWND parent/origin and both the host
+    // client rect and WebView2 viewport, preserving the full-window requirement.
+    wait(|| native_child_geometry(&view, &player).is_ok_and(|geometry| geometry["fills_parent"] == true))
+        .map_err(|_| format!("Miniplayer native geometry mismatch: {:?}", native_child_geometry(&view, &player)))?;
     if peer.window().label() != "main" || !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Miniplayer recreated media or moved an unrelated view".into()); }
     app.state::<AppState>().permissions_visible.store(true, std::sync::atomic::Ordering::SeqCst);
     browser::organization::layout(app)?;
