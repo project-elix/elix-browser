@@ -45,5 +45,6 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
+      - run: npm ci --prefix services/accounts --omit=dev --ignore-scripts
       - run: npm test
       - run: node scripts/resume-publication.mjs

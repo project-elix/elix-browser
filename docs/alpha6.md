@@ -1,10 +1,12 @@
 # Alpha 6 — 0.1.2-dev.6
 
-Development branch based on published Beta 1. Not yet a signed or published release.
-The patch version is higher than Beta 1 so the updater can offer it on Developer
-when a qualified Alpha 6 release is eventually published. Beta 1 remains available.
+Alpha 6 is intended for the Developer channel. Its version is higher than
+published Beta 1 so the updater can offer it to users who select Developer.
+Beta and Stable channel metadata are unchanged by an Alpha 6 publication.
+The public installer and updater metadata must come from the protected signed
+release workflow; ordinary CI installers are development test artifacts.
 
-## Implemented in this branch
+## Features
 
 - Bookmark PNG favicons from WebView2's fetched icon stream, stored in SQLite and
   shown in the toolbar, sidebar and bookmark list. Imported/old bookmarks acquire
@@ -30,40 +32,43 @@ when a qualified Alpha 6 release is eventually published. Beta 1 remains availab
   window acknowledges startup. Active downloads block transfer. Moving reloads
   the URL, so unsubmitted form state and in-page navigation history do not transfer.
   Private moves start a fresh private session. Physical two-monitor and mixed-DPI
-  acceptance remains required before release.
+  behavior still needs manual acceptance testing.
 - Each window has a separate in-memory session and persisted session key. They
   share the selected profile's ordinary site data, bookmarks and permission rules.
   Settings → Profiles → Recover tabs from other windows restores saved tabs from
   windows whose owner process is no longer running. Private tabs are never included.
 
-## Accounts and sync: code ready for integration, service not deployed
+## Accounts and sync
 
-Email one-time-code login uses Brevo's transactional API. Provider secrets never
-enter React or the Windows executable. A desktop session token is stored with
-Windows DPAPI, bound to its profile and configured service origin. Credential
-replacement is atomic; damaged credentials allow a fresh login without deleting
-local profile data.
+Email one-time-code login uses Brevo SMTP on the existing ELIX server. Provider
+secrets never enter React or the Windows executable. A desktop session token is
+stored with Windows DPAPI, bound to its profile and configured service origin.
+Credential replacement is atomic; damaged credentials allow a fresh login
+without deleting local profile data.
 
-Discord login is disabled in both the desktop and service. Review found that the
-initial polling flow could let someone forward their authorization link to another
-person and collect that person's completed login. It must be replaced by a native
-callback bound to the initiating ELIX instance before Discord can be enabled.
+The Node 24 account service is deployed at **https://medlem.projectelix.no** through
+isolated Nginx routes, with **no-reply@projectelix.no** as sender. The existing
+membership application keeps its routes. HTTPS health/config checks and verified
+SMTP TLS/authentication passed on 17 November 2026. One authorized email-code
+request was accepted by the SMTP relay; actual inbox receipt and a complete
+Windows login/two-device sync flow remain unverified.
 
-The standalone Node 24 service is in `services/accounts`; see its README for the
-required server configuration. The account UI is explicitly unavailable until a
-real HTTPS `ELIX_ACCOUNTS_URL` is embedded at build time. No Brevo sender, key,
-Discord application, callback registration or production domain was invented or
-changed. Account linking is not implemented.
+Windows CI and signed release builds default to this verified HTTPS origin.
+A nonempty `ELIX_ACCOUNTS_URL` repository variable overrides it. Local builds
+without an embedded origin show account login as unavailable. No provider secret
+is a desktop build variable. Account linking is not implemented.
 
-Brevo activation preparation now includes Norwegian HTML/plain-text login mail,
-sanitized provider errors, rejected redirects, a sender/API check with optional
-non-delivering sandbox mode, and systemd/Nginx examples for the existing ELIX server.
-Production fails startup on missing email configuration or placeholder secrets.
-The Windows CI and release jobs accept the public `ELIX_ACCOUNTS_URL` repository
-variable. The chosen host is the server running `medlem.projectelix.no`, with
-`no-reply@projectelix.no` as sender. Deployment access, the server-side Brevo API key,
-live sender verification and the account-service HTTPS hostname are still pending;
-mock tests and sandbox acceptance do not prove actual inbox delivery.
+The service uses a separate restricted system identity and database. Its
+environment file is root-owned with mode 0600, state directory mode 0700 and
+SQLite files mode 0600. Missing production mail configuration fails startup.
+Provider errors are sanitized, SMTP requires verified TLS and authentication, and
+failed mail requests remove their login challenge. See
+[`services/accounts/README.md`](../services/accounts/README.md) for deployment,
+transport checks and remaining acceptance work. Brevo's HTTPS API remains an
+alternative transport.
+
+Discord login remains disabled. It requires a native callback bound to the
+initiating ELIX instance before it can be enabled.
 
 Sync is optional and manual: upload or fetch-and-merge bookmarks and appearance.
 AES-256-GCM, fresh 16-byte salt/12-byte nonce, PBKDF2-SHA256 at 600,000 iterations.
@@ -85,40 +90,41 @@ uses native mouse input to drag out after a single fast movement, checks shared
 cookies and transferred tab metadata, verifies saved-session recovery,
 and checks that a failed child startup preserves the source tab.
 
-A local Chromium visual-check attempt was blocked by the environment's socket
-restriction. Compilation and unit tests do not establish visual or multi-monitor
-acceptance. No release channel metadata or public download site has been changed.
+Compilation and automated tests do not establish physical multi-monitor,
+mixed-DPI or complete account-flow acceptance. Inspect the production signed
+installer's screenshot as part of publication.
 
 Schema v2 adds bookmark icons, stored site permissions and session backups. A v1
 SQLite backup is made before migration. Older Beta 1 refuses this newer schema;
 there is no in-place downgrade claim. Do not test by deleting application data.
 
-## Local verification — 16 November 2026
+## Verification — 17 November 2026
 
-- TypeScript and Vite production build passed.
-- 23 frontend/release tests and 11 account/Brevo tests passed (mock mail only).
-- Brevo preparation: real local service startup, `/health` and `/v1/config`, private
-  SQLite/WAL permissions and graceful shutdown passed without requesting mail.
-  The systemd unit syntax passed with the local Node executable path substituted;
-  `/usr/bin/node` and the Nginx template still require validation on the actual server.
-- 13 storage/security/download core tests passed, including v1 → v2 migration,
-  atomic invalid-import rollback, duplicate suppression, profile isolation and
-  bounded session fallback snapshots.
-- Windows GNU target check passed with `--features smoke-tests --tests`.
-- Version consistency and `git diff --check` passed.
-- Upload and Windows testing were explicitly authorized. The implementation is on
-  branch `alpha-6` in [draft PR #1](https://github.com/project-elix/elix-browser/pull/1).
-- [Initial Windows CI](https://github.com/project-elix/elix-browser/actions/runs/43957080849)
-  built the installer, launched the installed application and passed the native
-  WebView2 integration suite. The expanded suite now also checks Windows registry
-  associations and actual mouse-driven window transfer. Test windows share the same
-  WebView2 environment options as their parent. Runtime acceptance is tied to the
-  current PR check result and its native-smoke.txt artifact.
-- 23 Rust unit tests passed on Windows, including split state and DPAPI credential
-  replacement/recovery. Installed-app startup and default-browser registration passed.
-- No signed release, updater channel change or account-service deployment has occurred.
+[Windows CI 44](https://github.com/project-elix/elix-browser/actions/runs/44064815199)
+passed for account-activation commit
+`1cf51ef024a5427716dadf42f83b2ddec98c96f9`:
 
-Before release: run Windows CI; inspect the actual UI; test pointer drag out onto
-  a second monitor (including negative coordinates and mixed DPI), confirm the
-  original tab survives a failed new-window startup, test Windows Default Apps,
-  and exercise real provider login/two-device sync once the service is configured.
+- Frontend tests/build, version checks, 29 account/deployment tests and 23 Rust
+  tests passed.
+- The NSIS test installer built, installed and started. Native WebView2 checks
+  passed, including tab transfer/recovery, sidebar and content bounds, profile
+  isolation, downloads and remote IPC restrictions.
+- The idle CPU/memory budget check passed. This is not a comparison with other browsers.
+- Build logs confirmed `ELIX_ACCOUNTS_URL=https://medlem.projectelix.no`.
+- The deployed service passed public HTTPS health/config checks and SMTP
+  authentication. Provider acceptance is not proof of inbox delivery.
+
+The protected release workflow separately runs native verification and a
+disposable-key signed installer upgrade round trip, then builds the production
+installer with the existing permanent updater key. That round trip builds both
+test versions from the current source; it does not prove an upgrade from the
+actual published Beta 1 binary. The schema-v1 fixture test separately verifies
+migration backup and bookmark preservation.
+
+Remaining manual acceptance: physical second-monitor drag with negative
+coordinates/mixed DPI, Windows Default Apps selection, actual inbox delivery,
+Windows login/logout/relogin and two-device encrypted sync, including wrong
+passphrases and competing edits. These checks have not been claimed complete.
+
+Tauri updater signatures verify updates inside ELIX. Windows Authenticode signing
+is not configured, so Windows publisher/SmartScreen warnings may still appear.
