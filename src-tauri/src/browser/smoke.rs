@@ -300,7 +300,7 @@ fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
     })()"#).map_err(|e| e.to_string())?;
     let (tx, rx) = std::sync::mpsc::channel();
     shell.eval_with_callback(
-        format!("(()=>{{const tab=document.querySelector('{selector}');const button=tab?.querySelector('[role=tab]');if(!button)return null;button.scrollIntoView({{block:'nearest',inline:'nearest'}});const r=button.getBoundingClientRect();window.__elixDragProbe=null;tab.addEventListener('pointerdown',e=>{{window.__elixDragProbe={{target:e.target,id:e.pointerId}}}},{{once:true}});return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()"),
+        format!("(()=>{{const tab=document.querySelector('{selector}');const button=tab?.querySelector('[role=tab]');if(!button)return null;button.scrollIntoView({{block:'nearest',inline:'nearest'}});const r=button.getBoundingClientRect();window.__elixDragProbe=null;tab.addEventListener('pointerdown',e=>{{window.__elixDragProbe={{target:e.target.closest('button')||tab,id:e.pointerId}}}},{{once:true}});return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()"),
         move |value| { let _ = tx.send(value); },
     ).map_err(|e| e.to_string())?;
     let point: serde_json::Value = serde_json::from_str(
@@ -325,6 +325,8 @@ fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
     if !mouse_button(MOUSEEVENTF_LEFTDOWN) {
         return Err("Could not press native mouse button".into());
     }
+    // The stable button owns capture even when the native hit target is its
+    // SVG icon. Assert real capture before the first movement, as before.
     wait(|| {
         shell_bool(app, "!!window.__elixDragProbe && window.__elixDragProbe.target.hasPointerCapture(window.__elixDragProbe.id)").unwrap_or(false)
     }).map_err(|e| format!("{e}\n{}", drag_diagnostics(app, id)))?;
