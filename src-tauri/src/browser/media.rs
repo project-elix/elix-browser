@@ -6,6 +6,34 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 const PLAYER_WINDOW: &str = "media-player";
+const PRESENT_MEDIA: &str = include_str!("media-presentation.js");
+const RESTORE_MEDIA: &str = "(()=>{const p=window.__elixMediaPresentation;return p&&typeof p.restore==='function'?p.restore():true})()";
+
+// Only open() waits for JavaScript, from the authorized async shell command or
+// the smoke worker. Cleanup paths also run on the UI thread and must never wait.
+fn present_media(view: &tauri::Webview) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    view.eval_with_callback(PRESENT_MEDIA, move |value| { let _ = tx.send(value); })
+        .map_err(|e| e.to_string())?;
+    let result = rx.recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "Nettsiden svarte ikke da mediespilleren skulle åpnes".to_string())
+        .and_then(|value| serde_json::from_str::<Value>(&value).map_err(|_| "Kunne ikke lese mediespilleren".to_string()));
+    match result {
+        Ok(value) if value["ok"] == true => Ok(()),
+        result => {
+            // FIFO evaluation also removes a presentation whose completion was
+            // delayed past the timeout. No popout ownership was granted yet.
+            let _ = view.eval(RESTORE_MEDIA);
+            match result {
+                Ok(value) if value["reason"] == "no-media" => Err("Fant ingen tilgjengelig video eller lydspiller. Start avspillingen først. Innebygde spillere fra andre nettsteder kan kreve at du åpner originalnettstedet.".into()),
+                Err(error) => Err(error),
+                _ => Err("Denne mediespilleren kunne ikke vises alene. Fanen er beholdt.".into()),
+            }
+        }
+    }
+}
+
+fn restore_media(view: &tauri::Webview) { let _ = view.eval(RESTORE_MEDIA); }
 
 #[inline]
 fn checkpoint(stage: &str) {
@@ -122,6 +150,8 @@ pub struct State {
     // Remember the previous mode until that event restores it after Tauri's handler.
     exit_restore: Option<Fullscreen>,
     generation: u64,
+    presentation_generation: u64,
+    pending_player: Option<(String, u64)>,
 }
 
 pub fn snapshot(app: &AppHandle) -> Value {
@@ -306,11 +336,49 @@ pub fn before_activate(app: &AppHandle, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn before_navigation(app: &AppHandle, id: &str) -> Result<(), String> { exit(app, id) }
+pub fn before_navigation(app: &AppHandle, id: &str) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut media = state.media.lock().unwrap();
+        if media.pending_player.as_ref().is_some_and(|(pending, _)| pending == id) { media.pending_player = None; }
+    }
+    exit(app, id)?;
+    if is_player(app, id) { return_to_browser(app)?; }
+    Ok(())
+}
+
+/// Page-initiated navigation may replace the media document. Hide the separate
+/// window immediately, then return ownership on a worker without blocking UI.
+#[cfg(windows)]
+pub fn navigation_started(app: &AppHandle, id: &str) {
+    {
+        let state = app.state::<AppState>();
+        let mut media = state.media.lock().unwrap();
+        if media.pending_player.as_ref().is_some_and(|(pending, _)| pending == id) { media.pending_player = None; }
+    }
+    let _ = exit(app, id);
+    if !is_player(app, id) { return; }
+    if let Some(window) = app.get_window(PLAYER_WINDOW) { let _ = window.hide(); }
+    if let Some(player) = app.state::<AppState>().media.lock().unwrap().player.as_mut() {
+        if player.id == id { player.hidden = true; }
+    }
+    let app = app.clone();
+    let id = id.to_owned();
+    tauri::async_runtime::spawn(async move {
+        if is_player(&app, &id) {
+            if let Err(error) = perform(&app, "return", None) { let _ = app.emit_to("shell", "notice", error); }
+        }
+    });
+}
 
 /// Release presentation state before the owning tab is destroyed or recovered.
 pub fn release(app: &AppHandle, id: &str) -> Result<(), String> {
     checkpoint("media.release.begin");
+    {
+        let state = app.state::<AppState>();
+        let mut media = state.media.lock().unwrap();
+        if media.pending_player.as_ref().is_some_and(|(pending, _)| pending == id) { media.pending_player = None; }
+    }
     let _ = exit(app, id);
     let removed = {
         let state = app.state::<AppState>();
@@ -321,6 +389,7 @@ pub fn release(app: &AppHandle, id: &str) -> Result<(), String> {
         // Teardown/recovery must remain possible even after a controller crash.
         // Returning a live player is strict; destroying one clears ownership first.
         if let Some(view) = app.get_webview(id) {
+            restore_media(&view);
             checkpoint("media.release.reparent.begin");
             let reparented = app.get_window("main").is_some_and(|window| reparent_live(app, &view, &window).is_ok());
             checkpoint("media.release.reparent.end");
@@ -344,6 +413,7 @@ fn return_to_browser(app: &AppHandle) -> Result<Option<String>, String> {
         checkpoint("media.return.reparent.begin");
         reparent_live(app, &view, &main)?;
         checkpoint("media.return.reparent.end");
+        restore_media(&view);
     }
     app.state::<AppState>().media.lock().unwrap().player = None;
     checkpoint("media.return.ownership.cleared");
@@ -364,20 +434,68 @@ fn open(app: &AppHandle, id: &str) -> Result<(), String> {
         .find(|t| t.id == id && !t.url.starts_with("elix:")).cloned().ok_or("Åpne en nettside først")?;
     let view = app.get_webview(id).ok_or("Vekk fanen før du åpner minispilleren")?;
     if is_player(app, id) { return set_hidden(app, false); }
-    // Validate first, then return any existing player without restarting it.
-    return_to_browser(app)?;
+    // Find and isolate real media before moving native views. A page without
+    // accessible media never becomes a whole-website popout.
     exit(app, id)?;
-    let window = if let Some(window) = app.get_window(PLAYER_WINDOW) { window } else {
+    let generation = {
+        let state = app.state::<AppState>();
+        let mut media = state.media.lock().unwrap();
+        if media.pending_player.is_some() { return Err("En mediespiller er allerede i ferd med å åpnes".into()); }
+        media.presentation_generation = media.presentation_generation.wrapping_add(1);
+        let generation = media.presentation_generation;
+        media.pending_player = Some((id.into(), generation));
+        generation
+    };
+    let pending = || app.state::<AppState>().media.lock().unwrap().pending_player.as_ref()
+        .is_some_and(|(pending, current)| pending == id && *current == generation);
+    let abort = || {
+        let state = app.state::<AppState>();
+        let mut media = state.media.lock().unwrap();
+        if media.pending_player.as_ref().is_some_and(|(pending, current)| pending == id && *current == generation) {
+            media.pending_player = None;
+        }
+        drop(media);
+        restore_media(&view);
+    };
+    if let Err(error) = present_media(&view) { abort(); return Err(error); }
+    if !pending() { abort(); return Err("Nettsiden ble endret mens mediespilleren ble åpnet. Prøv igjen.".into()); }
+    if let Err(error) = return_to_browser(app) { abort(); return Err(error); }
+    let window_result = (|| -> Result<tauri::Window, String> { Ok(if let Some(window) = app.get_window(PLAYER_WINDOW) { window } else {
         tauri::window::WindowBuilder::new(app, PLAYER_WINDOW)
             .title("ELIX Minispiller").inner_size(640., 400.).min_inner_size(320., 180.)
             .always_on_top(true).visible(false).theme(Some(tauri::Theme::Dark))
             .build().map_err(|e| e.to_string())?
-    };
-    window.set_title(&format!("ELIX Minispiller · {}", tab.title)).map_err(|e| e.to_string())?;
+    }) })();
+    let window = match window_result { Ok(window) => window, Err(error) => { abort(); return Err(error); } };
+    if let Err(error) = window.set_title(&format!("ELIX Minispiller · {}", tab.title)) {
+        abort(); return Err(error.to_string());
+    }
+    if !pending() { abort(); return Err("Nettsiden ble endret mens mediespilleren ble åpnet. Prøv igjen.".into()); }
     checkpoint("media.open.reparent.begin");
-    reparent_live(app, &view, &window)?;
+    if let Err(error) = reparent_live(app, &view, &window) { abort(); return Err(error); }
     checkpoint("media.open.reparent.end");
-    app.state::<AppState>().media.lock().unwrap().player = Some(Player { id: id.into(), hidden: false });
+    let accepted = {
+        let state = app.state::<AppState>();
+        let mut media = state.media.lock().unwrap();
+        if media.pending_player.as_ref().is_some_and(|(pending, current)| pending == id && *current == generation) {
+            media.pending_player = None;
+            media.player = Some(Player { id: id.into(), hidden: false });
+            true
+        } else { false }
+    };
+    if !accepted {
+        abort();
+        let restored = app.get_window("main").is_some_and(|main| reparent_live(app, &view, &main).is_ok());
+        if !restored {
+            // Preserve an explicit return control if the native rollback fails,
+            // but do not display the navigated whole page in the player window.
+            app.state::<AppState>().media.lock().unwrap().player = Some(Player { id: id.into(), hidden: true });
+            emit(app);
+        }
+        let _ = window.hide();
+        let _ = super::organization::layout(app);
+        return Err("Nettsiden ble endret mens mediespilleren ble åpnet. Prøv igjen.".into());
+    }
     // Keep the return control available even if a later window/focus call fails.
     emit(app);
     let result = (|| -> Result<(), String> {
@@ -396,6 +514,7 @@ fn open(app: &AppHandle, id: &str) -> Result<(), String> {
       };
       super::activate(app, &next)?;
       layout(app)?;
+      window.unminimize().map_err(|e| e.to_string())?;
       window.set_focus().map_err(|e| e.to_string())?;
       view.set_focus().map_err(|e| e.to_string())?;
       super::persist(app)?;
@@ -417,7 +536,10 @@ fn set_hidden(app: &AppHandle, hidden: bool) -> Result<(), String> {
     if let Some(player) = app.state::<AppState>().media.lock().unwrap().player.as_mut() { player.hidden = hidden; }
     layout(app)?;
     if !hidden {
-        if let Some(window) = app.get_window(PLAYER_WINDOW) { window.set_focus().map_err(|e| e.to_string())?; }
+        if let Some(window) = app.get_window(PLAYER_WINDOW) {
+            window.unminimize().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+        }
     }
     emit(app);
     Ok(())
@@ -444,6 +566,7 @@ pub fn perform(app: &AppHandle, operation: &str, id: Option<&str>) -> Result<Val
 
 pub fn reset(app: &AppHandle) -> Result<(), String> {
     checkpoint("media.reset.begin");
+    app.state::<AppState>().media.lock().unwrap().pending_player = None;
     let fullscreen = app.state::<AppState>().media.lock().unwrap().fullscreen.clone();
     if let Some(fullscreen) = fullscreen { let _ = exit(app, &fullscreen.id); }
     let player = app.state::<AppState>().media.lock().unwrap().player.clone();

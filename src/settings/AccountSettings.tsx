@@ -90,7 +90,7 @@ export default function AccountSettings({profile,onRefresh,onError}:{profile:str
       const result=await call<{revision:number;envelope:Envelope|null}>('sync_get');
       if(!result.envelope){sessionStorage.setItem(revisionKey,String(result.revision));setMessage('Ingen synkroniserte data ennå.');return;}
       const data=await decrypt(result.envelope,phrase);if(!active.current)throw cancelled;
-      await rpc('sync_apply',{profile,items:data.items,appearance:data.appearance});if(!active.current)throw cancelled;
+      await rpc('sync_apply',{profile,items:data.items,groups:data.groups??[],appearance:data.appearance});if(!active.current)throw cancelled;
       sessionStorage.setItem(revisionKey,String(result.revision));setPhrase('');await onRefresh();if(active.current)setMessage('Bokmerkene er slått sammen og utseendet er hentet.');
      })}>Hent og slå sammen</button>
      <button className="subtle" disabled={busy} onClick={()=>void run(async()=>{const result=await call<{revision:number}>('sync_get');setConfirmDelete({revision:result.revision});})}>Slett fra serveren</button>

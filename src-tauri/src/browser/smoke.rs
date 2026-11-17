@@ -300,7 +300,7 @@ fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
     })()"#).map_err(|e| e.to_string())?;
     let (tx, rx) = std::sync::mpsc::channel();
     shell.eval_with_callback(
-        format!("(()=>{{const tab=document.querySelector('{selector}');const button=tab?.querySelector('[role=tab]');if(!button)return null;button.scrollIntoView({{block:'nearest',inline:'nearest'}});const r=button.getBoundingClientRect();window.__elixDragProbe=null;tab.addEventListener('pointerdown',e=>{{window.__elixDragProbe={{target:e.target,id:e.pointerId}}}},{{once:true}});return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()"),
+        format!("(()=>{{const tab=document.querySelector('{selector}');const button=tab?.querySelector('[role=tab]');if(!button)return null;button.scrollIntoView({{block:'nearest',inline:'nearest'}});const r=button.getBoundingClientRect();window.__elixDragProbe=null;tab.addEventListener('pointerdown',e=>{{window.__elixDragProbe={{target:e.target.closest('button')||tab,id:e.pointerId}}}},{{once:true}});return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()"),
         move |value| { let _ = tx.send(value); },
     ).map_err(|e| e.to_string())?;
     let point: serde_json::Value = serde_json::from_str(
@@ -325,6 +325,8 @@ fn drag_tab_outside(app: &AppHandle, id: &str) -> Result<(), String> {
     if !mouse_button(MOUSEEVENTF_LEFTDOWN) {
         return Err("Could not press native mouse button".into());
     }
+    // The stable button owns capture even when the native hit target is its
+    // SVG icon. Assert real capture before the first movement, as before.
     wait(|| {
         shell_bool(app, "!!window.__elixDragProbe && window.__elixDragProbe.target.hasPointerCapture(window.__elixDragProbe.id)").unwrap_or(false)
     }).map_err(|e| format!("{e}\n{}", drag_diagnostics(app, id)))?;
@@ -545,9 +547,14 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
         x >= 50. && x <= 65.
     })?;
     shell
-        .eval("document.querySelector('.rail [aria-label=\"Innstillinger\"]').click()")
+        .eval("document.querySelector('.gear-trigger').click()")
         .map_err(|e| e.to_string())?;
-    wait(|| shell_bool(app, "!!document.querySelector('.settings-nav')").unwrap_or(false))?;
+    wait(|| shell_bool(app, "!!document.querySelector('.gear-panel') && document.querySelector('.gear-trigger').getAttribute('aria-expanded')==='true'").unwrap_or(false))?;
+    if app.state::<AppState>().session.lock().unwrap().active != remote {
+        return Err("Single gear click navigated away instead of opening quick settings".into());
+    }
+    shell.eval("document.querySelector('.gear-settings').click()").map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "!!document.querySelector('.settings-nav') && !document.querySelector('.gear-panel')").unwrap_or(false))?;
     let settings_id = app.state::<AppState>().session.lock().unwrap().active.clone();
     if settings_id == remote || app.get_webview(remote).is_none()
         || !view_bool(&original, "window.__elixSettingsSource==='preserved'")? {
@@ -772,6 +779,20 @@ pub fn start(app: AppHandle) {
     });
 }
 #[cfg(windows)]
+fn open_split_controls(app: &AppHandle) -> Result<(), String> {
+    let shell = app.get_webview("shell").ok_or("Missing shell for quick settings")?;
+    // Alpha 8 keeps controls behind the bottom gear. Native page focus closes
+    // that panel, so reopen it after the shortcut before inspecting its state.
+    shell.set_focus().map_err(|e| e.to_string())?;
+    shell.eval("(()=>{const gear=document.querySelector('.gear-trigger');if(gear?.getAttribute('aria-expanded')!=='true')gear?.click()})()")
+        .map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "!!document.querySelector('.gear-section-toggle[aria-controls=\"gear-split\"]')").unwrap_or(false))?;
+    shell.eval("(()=>{const section=document.querySelector('.gear-section-toggle[aria-controls=\"gear-split\"]');if(section?.getAttribute('aria-expanded')!=='true')section?.click()})()")
+        .map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "document.querySelector('#gear-split')?.getClientRects().length>0").unwrap_or(false))?;
+    Ok(())
+}
+#[cfg(windows)]
 fn native_split_shortcut(app: &AppHandle, tab_id: &str, enabled: bool) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
@@ -811,6 +832,7 @@ fn native_split_shortcut(app: &AppHandle, tab_id: &str, enabled: bool) -> Result
     // Hold both modifiers until the native WebView accelerator reaches the shell.
     wait(|| app.state::<AppState>().session.lock().unwrap().split.is_some() == enabled)?;
     drop(held_keys);
+    open_split_controls(app)?;
     wait(|| {
         shell_bool(app, "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.includes('Avslutt delt visning'))")
             .is_ok_and(|visible| visible == enabled)
@@ -1135,6 +1157,7 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     main.set_fullscreen(prior_fullscreen).map_err(|e| e.to_string())?;
     wait(|| main.is_fullscreen().is_ok_and(|value| value == prior_fullscreen))?;
     browser::organization::split(app, None)?;
+    if !view_bool(&view, "(window.__elixMediaStyle=document.querySelector('video').style.cssText,window.__elixWrapperStyle=document.querySelector('#media-wrapper').style.cssText,true)")? { return Err("Cannot record original media styles".into()); }
     focus_before_move("first open")?;
     browser::media::perform(app, "open", Some(&id))?;
     wait(|| view.window().label() == "media-player")?;
@@ -1146,6 +1169,15 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     wait(|| native_child_geometry(&view, &player).is_ok_and(|geometry| geometry["fills_parent"] == true))
         .map_err(|_| format!("Miniplayer native geometry mismatch: {:?}", native_child_geometry(&view, &player)))?;
     if peer.window().label() != "main" || !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Miniplayer recreated media or moved an unrelated view".into()); }
+    wait(|| view_bool(&view, "(()=>{const v=document.querySelector('video'),r=v.getBoundingClientRect();return window.__elixMediaPresentation?.kind==='video'&&v.controls&&Math.abs(r.x)<2&&Math.abs(r.y)<2&&Math.abs(r.width-innerWidth)<2&&Math.abs(r.height-innerHeight)<2&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='hidden'})()").unwrap_or(false))
+        .map_err(|_| "Popout did not isolate video and fill the viewport through clipped/transformed ancestors".to_string())?;
+    if browser::media::perform(app, "open", Some(return_tab)).is_ok() || !browser::media::is_player(app, &id) {
+        return Err("Opening a page without media replaced the existing miniplayer".into());
+    }
+    player.minimize().map_err(|e| e.to_string())?;
+    wait(|| player.is_minimized().unwrap_or(false))?;
+    player.unminimize().map_err(|e| e.to_string())?;
+    wait(|| !player.is_minimized().unwrap_or(true))?;
     app.state::<AppState>().permissions_visible.store(true, std::sync::atomic::Ordering::SeqCst);
     browser::organization::layout(app)?;
     wait(|| !player.is_visible().unwrap_or(true))?;
@@ -1167,7 +1199,7 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     progress("media: return completed; before ownership wait");
     wait(|| view.window().label() == "main" && !browser::media::is_player(app, &id))?;
     progress("media: return ownership verified; before page state check");
-    if !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? { return Err("Returning miniplayer recreated or paused media".into()); }
+    if !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused&&!window.__elixMediaPresentation&&document.querySelector('video').style.cssText===window.__elixMediaStyle&&document.querySelector('#media-wrapper').style.cssText===window.__elixWrapperStyle&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='visible'&&!document.querySelector('[data-elix-media-surface]')")? { return Err("Returning miniplayer did not preserve playback and restore original page styles".into()); }
     progress("media: returned page verified; before reopen");
     focus_before_move("reopen")?;
     browser::media::perform(app, "open", Some(&id))?;
@@ -1180,6 +1212,18 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     wait(|| !browser::media::is_player(app, &id) && view.window().label() == "main" && !player.is_visible().unwrap_or(true))?;
     progress("media: reset ownership verified; before page state check");
     if !view_bool(&view, "window.__elixMediaToken==='original'")? { return Err("Reset lost the live player page before profile cleanup".into()); }
+    // Audio-only sites use the actual audio element and native controls; the
+    // page itself must remain hidden, and removing controls must be reversible.
+    if !view_bool(&view, "(()=>{document.querySelector('video').remove();const audio=document.createElement('audio');audio.muted=true;audio.style.width='123px';document.body.append(audio);window.__elixAudioElement=audio;window.__elixAudioContext=new AudioContext();const output=window.__elixAudioContext.createMediaStreamDestination();audio.srcObject=output.stream;return true})()")? { return Err("Cannot create audio-only fixture".into()); }
+    browser::media::perform(app, "open", Some(&id))?;
+    wait(|| view_bool(&view, "window.__elixMediaPresentation?.kind==='audio'&&document.querySelector('audio')===window.__elixAudioElement&&window.__elixAudioElement.controls&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='hidden'").unwrap_or(false))?;
+    browser::media::perform(app, "return", None)?;
+    if !view_bool(&view, "!window.__elixMediaPresentation&&!window.__elixAudioElement.controls&&window.__elixAudioElement.style.width==='123px'&&!!window.__elixAudioElement.srcObject")? { return Err("Audio popout replaced its stream or failed to restore native controls".into()); }
+    browser::media::perform(app, "open", Some(&id))?;
+    // A destination document can never remain visible as a whole-page popout.
+    view.navigate(format!("{origin}/first").parse().map_err(|_| "Invalid media navigation URL")?).map_err(|e| e.to_string())?;
+    wait(|| !browser::media::is_player(app, &id) && view.window().label() == "main" && !player.is_visible().unwrap_or(true))
+        .map_err(|_| "Page navigation retained whole-site miniplayer ownership".to_string())?;
     progress("media: reset page verified; before activate original");
     browser::activate(app, return_tab)?;
     progress("media: original activated; before fixture close");
@@ -1573,7 +1617,9 @@ fn serve_fixture(mut stream: std::net::TcpStream) {
     if request.starts_with("GET /media ") {
         let html = r#"<!doctype html><html><head><title>ELIX media fixture</title></head>
             <body style="margin:0;background:#151515"><canvas hidden width="320" height="180"></canvas>
-            <video muted playsinline controls style="width:100vw;height:100vh"></video>
+            <p id="page-chrome">Page navigation and recommendations must disappear in popout.</p>
+            <section id="media-wrapper" style="transform:translate(5px);contain:paint;overflow:hidden;width:70vw;height:60vh">
+            <video muted playsinline controls style="width:100vw;height:100vh"></video></section>
             <button style="position:fixed;inset:0;width:100vw;height:100vh">Play fullscreen fixture</button>
             <script>
             window.__elixMediaToken='original';window.__elixMediaTicks=0;

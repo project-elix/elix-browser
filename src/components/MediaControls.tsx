@@ -28,8 +28,8 @@ export default function MediaControls({active,tabs,compact,onError}:{active?:Tab
  };
  const player=tabs.find(tab=>tab.id===state.player?.id);
  return <section className={`rail-media ${compact?'rail-media-compact':''}`} aria-label="Minispiller">
-  <button className="rail-tool" title="Åpne denne fanen i minispiller" aria-label="Åpne denne fanen i minispiller" disabled={busy||!desktop||!active||active.url.startsWith('elix:')||active.suspended} onClick={()=>void action('open')}><PictureInPicture2 size={19}/><span>Minispiller</span></button>
-  {!compact&&!state.player&&<p>Flytt video- eller musikksiden til et lite vindu over andre programmer.</p>}
+  <button className="rail-tool" title="Åpne video eller musikk i minispiller" aria-label="Åpne video eller musikk i minispiller" disabled={busy||!desktop||!active||active.url.startsWith('elix:')||active.suspended} onClick={()=>void action('open')}><PictureInPicture2 size={19}/><span>Minispiller</span></button>
+  {!compact&&!state.player&&<p>Vis bare videoen eller musikken i et vindu som kan endres i størrelse og minimeres.</p>}
   {state.player&&<>
    {!compact&&<p className="media-title" title={player?.title}>{player?.private?'Privat minispiller':player?.title||'Minispiller'}<small>{state.player.hidden?'Skjult · avspillingen fortsetter':'Eget vindu · avspillingen fortsetter'}</small></p>}
    <button className="rail-tool" title={state.player.hidden?'Vis minispiller':'Skjul minispiller – behold lyden'} aria-label={state.player.hidden?'Vis minispiller':'Skjul minispiller – behold lyden'} disabled={busy} onClick={()=>void action(state.player!.hidden?'show':'hide')}>{state.player.hidden?<Eye size={18}/>:<EyeOff size={18}/>}<span>{state.player.hidden?'Vis spiller':'Skjul spiller'}</span></button>

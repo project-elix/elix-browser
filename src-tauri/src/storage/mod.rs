@@ -15,6 +15,8 @@ pub struct Entry {
     pub time: String,
     #[serde(default)]
     pub favicon: Option<String>,
+    #[serde(default)]
+    pub group: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -149,6 +151,28 @@ impl Store {
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
+        // Additive tables deliberately keep schema 2 readable by Alpha 6/7.
+        // Older clients ignore groups; their bookmark deletions still cascade.
+        let groups_exist: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='bookmark_groups')",
+            [], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !groups_exist && version == 2 && !path.with_extension("v2.bookmark-groups.backup.sqlite").exists() {
+            conn.backup("main", path.with_extension("v2.bookmark-groups.backup.sqlite"), None)
+                .map_err(|e| e.to_string())?;
+        }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS bookmark_groups(
+            profile TEXT NOT NULL REFERENCES profiles(id), name TEXT NOT NULL,
+            PRIMARY KEY(profile,name));
+            CREATE UNIQUE INDEX IF NOT EXISTS bookmark_id_profile ON bookmarks(id,profile);
+            CREATE TABLE IF NOT EXISTS bookmark_group_entries(
+                bookmark INTEGER PRIMARY KEY, profile TEXT NOT NULL, name TEXT NOT NULL,
+                FOREIGN KEY(bookmark,profile) REFERENCES bookmarks(id,profile) ON DELETE CASCADE,
+                FOREIGN KEY(profile,name) REFERENCES bookmark_groups(profile,name) ON UPDATE CASCADE ON DELETE CASCADE);")
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         let store = Self { conn };
         if store.profiles()?.is_empty() {
             let p = store.create_profile("Personlig")?;
@@ -203,7 +227,7 @@ impl Store {
             .unwrap_or_default()
     }
     pub fn entries(&self, profile: &str, kind: &str) -> Result<Vec<Entry>, String> {
-        let sql=match kind{"bookmarks"=>"SELECT id,url,title,time,favicon FROM bookmarks WHERE profile=?1 ORDER BY id DESC LIMIT 5001", "history"=>"SELECT id,url,title,time,NULL FROM history WHERE profile=?1 ORDER BY id DESC LIMIT 1000",_=>return Err("Ukjent liste".into())};
+        let sql=match kind{"bookmarks"=>"SELECT b.id,b.url,b.title,b.time,b.favicon,COALESCE(g.name,'') FROM bookmarks b LEFT JOIN bookmark_group_entries g ON g.bookmark=b.id AND g.profile=b.profile WHERE b.profile=?1 ORDER BY b.id DESC LIMIT 5001", "history"=>"SELECT id,url,title,time,NULL,'' FROM history WHERE profile=?1 ORDER BY id DESC LIMIT 1000",_=>return Err("Ukjent liste".into())};
         let mut q = self.conn.prepare(sql).map_err(|e| e.to_string())?;
         let rows = q
             .query_map([profile], |r| {
@@ -213,6 +237,7 @@ impl Store {
                     title: r.get(2)?,
                     time: r.get(3)?,
                     favicon: r.get(4)?,
+                    group: r.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -247,31 +272,90 @@ impl Store {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
-    pub fn import_bookmarks(&self, p: &str, items: Vec<Entry>) -> Result<usize, String> {
-        if items.len() > 5000 {
-            return Err("Maksimalt 5000 bokmerker om gangen".into());
-        }
-        let tx = self
-            .conn
-            .unchecked_transaction()
+    pub fn bookmark_groups(&self, p: &str) -> Result<Vec<String>, String> {
+        let mut q = self.conn.prepare("SELECT name FROM bookmark_groups WHERE profile=?1 ORDER BY name COLLATE NOCASE,name")
             .map_err(|e| e.to_string())?;
+        let rows = q.query_map([p], |r| r.get(0)).map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+    fn valid_group(name: &str) -> Result<&str, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+            return Err("Gruppenavnet må være mellom 1 og 80 tegn".into());
+        }
+        Ok(name)
+    }
+    fn ensure_group(conn: &Connection, p: &str, name: &str) -> Result<(), String> {
+        let name = Self::valid_group(name)?;
+        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM bookmark_groups WHERE profile=?1 AND name=?2)",params![p,name],|r|r.get(0)).map_err(|e| e.to_string())?;
+        if exists { return Ok(()); }
+        let count: i64 = conn.query_row("SELECT count(*) FROM bookmark_groups WHERE profile=?1",[p],|r|r.get(0)).map_err(|e| e.to_string())?;
+        if count >= 250 { return Err("Maksimalt 250 bokmerkegrupper per profil".into()); }
+        conn.execute("INSERT INTO bookmark_groups(profile,name) VALUES(?1,?2)",params![p,name]).map(|_|()).map_err(|e|e.to_string())
+    }
+    pub fn create_bookmark_group(&self, p: &str, name: &str) -> Result<(), String> {
+        Self::ensure_group(&self.conn,p,name)
+    }
+    pub fn rename_bookmark_group(&self, p: &str, old: &str, name: &str) -> Result<(), String> {
+        let name = Self::valid_group(name)?;
+        let changed = self.conn.execute("UPDATE bookmark_groups SET name=?3 WHERE profile=?1 AND name=?2",params![p,old,name])
+            .map_err(|_|"Gruppen finnes allerede eller kunne ikke endres".to_string())?;
+        if changed == 0 { return Err("Fant ikke bokmerkegruppen i denne profilen".into()); }
+        Ok(())
+    }
+    pub fn remove_bookmark_group(&self, p: &str, name: &str) -> Result<(), String> {
+        // ON DELETE CASCADE removes memberships, never the bookmarks themselves.
+        self.conn.execute("DELETE FROM bookmark_groups WHERE profile=?1 AND name=?2",params![p,name])
+            .map(|_|()).map_err(|e|e.to_string())
+    }
+    pub fn move_bookmark(&self, p: &str, id: i64, group: &str) -> Result<(), String> {
+        let exists: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM bookmarks WHERE id=?1 AND profile=?2)",params![id,p],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if !exists { return Err("Fant ikke bokmerket i denne profilen".into()); }
+        if group.is_empty() {
+            return self.conn.execute("DELETE FROM bookmark_group_entries WHERE bookmark=?1 AND profile=?2",params![id,p])
+                .map(|_|()).map_err(|e|e.to_string());
+        }
+        Self::valid_group(group)?;
+        self.conn.execute("INSERT INTO bookmark_group_entries(bookmark,profile,name) VALUES(?1,?2,?3) ON CONFLICT(bookmark) DO UPDATE SET name=excluded.name",params![id,p,group])
+            .map(|_|()).map_err(|_|"Fant ikke bokmerkegruppen i denne profilen".into())
+    }
+    pub fn edit_bookmark(&self, p: &str, id: i64, title: &str, address: &str) -> Result<(), String> {
+        let url = Self::valid_bookmark(address,title)?;
+        let changed = self.conn.execute("UPDATE bookmarks SET title=?3,url=?4,favicon=CASE WHEN url=?4 THEN favicon ELSE NULL END WHERE id=?1 AND profile=?2",params![id,p,title.trim(),url.as_str()])
+            .map_err(|_|"Adressen er allerede lagret eller bokmerket kunne ikke endres".to_string())?;
+        if changed == 0 { return Err("Fant ikke bokmerket i denne profilen".into()); }
+        Ok(())
+    }
+    fn valid_bookmark(address: &str, title: &str) -> Result<url::Url, String> {
+        let url = url::Url::parse(address).map_err(|_| "Ugyldig bokmerkeadresse")?;
+        if !crate::security::remote_allowed(&url) || !url.username().is_empty() || url.password().is_some()
+            || address.len() > 8192 || title.len() > 1000 {
+            return Err("Bokmerket må ha en gyldig HTTP- eller HTTPS-adresse".into());
+        }
+        Ok(url)
+    }
+    pub fn import_bookmarks(&self, p: &str, items: Vec<Entry>) -> Result<usize, String> {
+        self.import_bookmark_collection(p,items,Vec::new())
+    }
+    pub fn import_bookmark_collection(&self, p: &str, items: Vec<Entry>, groups: Vec<String>) -> Result<usize, String> {
+        if items.len() > 5000 || groups.len() > 250 {
+            return Err("Maksimalt 5000 bokmerker og 250 grupper om gangen".into());
+        }
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        for group in groups { Self::ensure_group(&tx,p,&group)?; }
         let mut count = 0;
         for item in items {
-            let url = url::Url::parse(&item.url).map_err(|_| "Ugyldig bokmerkeadresse")?;
-            if !crate::security::remote_allowed(&url)
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || item.url.len() > 8192
-                || item.title.len() > 1000
-            {
-                return Err("Importen inneholder ugyldige bokmerker".into());
+            let url = Self::valid_bookmark(&item.url,&item.title)?;
+            if !item.group.is_empty() { Self::ensure_group(&tx,p,&item.group)?; }
+            let inserted = tx.execute("INSERT OR IGNORE INTO bookmarks(profile,url,title,time) VALUES(?1,?2,?3,?4)",
+                params![p,url.as_str(),item.title,chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+            count += inserted;
+            // Merge leaves local titles and existing memberships intact, as before.
+            if inserted > 0 && !item.group.is_empty() {
+                tx.execute("INSERT INTO bookmark_group_entries(bookmark,profile,name) VALUES(?1,?2,?3)",
+                    params![tx.last_insert_rowid(),p,item.group.trim()]).map_err(|e|e.to_string())?;
             }
-            count += tx
-                .execute(
-                    "INSERT OR IGNORE INTO bookmarks(profile,url,title,time) VALUES(?1,?2,?3,?4)",
-                    params![p, url.as_str(), item.title, chrono::Utc::now().to_rfc3339()],
-                )
-                .map_err(|e| e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(count)
@@ -451,6 +535,7 @@ mod tests {
             title: "Imported".into(),
             time: String::new(),
             favicon: None,
+            group: String::new(),
         };
         assert!(s
             .import_bookmarks(
@@ -540,4 +625,98 @@ mod tests {
         drop(s);
         assert!(Store::open(&p).is_err());
     }
+    #[test]
+    fn bookmark_groups_survive_reopen_and_are_profile_isolated() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("groups.sqlite");
+        let p;
+        let id;
+        {
+            let store = Store::open(&path).unwrap();
+            p = store.profiles().unwrap()[0].id.clone();
+            let other = store.create_profile("Jobb").unwrap();
+            store.bookmark(&p,"https://example.com/","Example").unwrap();
+            id = store.entries(&p,"bookmarks").unwrap()[0].id;
+            store.create_bookmark_group(&p,"Gaming").unwrap();
+            store.create_bookmark_group(&p,"Tom gruppe").unwrap();
+            store.move_bookmark(&p,id,"Gaming").unwrap();
+            assert!(store.move_bookmark(&other.id,id,"Gaming").is_err());
+            assert!(store.edit_bookmark(&other.id,id,"Wrong","https://other.example/").is_err());
+            assert!(store.bookmark_groups(&other.id).unwrap().is_empty());
+            store.remove_bookmark_group(&other.id,"Gaming").unwrap();
+            assert_eq!(store.entries(&p,"bookmarks").unwrap()[0].group,"Gaming");
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.bookmark_groups(&p).unwrap(),vec!["Gaming","Tom gruppe"]);
+        store.rename_bookmark_group(&p,"Gaming","Spill").unwrap();
+        assert_eq!(store.entries(&p,"bookmarks").unwrap()[0].group,"Spill");
+        assert!(store.rename_bookmark_group(&p,"Spill","Tom gruppe").is_err());
+        store.edit_bookmark(&p,id,"New title","https://example.com/new").unwrap();
+        assert_eq!(store.entries(&p,"bookmarks").unwrap()[0].group,"Spill");
+        store.remove_bookmark_group(&p,"Spill").unwrap();
+        let items=store.entries(&p,"bookmarks").unwrap();
+        assert_eq!(items.len(),1);
+        assert_eq!(items[0].title,"New title");
+        assert!(items[0].group.is_empty());
+    }
+    #[test]
+    fn additive_groups_keep_schema_two_and_old_client_deletes_working() {
+        let d = tempfile::tempdir().unwrap();
+        let path=d.path().join("old.sqlite");
+        let p;
+        {
+            let store=Store::open(&path).unwrap();
+            p=store.profiles().unwrap()[0].id.clone();
+            store.bookmark(&p,"https://example.com/","Original").unwrap();
+            store.conn.execute_batch("DROP TABLE bookmark_group_entries; DROP TABLE bookmark_groups;").unwrap();
+        }
+        let store=Store::open(&path).unwrap();
+        assert!(path.with_extension("v2.bookmark-groups.backup.sqlite").exists());
+        assert_eq!(store.conn.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),2);
+        let id=store.entries(&p,"bookmarks").unwrap()[0].id;
+        store.create_bookmark_group(&p,"Retained").unwrap();
+        store.move_bookmark(&p,id,"Retained").unwrap();
+        // The previous client's star action updates only the title.
+        store.bookmark(&p,"https://example.com/","Updated by old client").unwrap();
+        assert_eq!(store.entries(&p,"bookmarks").unwrap()[0].group,"Retained");
+        store.remove_bookmark(&p,id).unwrap();
+        assert_eq!(store.conn.query_row("SELECT count(*) FROM bookmark_group_entries",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(store.bookmark_groups(&p).unwrap(),vec!["Retained"]);
+    }
+    #[test]
+    fn bookmark_group_import_is_atomic_and_accepts_older_sync_payloads() {
+        let d=tempfile::tempdir().unwrap();
+        let store=Store::open(&d.path().join("sync.sqlite")).unwrap();
+        let p=store.profiles().unwrap()[0].id.clone();
+        let old:Entry=serde_json::from_str(r#"{"id":1,"url":"https://example.com/","title":"Old","time":""}"#).unwrap();
+        assert!(old.group.is_empty());
+        store.import_bookmarks(&p,vec![old.clone()]).unwrap();
+        let mut grouped=old.clone();grouped.url="https://example.org/".into();grouped.group="ELIX".into();
+        let mut invalid=old;invalid.url="javascript:alert(1)".into();
+        assert!(store.import_bookmark_collection(&p,vec![grouped.clone(),invalid],vec!["Empty".into()]).is_err());
+        assert_eq!(store.entries(&p,"bookmarks").unwrap().len(),1);
+        assert!(store.bookmark_groups(&p).unwrap().is_empty());
+        store.import_bookmark_collection(&p,vec![grouped],vec!["Empty".into()]).unwrap();
+        assert_eq!(store.bookmark_groups(&p).unwrap(),vec!["ELIX","Empty"]);
+        let entries=store.entries(&p,"bookmarks").unwrap();
+        assert_eq!(entries.iter().find(|item|item.url=="https://example.org/").unwrap().group,"ELIX");
+        store.import_bookmark_collection(&p,entries,vec![]).unwrap();
+        assert_eq!(store.entries(&p,"bookmarks").unwrap().len(),2);
+    }
+    #[test]
+    fn bookmark_edits_validate_urls_duplicates_and_group_names() {
+        let d=tempfile::tempdir().unwrap();
+        let store=Store::open(&d.path().join("edit.sqlite")).unwrap();
+        let p=store.profiles().unwrap()[0].id.clone();
+        store.bookmark(&p,"https://example.com/","First").unwrap();
+        store.bookmark(&p,"https://example.org/","Second").unwrap();
+        let id=store.entries(&p,"bookmarks").unwrap().iter().find(|e|e.title=="First").unwrap().id;
+        assert!(store.edit_bookmark(&p,id,"Unsafe","javascript:alert(1)").is_err());
+        assert!(store.edit_bookmark(&p,id,"Duplicate","https://example.org/").is_err());
+        assert!(store.create_bookmark_group(&p,"  ").is_err());
+        assert!(store.create_bookmark_group(&p,"Bad\nname").is_err());
+        assert!(store.move_bookmark(&p,id,"Missing").is_err());
+        assert_eq!(store.entries(&p,"bookmarks").unwrap().iter().find(|e|e.id==id).unwrap().title,"First");
+    }
+
 }
