@@ -16,6 +16,8 @@ try{browser=await chromium.launch({...(process.env.CHROMIUM_PATH?{executablePath
 const page=await browser.newPage({viewport:{width:1440,height:950}});
 const errors=[];page.on('pageerror',error=>errors.push(error.message));
 page.setDefaultTimeout(6000);
+// Cold Vite dependency transformation on Windows is setup, not an interaction latency target.
+page.setDefaultNavigationTimeout(45000);
 try {
  await page.addInitScript(()=>{
   const tab=(id,url,title)=>({id,url,title,private:false,pinned:false,workspace:'Personlig',group:'',muted:false,loading:false,suspended:false,last_active:0,load_ms:null,http_status:null,navigation_error:null,favicon:null});
