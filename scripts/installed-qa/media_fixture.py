@@ -48,20 +48,27 @@ document.querySelector('#start').onclick=async()=>{
    const draw=()=>{paint.fillStyle='#3078ae';paint.fillRect(0,0,320,180);paint.fillStyle='#fff';paint.fillRect((ticks++*4)%264,66,50,50)};
    draw();setInterval(draw,100);
    stream=canvas.captureStream(10);
-   // Exactly one output route. The oscillator feeds the video's original
-   // MediaStream and has no separate connection to the speaker destination.
-   ctx=new AudioContext();const tone=ctx.createOscillator(),gain=ctx.createGain(),dest=ctx.createMediaStreamDestination();
-   tone.frequency.value=440;gain.gain.value=0.12;tone.connect(gain);gain.connect(dest);tone.start();
-   for(const track of dest.stream.getAudioTracks())stream.addTrack(track);
+   if(route==='/qa-fullscreen'){
+     video.muted=true;
+   }else{
+     // Exactly one output route. The oscillator feeds the video's original
+     // MediaStream and has no separate connection to the speaker destination.
+     ctx=new AudioContext();const tone=ctx.createOscillator(),gain=ctx.createGain(),dest=ctx.createMediaStreamDestination();
+     tone.frequency.value=440;gain.gain.value=0.12;tone.connect(gain);gain.connect(dest);tone.start();
+     for(const track of dest.stream.getAudioTracks())stream.addTrack(track);
+   }
    video.srcObject=stream;
  }
- await ctx.resume();await video.play();
+ if(ctx)await ctx.resume();
+ await video.play();
 };
 document.querySelector('#expand').onclick=()=>video.requestFullscreen();
 const report=()=>{
  const r=video.getBoundingClientRect(), elements=[...document.querySelectorAll('audio,video')];
  const active=elements.filter(media=>!media.paused&&!media.ended&&!media.muted&&media.volume>0);
  const body={kind:'installed-media',route,token,playing:!video.paused,t:video.currentTime,
+   frames:video.getVideoPlaybackQuality().totalVideoFrames,muted:video.muted,
+   liveVideo:!!stream&&stream.getVideoTracks().filter(t=>t.enabled&&t.readyState==='live').length===1,
    fullscreen:document.fullscreenElement===video,siteChrome:getComputedStyle(chromeBar).visibility,
    sameStream:!!stream&&stream===video.srcObject,mediaCount:elements.length,audibleElements:active.length,
    liveAudio:!!stream&&stream.getAudioTracks().filter(t=>t.enabled&&t.readyState==='live').length===1,
