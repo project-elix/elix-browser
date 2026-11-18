@@ -4,7 +4,7 @@ Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript
 
 Product site: https://browser.projectelix.no
 
-**Current source: Alpha 9 (0.1.4-dev.9).** This Developer version includes the [Trello fixes from PR #5](https://github.com/project-elix/elix-browser/pull/5) for address-bar searches, downloads, tab and bookmark groups, and the media miniplayer. Beta 2 (0.1.3-beta.2) promotes the [Alpha 8 feature set](docs/alpha8.md).
+**Current source: Alpha 10 (0.1.5-dev.10), Developer candidate.** The [Alpha 10 release scope](docs/alpha10.md) covers tabs, sessions, workspace profiles, media and account changes. The [Stable 1 checklist](docs/stable1.md) records qualification requirements for 0.1.4. The published Alpha 9 and Beta 2 remain available through the product site.
 
 ## Beta test for Windows
 
