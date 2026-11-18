@@ -31,9 +31,17 @@ if args.mode == 'prepare':
         (root/f'{case}.json').write_text(json.dumps(data))
     (root/'cookie.html').write_text("""<!doctype html><title>cookie pending</title><script>
 const seed = new URL(location.href).searchParams.get('seed');
-if(seed) document.cookie = 'elix_upgrade_cookie='+encodeURIComponent(seed)+'; Max-Age=3600; Path=/; Secure; SameSite=Lax';
-const match = document.cookie.split('; ').find(c=>c.startsWith('elix_upgrade_cookie='));
-document.title = 'cookie:'+(match ? decodeURIComponent(match.split('=')[1]) : 'missing');
+const readCookie = () => document.cookie.split('; ').find(c=>c.startsWith('elix_upgrade_cookie='));
+if(seed && (readCookie() || localStorage.getItem('elix_upgrade'))) {
+  document.title = 'Unexpected data from another profile';
+} else {
+  if(seed) {
+    document.cookie = 'elix_upgrade_cookie='+encodeURIComponent(seed)+'; Max-Age=3600; Path=/; Secure; SameSite=Lax';
+    localStorage.setItem('elix_upgrade',seed);
+  }
+  const match = readCookie();
+  document.title = 'cookie:'+(match ? decodeURIComponent(match.split('=')[1]) : 'missing')+':storage:'+localStorage.getItem('elix_upgrade');
+}
 </script>ELIX cookie persistence fixture""")
     raw = bytearray((root/'new.exe').read_bytes())
     raw[-1] ^= 1

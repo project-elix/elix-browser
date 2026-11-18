@@ -4,6 +4,7 @@ import type {Entry} from '../types';
 import {desktop,rpc} from '../browser/bridge';
 import {listen} from '@tauri-apps/api/event';
 import {bookmarkAddress,bookmarkGroups} from '../browser/bookmarks';
+import {useBookmarkDrag} from '../browser/useBookmarkDrag';
 import BookmarkImport from './BookmarkImport';
 import Favicon from './Favicon';
 import './bookmarks.css';
@@ -29,6 +30,7 @@ export default function BookmarkCollection({items,groups,profile,variant,onGo,on
  const contextKey=(event:KeyboardEvent<HTMLElement>,value:Target)=>{if(event.key==='ContextMenu'||event.shiftKey&&event.key==='F10'){event.preventDefault();opener.current=event.currentTarget;onExpand?.();setEditor(null);setTarget(value)}};
  const run=async(action:()=>Promise<unknown>,success='')=>{if(running.current)return;running.current=true;setBusy(true);const actingProfile=profile;try{await action();if(currentProfile.current!==actingProfile)return;await onChange();if(currentProfile.current!==actingProfile)return;setMessage(success);close(true)}catch(error){if(currentProfile.current===actingProfile)onError(error)}finally{running.current=false;setBusy(false)}};
  const mutate=(action:string,data:Record<string,unknown>,success='')=>run(()=>rpc(action,{profile,...data}),success);
+ const drag=useBookmarkDrag(profile,(id,group)=>{if(items.some(item=>item.id===id))void mutate('move_bookmark',{id,group},group?`Bokmerket er flyttet til ${group}.`:'Bokmerket er flyttet ut av gruppen.')});
  const openPage=(url:string,newTab=false)=>{close();void (newTab?rpc('new_tab',{url}):onGo(url)).catch(onError)};
  const begin=(value:Editor)=>{setEditor(value);setName(value.kind==='rename'?value.name:value.kind==='edit'?items.find(item=>item.id===value.id)?.title||'':'');setAddress(value.kind==='edit'?items.find(item=>item.id===value.id)?.url||'':'');setGroup('id'in value?items.find(item=>item.id===value.id)?.group||'':'')};
  const submit=()=>{if(!editor)return;const value=editor;const trimmed=name.trim();if((value.kind==='create'||value.kind==='rename')&&(!trimmed||[...trimmed].length>80)){onError('Gruppenavnet må være mellom 1 og 80 tegn.');return}
@@ -39,19 +41,19 @@ export default function BookmarkCollection({items,groups,profile,variant,onGo,on
  };
  const keyMenu=(event:KeyboardEvent<HTMLDivElement>)=>{if(event.key==='Escape'){event.stopPropagation();if(!busy)close(true);return}if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key)||editor)return;const buttons=[...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];if(!buttons.length)return;event.preventDefault();const index=buttons.indexOf(document.activeElement as HTMLButtonElement);const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:event.key==='ArrowDown'?(index+1)%buttons.length:(index-1+buttons.length)%buttons.length;buttons[next].focus()};
  const entry=(item:Entry)=><div className="bookmark-item" key={item.id}>
-  <button className="bookmark-open" title={`${item.title||item.url}\n${item.url}`} onClick={()=>openPage(item.url)} onContextMenu={e=>context(e,{kind:'bookmark',id:item.id})} onKeyDown={e=>contextKey(e,{kind:'bookmark',id:item.id})}><Favicon icon={item.favicon}/><span><strong>{item.title||item.url}</strong>{variant==='page'&&<small>{item.url}</small>}</span></button>
+  <button className="bookmark-open" onDragStart={event=>event.preventDefault()} onPointerDown={event=>drag.start(event,item)} onPointerMove={drag.move} onPointerUp={drag.finish} onPointerCancel={drag.clear} onLostPointerCapture={drag.clear} onClickCapture={drag.click} title={`${item.title||item.url}\n${item.url}`} onClick={()=>openPage(item.url)} onContextMenu={e=>context(e,{kind:'bookmark',id:item.id})} onKeyDown={e=>contextKey(e,{kind:'bookmark',id:item.id})}><Favicon icon={item.favicon}/><span><strong>{item.title||item.url}</strong>{variant==='page'&&<small>{item.url}</small>}</span></button>
   {variant==='page'&&<button className="bookmark-more" aria-label={`Valg for ${item.title||item.url}`} title="Bokmerkevalg" onClick={e=>context(e,{kind:'bookmark',id:item.id})}><MoreHorizontal size={16}/></button>}
  </div>;
- return <div ref={root} className={`bookmark-collection bookmark-collection-${variant}`} onContextMenu={event=>{
+ return <div ref={root} data-bookmark-profile={profile} className={`bookmark-collection bookmark-collection-${variant}`} onContextMenu={event=>{
   if(event.target instanceof Element&&event.target.closest('input,textarea,select,[contenteditable="true"]')){close();return}
   context(event,{kind:'collection'});
  }}>
   {variant==='page'&&<><span className="eyebrow">ELIX / BIBLIOTEK</span><div className="page-heading"><h1>Bokmerkene dine.</h1><button className="subtle" onClick={()=>begin({kind:'create'})}><FolderPlus size={16}/>Ny gruppe</button></div><p className="lead">Samle favorittene i grupper. Høyreklikk et bokmerke eller en gruppe for flere valg.</p><BookmarkImport onChange={onChange} onError={onError}/><input className="filter-input" aria-label="Søk i bokmerker" placeholder="Søk i bokmerker eller grupper …" value={filter} onChange={event=>{setFilter(event.target.value);setExpandedSearchGroups(new Map())}}/></>}
   <div className="bookmark-collection-list">{sections.map(section=>{
-   if(!section.name)return section.items.length?<section className="bookmark-ungrouped" key="ungrouped">{variant==='page'&&groups.length>0&&<h2>Uten gruppe</h2>}{section.items.map(entry)}</section>:null;
+   if(!section.name)return section.items.length?<section className="bookmark-ungrouped" data-bookmark-group="" key="ungrouped">{variant==='page'&&groups.length>0&&<h2>Uten gruppe</h2>}{section.items.map(entry)}</section>:groups.length>0&&!filter?<section className="bookmark-drop-ungrouped" data-bookmark-group="" key="ungrouped">Uten gruppe</section>:null;
    const expanded=visibleGroups.get(section.name)??(variant==='page');
    const toggle=()=>{onExpand?.();close();setVisibleGroups(previous=>new Map(previous).set(section.name,!expanded))};
-   return <section className="bookmark-folder" key={`group-${section.name}`}>
+   return <section className="bookmark-folder" data-bookmark-group={section.name} key={`group-${section.name}`}>
     <button className="bookmark-folder-toggle" aria-label={`Bokmerkegruppe ${section.name}`} aria-expanded={expanded} onClick={toggle} onContextMenu={event=>context(event,{kind:'group',name:section.name})} onKeyDown={event=>contextKey(event,{kind:'group',name:section.name})}><Folder size={16}/><span>{section.name}</span><small>{section.items.length}</small>{expanded?<ChevronDown size={12}/>:<ChevronRight size={12}/>}</button>
     {expanded&&<div className="bookmark-folder-items">{section.items.length?section.items.map(entry):<p className="bookmark-empty">Gruppen er tom. Høyreklikk et bokmerke for å flytte det hit.</p>}</div>}
    </section>;

@@ -36,6 +36,22 @@ jobs:
           ELIX_UI_OUTPUT: alpha8-ui
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - run: npm run tauri build -- --features smoke-tests --bundles nsis -- --locked
+      - name: Upgrade a published Alpha 9 profile to the current Windows candidate
+        env:
+          ELIX_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          ./scripts/verify-stable1-upgrade.ps1 -Installer $installer.FullName
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preflight-profile-upgrade
+          path: |
+            ${{ runner.temp }}/profile-upgrade-review/profile-upgrade.json
+            ${{ runner.temp }}/profile-upgrade-review/*/*.png
+            ${{ runner.temp }}/profile-upgrade-review/*/ready-result.json
+          if-no-files-found: ignore
       - name: Test installed app starts
         shell: pwsh
         run: |

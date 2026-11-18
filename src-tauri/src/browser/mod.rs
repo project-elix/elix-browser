@@ -1,10 +1,17 @@
 pub mod detach;
+#[cfg(windows)]
+pub mod window_transfer;
+mod dormancy;
 pub mod engine;
 pub mod extensions;
 pub mod media;
 #[cfg(windows)]
 mod favicon;
+#[cfg(windows)]
+pub mod tab_preview;
 pub mod organization;
+pub mod group_rules;
+pub mod saved_sessions;
 pub mod private;
 pub mod site_data;
 #[cfg(feature = "smoke-tests")]
@@ -28,6 +35,8 @@ pub struct Tab {
     pub workspace: String,
     #[serde(default)]
     pub group: String,
+    #[serde(default)]
+    pub group_manual: Option<bool>,
     #[serde(default)]
     pub muted: bool,
     #[serde(skip)]
@@ -63,6 +72,7 @@ impl Tab {
             pinned: false,
             workspace: organization::default_workspace(),
             group: String::new(),
+            group_manual: None,
             muted: false,
             crashed: false,
             favicon: None,
@@ -96,9 +106,11 @@ pub struct Session {
     pub closed: Vec<Tab>,
     #[serde(default = "organization::default_workspaces")]
     pub workspaces: Vec<String>,
+    #[serde(default)]
+    pub group_rules: group_rules::GroupRules,
     #[serde(default = "organization::default_workspace")]
     pub workspace: String,
-    #[serde(default, skip_deserializing)]
+    #[serde(default)]
     pub split: Option<[String; 2]>,
 }
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -125,40 +137,43 @@ pub fn emit(app: &AppHandle) {
 }
 pub fn persist(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let s = state.session.lock().unwrap().persistent();
-    let profile = state.profile.lock().unwrap().clone();
-    let data = serde_json::to_string(&s).map_err(|e| e.to_string())?;
+    // Serialize in database-write order so an older callback cannot overwrite a newer layout.
     let store = state.store.lock().unwrap();
+    let profile = state.profile.lock().unwrap().clone();
+    let data = saved_sessions::encode(&state.session.lock().unwrap(), false)?;
     let result = if state.window_id == "main" {
         store.save_session(&profile, &data)
     } else {
-        store.set(
-            &format!("window_session:{}:{profile}", state.window_id),
-            &data,
-        )
+        store.save_window_session(&state.window_id, &profile, &data)
     };
     result
 }
 pub fn restore(app: &AppHandle) {
+    let profile = app.state::<AppState>().profile.lock().unwrap().clone();
+    let _ = restore_profile(app, &profile, false);
+}
+
+pub fn restore_profile(app: &AppHandle, profile: &str, select: bool) -> Result<(),String> {
     let state = app.state::<AppState>();
-    let p = state.profile.lock().unwrap().clone();
-    let candidates = {
-        let store = state.store.lock().unwrap();
-        if state.window_id == "main" {
-            store.session_candidates(&p)
-        } else {
-            store
-                .get(&format!("window_session:{}:{p}", state.window_id))
-                .into_iter()
-                .collect()
-        }
+    // Snapshot reads and writes also take the store first. No callback can save the
+    // previous profile's tabs under the incoming profile's ID during this transition.
+    let store = state.store.lock().unwrap();
+    let candidates = if state.window_id == "main" {
+        store.session_candidates(profile)
+    } else {
+        store.window_session_candidates(&state.window_id, profile)
     };
-    let mut s = candidates
-        .into_iter()
-        .find_map(|v| serde_json::from_str::<Session>(&v).ok())
-        .unwrap_or_default();
-    s.prepare_restore(chrono::Utc::now().timestamp());
-    *state.session.lock().unwrap() = s;
+    let mut session = candidates.iter().find_map(|v| saved_sessions::decode(v)).unwrap_or_else(|| {
+        let mut empty = Session::default();
+        empty.prepare_restore(chrono::Utc::now().timestamp());
+        empty
+    });
+    session.group_rules = group_rules::load(&store, profile);
+    group_rules::apply_all(&mut session);
+    if select { store.set("active_profile",profile)?; }
+    *state.profile.lock().unwrap() = profile.into();
+    *state.session.lock().unwrap() = session;
+    Ok(())
 }
 pub async fn create(app: AppHandle, input: String) -> Result<String, String> {
     create_with_mode(app, input, false).await
@@ -169,6 +184,7 @@ pub async fn create_with_mode(
     private: bool,
 ) -> Result<String, String> {
     let url = security::destination(&input)?;
+    group_rules::refresh(&app);
     let mut tab = Tab::new(url);
     tab.private = private;
     let id = tab.id.clone();
@@ -180,6 +196,7 @@ pub async fn create_with_mode(
         }
         tab.workspace = s.workspace.clone();
         s.tabs.push(tab);
+        group_rules::apply(&mut s,&id);
     }
     if let Err(error) = activate(&app, &id) {
         // Keep the tab visible with an actionable failure instead of a blank view.
@@ -209,7 +226,7 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<(), String> {
             view.hide().map_err(|e| e.to_string())?;
         }
     }
-    if !tab.url.starts_with("elix:") {
+    if !tab.url.starts_with("elix:") && !media::is_player(app, id) {
         if app.get_webview(id).is_none() {
             {
                 let mut session = state.session.lock().unwrap();
@@ -225,6 +242,15 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<(), String> {
                 failed(app, id, &error);
                 return Err(error);
             }
+        }
+        // A restored split has fresh IDs and no native views yet. Wake both panes.
+        let peer = {
+            let s = state.session.lock().unwrap();
+            s.split.as_ref().and_then(|pair| pair.iter().find(|other| other.as_str() != id))
+                .and_then(|other| s.tabs.iter().find(|t| &t.id == other)).cloned()
+        };
+        if let Some(peer) = peer {
+            if app.get_webview(&peer.id).is_none() { engine::create(app, &peer)?; }
         }
         let view = app
             .get_webview(id)
@@ -252,6 +278,7 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<(), String> {
 pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
     let url = security::destination(input)?;
     media::before_navigation(app, id)?;
+    group_rules::refresh(app);
     // Internal panels must not close the native view that owns a live transfer.
     if url.starts_with("elix:") {
         let state = app.state::<AppState>();
@@ -268,11 +295,13 @@ pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
                     .find(|t| t.id == id)
                     .ok_or("Fant ikke fanen")?;
                 let private = source.private;
+                let workspace=source.workspace.clone();
                 if session.tabs.len() >= 100 {
                     return Err("Maksimalt 100 faner. Lukk en fane og prøv igjen.".into());
                 }
                 let mut tab = Tab::new(url);
                 tab.private = private;
+                tab.workspace=workspace;
                 let next = tab.id.clone();
                 session.tabs.push(tab);
                 next
@@ -302,6 +331,7 @@ pub fn navigate(app: &AppHandle, id: &str, input: &str) -> Result<(), String> {
         tab.started = tab.loading.then(std::time::Instant::now);
         tab.http_status = None;
         tab.navigation_error = None;
+        group_rules::apply(&mut s,id);
         if url.starts_with("elix:") {
             s.clear_split(chrono::Utc::now().timestamp());
         }
@@ -381,10 +411,27 @@ fn close_inner(app: &AppHandle, id: &str, remember: bool) -> Result<(), String> 
     persist(app)
 }
 pub fn suspend(app: &AppHandle, id: &str) -> Result<(), String> {
+    park_background(app, id, None)
+}
+
+pub fn park_background(app: &AppHandle, id: &str, automatic_minutes: Option<u32>) -> Result<(), String> {
+    let view = app.get_webview(id);
+    if let Some(view) = &view {
+        if !dormancy::idle(view)? {
+            return Err("Fanen holdes våken på grunn av avspilling, et møte eller aktivitet som ikke kan kontrolleres.".into());
+        }
+    } else if automatic_minutes.is_some() {
+        return Ok(());
+    }
+    // Recheck eligibility after the renderer replies. The user may have
+    // selected/pinned the tab or begun a download while the probe was pending.
     if media::is_player(app, id) {
         return Err("Minispilleren holdes våken. Flytt den tilbake til nettleseren før dvale.".into());
     }
     let state = app.state::<AppState>();
+    if automatic_minutes.is_some_and(|minutes| state.store.lock().unwrap().settings().suspend_minutes != minutes) {
+        return Ok(());
+    }
     {
         let s = state.session.lock().unwrap();
         if s.active == id || s.split.as_ref().is_some_and(|p| p.iter().any(|x| x == id)) {
@@ -395,6 +442,11 @@ pub fn suspend(app: &AppHandle, id: &str) -> Result<(), String> {
             .iter()
             .find(|t| t.id == id)
             .ok_or("Fant ikke fanen")?;
+        if let Some(minutes) = automatic_minutes {
+            if minutes == 0 || chrono::Utc::now().timestamp().saturating_sub(tab.last_active) < i64::from(minutes) * 60 {
+                return Ok(());
+            }
+        }
         if tab.private {
             return Err("Private faner holdes aktive til de lukkes.".into());
         }
@@ -409,8 +461,8 @@ pub fn suspend(app: &AppHandle, id: &str) -> Result<(), String> {
     }
     #[cfg(windows)]
     crate::security::permissions::cancel(app, id);
-    if let Some(v) = app.get_webview(id) {
-        v.close().map_err(|e| e.to_string())?;
+    if let Some(view) = view {
+        view.close().map_err(|e| e.to_string())?;
     }
     if let Some(t) = state
         .session
@@ -453,6 +505,7 @@ impl Session {
             .iter()
             .position(|t| t.id == self.active)
             .unwrap_or(0);
+        let split_indices = saved_sessions::split_indices(self);
         for tab in &mut self.tabs {
             tab.id = format!("tab-{}", uuid::Uuid::new_v4());
             tab.reset_runtime_state(now);
@@ -462,7 +515,7 @@ impl Session {
         }
         self.active = self.tabs[active_index].id.clone();
         self.workspace = self.tabs[active_index].workspace.clone();
-        self.split = None;
+        self.split = split_indices.map(|[a,b]| [self.tabs[a].id.clone(), self.tabs[b].id.clone()]);
     }
 
     /// Start the idle period when a visible tab moves into the background.
@@ -539,10 +592,10 @@ impl Session {
 
     /// A snapshot suitable for disk; private content and dormancy stay in memory.
     pub fn persistent(&self) -> Self {
-        let mut tabs: Vec<_> = self.tabs.iter().filter(|t| !t.private).cloned().collect();
+        let eligible = |t: &&Tab| !t.private && security::stored_destination_allowed(&t.url);
+        let mut tabs: Vec<_> = self.tabs.iter().filter(eligible).cloned().collect();
         for tab in &mut tabs {
-            tab.favicon = None;
-            tab.suspended = false;
+            tab.reset_runtime_state(0);
         }
         let active = if tabs.iter().any(|t| t.id == self.active) {
             self.active.clone()
@@ -552,21 +605,29 @@ impl Session {
         let mut closed: Vec<_> = self
             .closed
             .iter()
-            .filter(|t| !t.private)
+            .filter(eligible)
             .take(20)
             .cloned()
             .collect();
         for tab in &mut closed {
-            tab.favicon = None;
-            tab.suspended = false;
+            tab.reset_runtime_state(0);
         }
+        let workspace = tabs.iter().find(|t| t.id == active).map(|t| t.workspace.clone())
+            .unwrap_or_else(organization::default_workspace);
+        let workspaces:Vec<_> = self.workspaces.iter().filter(|name|
+            tabs.iter().any(|t| &t.workspace == *name) || !self.tabs.iter().any(|t| &t.workspace == *name && t.private)
+        ).cloned().collect();
+        let split = saved_sessions::split_indices(self)
+            .filter(|[a,b]| tabs.iter().any(|t| t.id == self.tabs[*a].id) && tabs.iter().any(|t| t.id == self.tabs[*b].id))
+            .and(self.split.clone());
         Self {
             tabs,
             active,
             closed,
-            workspaces: self.workspaces.clone(),
-            workspace: self.workspace.clone(),
-            split: None,
+            group_rules:self.group_rules.iter().filter(|(name,_)|workspaces.contains(name)).map(|(k,v)|(k.clone(),v.clone())).collect(),
+            workspaces,
+            workspace,
+            split,
         }
     }
 }
@@ -840,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn split_reaches_the_shell_but_is_not_restored_from_disk() {
+    fn restored_split_targets_the_same_pages_with_new_native_ids() {
         let left = Tab::new("https://example.com/left".into());
         let right = Tab::new("https://example.com/right".into());
         let pair = [left.id.clone(), right.id.clone()];
@@ -853,11 +914,11 @@ mod tests {
         let snapshot = serde_json::to_value(&session).unwrap();
         assert_eq!(snapshot["split"], serde_json::json!(pair));
         let persisted = serde_json::to_value(session.persistent()).unwrap();
-        assert!(persisted["split"].is_null());
-        // Persisted tab IDs are replaced at startup, so even a stale split must
-        // not survive deserialization with references to the old native views.
-        let restored: Session = serde_json::from_value(snapshot).unwrap();
-        assert!(restored.split.is_none());
+        assert_eq!(persisted["split"], serde_json::json!(pair));
+        let restored = saved_sessions::decode(&persisted.to_string()).unwrap();
+        assert_ne!(restored.split, Some(pair));
+        assert_eq!(restored.split, Some([restored.tabs[0].id.clone(),restored.tabs[1].id.clone()]));
+        assert_eq!(restored.active, restored.tabs[0].id);
     }
     #[test]
     fn private_tabs_and_favicons_never_reach_session_storage() {

@@ -11,9 +11,9 @@ export function mailConfigured(config) {
   try { validateMail(config); return true; } catch { return false; }
 }
 
-export function sendMail(config, email, code) {
+export function sendMail(config, email, code, purpose) {
   validateMail(config);
   return config.mailTransport === 'smtp'
-    ? sendSmtpLoginEmail(config, email, code)
-    : sendLoginEmail(config, email, code);
+    ? sendSmtpLoginEmail(config, email, code, undefined, purpose)
+    : sendLoginEmail(config, email, code, undefined, purpose);
 }

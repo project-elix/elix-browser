@@ -46,6 +46,8 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         &tab.id,
         WebviewUrl::External("about:blank".parse().map_err(|_| "Ugyldig URL")?),
     )
+    .initialization_script_for_all_frames(include_str!("media-session.js"))
+    .initialization_script_for_all_frames(include_str!("dormancy.js"))
     .data_directory(directory)
     .incognito(private)
     .browser_extensions_enabled(!private)
@@ -62,18 +64,16 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
             #[cfg(windows)]
             crate::security::permissions::cancel(&nav_app, &nav_id);
             let state = nav_app.state::<AppState>();
-            if let Some(t) = state
-                .session
-                .lock()
-                .unwrap()
-                .tabs
-                .iter_mut()
-                .find(|t| t.id == nav_id)
+            browser::group_rules::refresh(&nav_app);
             {
+                let mut session=state.session.lock().unwrap();
+                if let Some(t)=session.tabs.iter_mut().find(|t|t.id==nav_id){
                 if t.url != url.as_str() {
                     t.favicon = None;
                 }
                 t.url = url.to_string();
+                }
+                browser::group_rules::apply(&mut session,&nav_id);
             }
             browser::emit(&nav_app);
         }
@@ -138,6 +138,7 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
                     }
                 }
             }
+            browser::group_rules::apply(&mut session,view.label());
         }
         if let Some((url, title)) = visit {
             if !private && security::remote_allowed(payload.url()) {

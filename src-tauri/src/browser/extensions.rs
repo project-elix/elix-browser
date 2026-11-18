@@ -11,7 +11,7 @@ pub enum Operation {
     Add { path: std::path::PathBuf, profile: String },
     Enable { id: String, enabled: bool },
     Remove { id: String },
-    ClearPasswords,
+    ClearPasswords { profile: String },
 }
 
 /// Native pickers are the only source of paths. ZIP imports are publisher source,
@@ -315,7 +315,10 @@ mod native {
     }
 
     pub async fn execute(app: AppHandle, operation: Operation) -> Result<Value, String> {
-        let target_profile = match &operation { Operation::Add { profile, .. } => Some(profile.as_str()), _ => None };
+        let target_profile = match &operation {
+            Operation::Add { profile, .. } | Operation::ClearPasswords { profile } => Some(profile.as_str()),
+            _ => None,
+        };
         let (view, temporary) = profile_view_for(&app, target_profile)?;
         let (tx, rx) = std::sync::mpsc::channel();
         let started = view.with_webview(move |platform| {
@@ -323,7 +326,7 @@ mod native {
                 let core = platform.controller().CoreWebView2()?;
                 let profile = core.cast::<ICoreWebView2_13>()?.Profile()?;
                 match operation {
-                    Operation::ClearPasswords => {
+                    Operation::ClearPasswords { .. } => {
                         let callback_tx = tx.clone();
                         profile.cast::<ICoreWebView2Profile2>()?.ClearBrowsingData(
                             COREWEBVIEW2_BROWSING_DATA_KINDS_PASSWORD_AUTOSAVE,

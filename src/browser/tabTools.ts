@@ -40,7 +40,7 @@ export function internalNavigation(session:Session,url:string):{action:'activate
  return existing?{action:'activate',id:existing.id}:{action:'new_tab',url:destination,private:false};
 }
 
-export function reorderAction(session:Session,id:string,targetId:string,edge:'before'|'after'):{id:string;before:string|null}|null {
+export function reorderAction(session:Session,id:string,targetId:string,edge:'before'|'after',allowUngroup=false):{id:string;before:string|null;ungroup_at?:string}|null {
  if(id===targetId)return null;
  const source=session.tabs.find(tab=>tab.id===id),target=session.tabs.find(tab=>tab.id===targetId);
  if(!source||!target||source.pinned!==target.pinned||
@@ -49,8 +49,9 @@ export function reorderAction(session:Session,id:string,targetId:string,edge:'be
  const remaining=partition.filter(tab=>tab.id!==id);
  const insertion=remaining.findIndex(tab=>tab.id===targetId)+(edge==='after'?1:0);
  const ordered=[...remaining.slice(0,insertion),source,...remaining.slice(insertion)];
- if(ordered.every((tab,index)=>tab.id===partition[index].id))return null;
- return {id,before:remaining[insertion]?.id??null};
+ const ungroupAt=allowUngroup&&source.group&&!target.group?target.id:undefined;
+ if(!ungroupAt&&ordered.every((tab,index)=>tab.id===partition[index].id))return null;
+ return {id,before:remaining[insertion]?.id??null,...(ungroupAt?{ungroup_at:ungroupAt}:{})};
 }
 
 export function shouldFocusNewTab(session:Session,pendingId:string|null|undefined):boolean {

@@ -1,3 +1,4 @@
+import {splitCandidates} from './tabTools';
 import type {Session} from '../types';
 
 export type Point={x:number;y:number};
@@ -9,6 +10,15 @@ export function groupDropTarget(session:Session,sourceId:string,anchorId:string)
  if(!source||!anchor?.group||source.group===anchor.group||source.pinned!==anchor.pinned||
    (source.workspace||'Personlig')!==(anchor.workspace||'Personlig'))return null;
  return {id:anchorId,edge:'group' as const,group:anchor.group,workspace:anchor.workspace||'Personlig'};
+}
+
+export function splitDropTarget(session:Session,sourceId:string,playerId?:string|null) {
+ const candidates=splitCandidates(session,playerId);
+ const peer=sourceId===session.active
+  ?candidates.find(tab=>!session.split?.includes(tab.id))
+  :candidates.find(tab=>tab.id===sourceId);
+ if(!peer||session.split?.includes(peer.id))return null;
+ return {id:peer.id,edge:'split' as const};
 }
 
 /** Slow down near the edge instead of jumping a whole tab at a time. */

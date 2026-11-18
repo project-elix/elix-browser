@@ -109,6 +109,8 @@ use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Deserialize)]
 pub struct Handoff {
+    #[serde(default)]
+    pub saved_session: Option<String>,
     pub profile: String,
     pub tab: Tab,
     pub x: i32,
@@ -142,6 +144,7 @@ pub fn startup() -> Result<(String, Option<Handoff>), String> {
         return Ok((
             uuid::Uuid::new_v4().to_string(),
             Some(Handoff {
+                saved_session: None,
                 profile: String::new(),
                 tab: Tab::new(url),
                 x: 100,
@@ -159,13 +162,16 @@ pub fn ready(app: &AppHandle) {
     }
 }
 
-pub async fn detach(app: AppHandle, id: String, outside_only: bool) -> Result<bool, String> {
-    detach_inner(app, id, outside_only, false).await
+#[derive(Deserialize)]
+pub struct DropPoint { x: f64, y: f64 }
+
+pub async fn detach(app: AppHandle, id: String, outside_only: bool, drop_point: Option<DropPoint>) -> Result<bool, String> {
+    detach_inner(app, id, outside_only, false, drop_point).await
 }
 
 #[cfg(feature = "smoke-tests")]
 pub async fn rejected_detach_for_test(app: AppHandle, id: String) -> Result<bool, String> {
-    detach_inner(app, id, false, true).await
+    detach_inner(app, id, false, true, None).await
 }
 
 async fn detach_inner(
@@ -173,10 +179,11 @@ async fn detach_inner(
     id: String,
     outside_only: bool,
     _reject_ready: bool,
+    drop_point: Option<DropPoint>,
 ) -> Result<bool, String> {
     #[cfg(not(windows))]
     {
-        let _ = (app, id, outside_only);
+        let _ = (app, id, outside_only, drop_point);
         Err("Krever Windows".into())
     }
     #[cfg(windows)]
@@ -193,7 +200,17 @@ async fn detach_inner(
             GetWindowRect(window.hwnd().map_err(|e| e.to_string())?, &mut rect)
                 .map_err(|e| e.to_string())?;
         }
-        if outside_only
+        // Use the release event coordinates. The pointer can move before the
+        // asynchronous shell command runs, especially across monitors.
+        if let Some(drop) = drop_point {
+            if !drop.x.is_finite() || !drop.y.is_finite() { return Err("Ugyldig slippunkt".into()); }
+            let origin = window.inner_position().map_err(|e| e.to_string())?;
+            let scale = window.scale_factor().map_err(|e| e.to_string())?;
+            point.x = origin.x.saturating_add((drop.x * scale).round() as i32);
+            point.y = origin.y.saturating_add((drop.y * scale).round() as i32);
+        }
+        let target = if outside_only { super::window_transfer::destination(&app, point)? } else { None };
+        if outside_only && target.is_none()
             && point.x >= rect.left
             && point.x < rect.right
             && point.y >= rect.top
@@ -223,18 +240,53 @@ async fn detach_inner(
             .ok_or("Ukjent fane")?;
         let original_url = tab.url.clone();
         let handoff = Handoff {
+            saved_session: None,
             profile: state.profile.lock().unwrap().clone(),
             tab,
             x: point.x.saturating_sub(200),
             y: point.y.saturating_sub(40),
         };
+        let original_profile = handoff.profile.clone();
+        let outcome = if let Some(pid) = target {
+            if handoff.tab.private { return Err("Private faner beholdes i vinduet de ble åpnet i.".into()); }
+            super::window_transfer::send(pid, &handoff).await
+        } else { launch_window(&app, handoff, _reject_ready).await };
+        if let Err(error) = outcome {
+            state.logs.add("error", "window_transfer_startup_failed");
+            return Err(error);
+        }
+        state.logs.add("info", "window_transfer_ready");
+        if *state.profile.lock().unwrap() == original_profile && state
+            .session
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == id && t.url == original_url)
+        {
+            // Remove atomically without ever publishing the moved page to Ctrl+Shift+T.
+            browser::close_transferred(&app, &id)?;
+        }
+        Ok(true)
+    }
+}
+
+pub async fn launch_window(app: &AppHandle, handoff: Handoff, _reject_ready: bool) -> Result<(),String> {
+    #[cfg(not(windows))]
+    { let _ = (app, handoff); Err("Krever Windows".into()) }
+    #[cfg(windows)]
+    {
+        #[cfg(feature = "smoke-tests")]
+        let state = app.state::<AppState>();
+        #[cfg(feature = "smoke-tests")]
+        let saved_session_test = handoff.saved_session.is_some();
         let bytes = serde_json::to_vec(&handoff).map_err(|e| e.to_string())?;
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
         #[cfg(feature = "smoke-tests")]
         let smoke_root = std::env::args()
             .any(|a| a == "--self-test")
             .then(|| state.root.clone());
-        let outcome = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
             use std::io::{BufRead, BufReader};
             use std::process::{Command, Stdio};
             let mut command = Command::new(executable);
@@ -253,6 +305,7 @@ async fn detach_inner(
                 command
                     .arg("--elix-smoke-window")
                     .env("ELIX_SMOKE_ROOT", root);
+                if saved_session_test { command.env("ELIX_SMOKE_SAVED_SESSION","1"); }
                 if _reject_ready {
                     command.arg("--elix-smoke-reject-window");
                 }
@@ -301,23 +354,6 @@ async fn detach_inner(
             result
         })
         .await
-        .map_err(|e| e.to_string())?;
-        if let Err(error) = outcome {
-            state.logs.add("error", "window_transfer_startup_failed");
-            return Err(error);
-        }
-        state.logs.add("info", "window_transfer_ready");
-        if state
-            .session
-            .lock()
-            .unwrap()
-            .tabs
-            .iter()
-            .any(|t| t.id == id && t.url == original_url)
-        {
-            // Remove atomically without ever publishing the moved page to Ctrl+Shift+T.
-            browser::close_transferred(&app, &id)?;
-        }
-        Ok(true)
+        .map_err(|e| e.to_string())?
     }
 }

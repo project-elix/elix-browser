@@ -38,3 +38,21 @@ export default function MediaControls({active,tabs,compact,onError}:{active?:Tab
   </>}
  </section>;
 }
+
+export function MediaSourceChoice({sourceId,onError}:{sourceId:string;onError:(error:unknown)=>void}){
+ const [kept,setKept]=useState(false),[returning,setReturning]=useState(false);
+ const returnToTab=async()=>{
+  setReturning(true);
+  try{await rpc('media',{operation:'return',id:sourceId})}
+  catch(error){setReturning(false);onError(error)}
+ };
+ return <section className="media-source" role={kept?'region':'dialog'} aria-labelledby="media-source-title" aria-describedby="media-source-help">
+  <div>
+   <PictureInPicture2 size={28} aria-hidden="true"/>
+   <h2 id="media-source-title">{kept?'Avspillingen er i minispilleren':'Beholde minispilleren?'}</h2>
+   <p id="media-source-help">Avslutt minispilleren for å velge en annen sang på nettsiden. Avspillingen fortsetter i fanen.</p>
+   {!kept&&<button className="primary" disabled={returning} onClick={()=>setKept(true)}>Behold minispilleren</button>}
+   <button disabled={returning} onClick={()=>void returnToTab()}>Avslutt minispilleren</button>
+  </div>
+ </section>;
+}

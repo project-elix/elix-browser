@@ -40,10 +40,17 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
         {
             let store = state.store.lock().unwrap();
             let profiles = store.profiles()?;
-            if profiles.len() != 2 || !store.settings().gaming || !store.settings().developer {
+            if profiles.len() != 5 || !store.settings().gaming || !store.settings().developer {
                 return Err("Profiles/preferences did not survive upgrade".into());
             }
+            if profiles.iter().filter(|p| p.workspace.is_some()).count() != 3 ||
+                profiles.last().map(|p| p.id.as_str()) != Some(state.profile.lock().unwrap().as_str()) {
+                return Err("Workspace profile identities or active profile did not survive restart".into());
+            }
             for p in &profiles {
+                if store.permission(&p.id, "https://127.0.0.1:44335", "camera") != workspace_permission(p) {
+                    return Err(format!("Camera permission changed for {}", p.name));
+                }
                 if store
                     .entries(&p.id, "bookmarks")?
                     .iter()
@@ -75,12 +82,16 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
         return Err(format!("Unexpected test version {version}"));
     }
     {
-        let store = state.store.lock().unwrap();
+        let mut store = state.store.lock().unwrap();
         if store.get("upgrade_seed_version").is_some() {
             return Err("Old executable restarted instead of upgraded executable".into());
         }
         store.create_profile("Upgrade secondary")?;
+        for preset in ["work", "personal", "gaming"] {
+            store.workspace_profile(preset)?;
+        }
         for p in store.profiles()? {
+            store.set_permission(&p.id, "https://127.0.0.1:44335", "camera", workspace_permission(&p))?;
             store.bookmark(&p.id, "https://example.com/upgrade", &p.name)?;
             store.visit(&p.id, "https://example.com/upgrade", &p.name)?;
             let dir = crate::profiles::directory(&state.root, &p.id)?;
@@ -148,6 +159,14 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     Err("Installer unexpectedly returned without restarting".into())
 }
 
+fn workspace_permission(profile: &crate::storage::Profile) -> &'static str {
+    match profile.workspace.as_deref() {
+        Some("work") => "allow",
+        Some("personal") => "deny",
+        _ => "ask",
+    }
+}
+
 async fn check_cookies(app: &AppHandle, seed: bool) -> Result<(), String> {
     let profiles = app.state::<AppState>().store.lock().unwrap().profiles()?;
     for p in profiles {
@@ -173,13 +192,13 @@ async fn check_cookies(app: &AppHandle, seed: bool) -> Result<(), String> {
                 .unwrap()
                 .tabs
                 .iter()
-                .any(|t| t.id == id && t.title == format!("cookie:{}", p.id) && !t.loading);
+                .any(|t| t.id == id && t.title == format!("cookie:{}:storage:{}", p.id, p.id) && !t.loading);
             if found {
                 break;
             }
             if std::time::Instant::now() > until {
                 return Err(format!(
-                    "Cookie persistence/isolation failed for profile {}",
+                    "Cookie/localStorage persistence or isolation failed for profile {}",
                     p.name
                 ));
             }

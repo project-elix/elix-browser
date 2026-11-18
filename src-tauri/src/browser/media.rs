@@ -332,7 +332,17 @@ pub fn before_activate(app: &AppHandle, id: &str) -> Result<(), String> {
     if let Some(prior) = prior {
         if prior.window == "main" && prior.id != id { exit(app, &prior.id)?; }
     }
-    if is_player(app, id) { return_to_browser(app)?; }
+    // Selecting the source shows the keep/return choice in the shell. The sole
+    // live page stays in its always-on-top host until the user chooses return.
+    if is_player(app, id) {
+        if let Some(window) = app.get_window(PLAYER_WINDOW) {
+            window.unminimize().map_err(|e| e.to_string())?;
+        }
+        if let Some(player) = app.state::<AppState>().media.lock().unwrap().player.as_mut() {
+            if player.id == id { player.hidden = false; }
+        }
+        emit(app);
+    }
     Ok(())
 }
 
@@ -553,6 +563,9 @@ pub fn perform(app: &AppHandle, operation: &str, id: Option<&str>) -> Result<Val
         "hide" => set_hidden(app, true)?,
         "show" => set_hidden(app, false)?,
         "return" => {
+            if id.is_some_and(|source| !is_player(app, source)) {
+                return Err("Minispilleren har byttet fane.".into());
+            }
             if let Some(id) = return_to_browser(app)? {
                 checkpoint("media.return.activate.begin");
                 super::activate(app, &id)?;

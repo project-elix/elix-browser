@@ -22,10 +22,15 @@ export function validateSender(config) {
   if (config.senderName && (typeof config.senderName !== 'string' || config.senderName.length > 100 || /[\x00-\x1f\x7f]/.test(config.senderName))) throw new BrevoError('invalid-sender-name');
 }
 
-export function loginMessage(config, email, code) {
+export function loginMessage(config, email, code, purpose = 'email') {
   validateSender(config);
   if (!validEmail(email) || !/^\d{8}$/.test(code)) throw new BrevoError('invalid-message');
   const name = config.senderName || 'ELIX Browser';
+  if(purpose==='password')return {
+    sender:{name,email:config.senderEmail},to:[{email}],
+    subject:'Bekreft nytt passord til ELIX',
+    textContent:`Bruk koden ${code} i ELIX for å opprette eller endre passordet ditt. Den er gyldig i 10 minutter. Ikke del koden. Hvis du ikke ba om nytt passord, kan du se bort fra meldingen.`,
+  };
   return {
     sender: {email: config.senderEmail, name},
     to: [{email}],
@@ -58,9 +63,9 @@ async function request(config, path, payload, fetchImpl) {
   try { return await response.json(); } catch { throw new BrevoError('invalid-provider-response'); }
 }
 
-export async function sendLoginEmail(config, email, code, fetchImpl = fetch) {
+export async function sendLoginEmail(config, email, code, fetchImpl = fetch, purpose = 'email') {
   validateBrevo(config);
-  const result = await request(config, '/smtp/email', loginMessage(config, email, code), fetchImpl);
+  const result = await request(config, '/smtp/email', loginMessage(config, email, code, purpose), fetchImpl);
   if (typeof result?.messageId !== 'string' || !result.messageId) throw new BrevoError('missing-message-id');
   // Acceptance by Brevo is not proof of inbox delivery. Never return the message ID to the UI.
 }

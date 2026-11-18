@@ -7,6 +7,8 @@ import {fileURLToPath} from 'node:url';
 import {BrevoError,validEmail} from './brevo.mjs';
 import {sendMail,mailConfigured} from './mail.mjs';
 import {readConfig,validateOrigin} from './config.mjs';
+import {passwordStore,validatePassword} from './password.mjs';
+import {discordRoutes} from './discord.mjs';
 const digest=s=>createHash('sha256').update(s).digest('hex');
 const random=()=>randomBytes(32).toString('base64url');
 const seconds=()=>Math.floor(Date.now()/1000);
@@ -30,6 +32,7 @@ export function createAccounts(config,providers={}){
   const db=new DatabaseSync(config.database);
   db.exec(`PRAGMA journal_mode=WAL;PRAGMA foreign_keys=ON;PRAGMA busy_timeout=5000;
     CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, provider TEXT NOT NULL, subject TEXT NOT NULL, name TEXT NOT NULL, UNIQUE(provider,subject));
+    CREATE TABLE IF NOT EXISTS passwords(user_id TEXT PRIMARY KEY REFERENCES users(id), salt BLOB NOT NULL, digest BLOB NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS challenges(id TEXT PRIMARY KEY, provider TEXT NOT NULL, subject TEXT, code TEXT, expires INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, state TEXT UNIQUE, binding TEXT, user_id TEXT, status TEXT NOT NULL DEFAULT 'pending');
     CREATE TABLE IF NOT EXISTS limits(key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
@@ -42,7 +45,10 @@ export function createAccounts(config,providers={}){
   const publicUser=u=>({id:u.id,provider:u.provider,name:u.name});
   const issue=u=>{const token=random();q('INSERT INTO sessions VALUES(?,?,?)').run(digest(token),u.id,seconds()+30*86400);return {token,account:publicUser(u)};};
   const authenticate=req=>{const token=req.headers.authorization?.replace(/^Bearer /,'');if(!token||token.length>100)throw fault(401,'Logg inn på nytt');const u=q('SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?').get(digest(token),seconds());if(!u)throw fault(401,'Logg inn på nytt');return u;};
-  const sendEmail=providers.sendEmail??((email,code)=>sendMail(config,email,code));
+  const sendEmail=providers.sendEmail??((email,code,purpose)=>sendMail(config,email,code,purpose));
+  const passwords=passwordStore();
+  const credential=email=>q("SELECT p.* FROM passwords p JOIN users u ON p.user_id=u.id WHERE u.provider='email' AND u.subject=?").get(email);
+  const discord=discordRoutes({config,base,q,body,json,limit,seconds,user,issue,identity:providers.discordIdentity});
   let cleaned=0;
   const server=createServer(async(req,res)=>{
     try{
@@ -52,27 +58,52 @@ export function createAccounts(config,providers={}){
       if(req.headers.origin&&req.headers.origin!==base.origin)throw fault(403,'Ugyldig opprinnelse');
       limit('all:'+ip,1200,600);
       if(path==='/health'&&req.method==='GET')return json(res,200,{ok:true});
-      if(path==='/v1/config'&&req.method==='GET')return json(res,200,{email:!!providers.sendEmail||mailConfigured(config),discord:false,sync:true});
-      if(path==='/v1/auth/email/start'&&req.method==='POST'){
+      if(path==='/v1/config'&&req.method==='GET')return json(res,200,{email:!!providers.sendEmail||mailConfigured(config),password:true,discord:discord.enabled,sync:true});
+      if(path==='/v1/auth/password/login'&&req.method==='POST'){
+        const b=await body(req),email=emailOf(b.email);
+        limit('password-ip:'+ip,60,600);limit('password-login:'+email,15,600);
+        if(typeof b.password!=='string'||Buffer.byteLength(b.password)>512)throw fault(401,'Feil e-postadresse eller passord.');
+        const record=credential(email);
+        if(!await passwords.matches(b.password,record))throw fault(401,'Feil e-postadresse eller passord.');
+        const current=q('SELECT u.* FROM users u JOIN passwords p ON u.id=p.user_id WHERE u.id=? AND p.digest=?').get(record.user_id,record.digest);
+        if(!current)throw fault(401,'Passordet ble endret. Prøv på nytt.');
+        return json(res,200,issue(current));
+      }
+      const passwordFlow=path.startsWith('/v1/auth/password/');
+      if((path==='/v1/auth/email/start'||path==='/v1/auth/password/start')&&req.method==='POST'){
         const b=await body(req),email=emailOf(b.email);limit('email:'+email,5);limit('email-ip:'+ip,20);
         const id=random(),code=String(randomInt(10000000,100000000));
-        q('INSERT INTO challenges(id,provider,subject,code,expires) VALUES(?,?,?,?,?)').run(digest(id),'email',email,hash(id+':'+code),seconds()+600);
-        try{await sendEmail(email,code);}catch(e){q('DELETE FROM challenges WHERE id=?').run(digest(id));throw e;}
+        q('INSERT INTO challenges(id,provider,subject,code,expires) VALUES(?,?,?,?,?)').run(digest(id),passwordFlow?'password':'email',email,hash(id+':'+code),seconds()+600);
+        try{await sendEmail(email,code,passwordFlow?'password':'email');}catch(e){q('DELETE FROM challenges WHERE id=?').run(digest(id));throw e;}
         return json(res,200,{challenge:id,expires_in:600});
       }
-      if(path==='/v1/auth/email/verify'&&req.method==='POST'){
+      if((path==='/v1/auth/email/verify'||path==='/v1/auth/password/verify')&&req.method==='POST'){
         limit('verify:'+ip,100,600);const b=await body(req);
         if(typeof b.challenge!=='string'||b.challenge.length>100||typeof b.code!=='string'||!/^\d{8}$/.test(b.code))throw fault(400,'Skriv den åttesifrede koden');
-        const c=q('SELECT * FROM challenges WHERE id=? AND provider=? AND expires>?').get(digest(b.challenge),'email',seconds());
+        const c=q('SELECT * FROM challenges WHERE id=? AND provider=? AND expires>?').get(digest(b.challenge),passwordFlow?'password':'email',seconds());
         if(!c||c.attempts>=5||c.status!=='pending')throw fault(401,'Koden er ugyldig eller utløpt');
         q('UPDATE challenges SET attempts=attempts+1 WHERE id=?').run(c.id);
         if(!equal(c.code,hash(b.challenge+':'+b.code)))throw fault(401,'Koden er ugyldig eller utløpt');
+        if(passwordFlow){
+          validatePassword(b.password);
+          const key=await passwords.create(b.password);
+          db.exec('BEGIN IMMEDIATE');
+          try{
+            if(!q('DELETE FROM challenges WHERE id=? AND expires>?').run(c.id,seconds()).changes)throw fault(401,'Koden er ugyldig eller utløpt');
+            const account=user('email',c.subject,c.subject);
+            q('INSERT INTO passwords VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET salt=excluded.salt,digest=excluded.digest').run(account.id,key.salt,key.digest);
+            q('DELETE FROM sessions WHERE user_id=?').run(account.id);
+            q("DELETE FROM challenges WHERE subject=? AND provider IN ('email','password')").run(c.subject);
+            const session=issue(account);
+            db.exec('COMMIT');
+            return json(res,200,session);
+          }catch(error){db.exec('ROLLBACK');throw error;}
+        }
         q('DELETE FROM challenges WHERE id=?').run(c.id);
+        if(credential(c.subject))throw fault(403,'Bruk passordet ditt i Alpha 10 eller en nyere versjon.');
         return json(res,200,issue(user('email',c.subject,c.subject)));
       }
-      // TODO: enable Discord only after a native callback binds completion to the initiating ELIX instance.
-      // A public polling challenge can be forwarded to another browser to steal its completed login.
-      if(path.startsWith('/v1/auth/discord/'))throw fault(503,'Discord-innlogging er ikke tilgjengelig i denne versjonen');
+      if(path.startsWith('/v1/auth/discord/'))return await discord.handle(req,res,url,ip);
       const u=authenticate(req);
       if(path==='/v1/account'&&req.method==='GET')return json(res,200,{account:publicUser(u)});
       if(path==='/v1/auth/logout'&&req.method==='POST'){await body(req);q('DELETE FROM sessions WHERE token=?').run(digest(req.headers.authorization.slice(7)));return json(res,200,{ok:true});}
