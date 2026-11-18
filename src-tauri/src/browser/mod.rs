@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(snapshot["split"], serde_json::json!(pair));
         let persisted = serde_json::to_value(session.persistent()).unwrap();
         assert_eq!(persisted["split"], serde_json::json!(pair));
-        let restored = saved_sessions::decode(&persisted.to_string()).unwrap();
+        let restored = saved_sessions::decode(&saved_sessions::encode(&session, false).unwrap()).unwrap();
         assert_ne!(restored.split, Some(pair));
         assert_eq!(restored.split, Some([restored.tabs[0].id.clone(),restored.tabs[1].id.clone()]));
         assert_eq!(restored.active, restored.tabs[0].id);

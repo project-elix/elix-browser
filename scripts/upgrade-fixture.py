@@ -8,6 +8,8 @@ from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 p = argparse.ArgumentParser()
 p.add_argument('mode', choices=['prepare', 'serve'])
 p.add_argument('root', type=pathlib.Path)
+p.add_argument('--channel', choices=['stable', 'beta', 'developer'], default='stable')
+p.add_argument('--version', default='0.1.1')
 args = p.parse_args()
 root = args.root
 root.mkdir(parents=True, exist_ok=True)
@@ -25,8 +27,8 @@ if args.mode == 'prepare':
     (root/'tls.pem').write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     (root/'tls.cer').write_bytes(cert.public_bytes(serialization.Encoding.DER))
     (root/'tls.key').write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
-    for case, artifact, signature in [('stable','new.exe','new.exe.sig'), ('corrupt','corrupt.exe','new.exe.sig'), ('replay','old.exe','old.exe.sig')]:
-        data = {'version':'0.1.1', 'notes':'Disposable CI upgrade', 'pub_date':now.isoformat().replace('+00:00','Z'),
+    for case, artifact, signature in [(args.channel,'new.exe','new.exe.sig'), ('corrupt','corrupt.exe','new.exe.sig'), ('replay','old.exe','old.exe.sig')]:
+        data = {'version':args.version, 'notes':'Disposable CI upgrade', 'pub_date':now.isoformat().replace('+00:00','Z'),
                 'platforms':{'windows-x86_64':{'url':f'https://127.0.0.1:44335/{artifact}', 'signature':(root/signature).read_text().strip()}}}
         (root/f'{case}.json').write_text(json.dumps(data))
     (root/'cookie.html').write_text("""<!doctype html><title>cookie pending</title><script>

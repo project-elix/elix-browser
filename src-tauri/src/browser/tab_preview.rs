@@ -55,6 +55,7 @@ pub async fn capture(app: &AppHandle, id: &str, url: &str) -> Option<String> {
         };
         let _ = setup();
     }).ok()?;
-    let image = receive.recv().await.flatten()?;
+    let image = tokio::time::timeout(std::time::Duration::from_secs(3), receive.recv())
+        .await.ok()?.flatten()?;
     eligible(app, id, url).then_some(image)
 }

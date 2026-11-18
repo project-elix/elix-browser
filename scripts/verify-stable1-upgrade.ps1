@@ -31,12 +31,14 @@ if ((Get-FileHash $old -Algorithm SHA256).Hash -ne 'bc03406019e6eb767aee5c571165
   throw 'Published Alpha 9 installer digest mismatch.'
 }
 ./scripts/verify-installed-ui.ps1 -Installer $old -OutputDirectory "$out/alpha9" -InstallDirectory $installDir
+$oldInfo = Get-Content "$out/alpha9/ready-result.json" -Raw | ConvertFrom-Json
+if ($oldInfo.product_version -ne '0.1.4-dev.9') { throw 'Unexpected installed baseline executable.' }
 python scripts/stable1-profile.py seed $root --channel $existingChannel
 if ($LASTEXITCODE -ne 0) { throw 'Unable to seed the Alpha 9 profile.' }
 ./scripts/verify-installed-ui.ps1 -Installer $Installer -OutputDirectory "$out/candidate" -InstallDirectory $installDir -VerifyReleaseDownloads
 $installed = (Get-FileHash "$installDir/elix-browser.exe").Hash
-$expected = (Get-FileHash 'src-tauri/target/release/elix-browser.exe').Hash
-if ($installed -ne $expected) { throw 'Installed executable differs from the candidate build.' }
+$upgradedInfo = Get-Content "$out/candidate/ready-result.json" -Raw | ConvertFrom-Json
+if ($upgradedInfo.product_version -ne $version) { throw 'Upgraded executable has the wrong candidate version.' }
 python scripts/stable1-profile.py verify $root --channel $existingChannel
 if ($LASTEXITCODE -ne 0) { throw 'Upgrading the existing Alpha 9 profile failed.' }
 $evidence = [ordered]@{

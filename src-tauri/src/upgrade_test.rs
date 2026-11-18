@@ -23,7 +23,7 @@ pub fn start(app: AppHandle) {
         std::thread::sleep(std::time::Duration::from_secs(12));
         let result = tauri::async_runtime::block_on(exercise(&app));
         let (code, message) = match result {
-            Ok(()) => (0, "PASS: signed 0.1.0 -> 0.1.1 install; profiles, bookmarks, history, settings, cookies and profile files preserved; tampered/replayed artifacts rejected".to_string()),
+            Ok(()) => (0, format!("PASS: signed upgrade to {} preserved profiles, bookmarks, history, cookies, localStorage, permissions and channel; tampered/replayed artifacts rejected", app.package_info().version)),
             Err(e) => (1, format!("FAIL: {e}")),
         };
         let root = &app.state::<AppState>().root;
@@ -36,11 +36,15 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     stage(app, "Beginning version/data verification");
     let version = app.package_info().version.to_string();
-    if version == "0.1.1" {
+    let old = option_env!("ELIX_QA_OLD_VERSION").ok_or("Missing upgrade fixture source version")?;
+    let new = option_env!("ELIX_QA_NEW_VERSION").ok_or("Missing upgrade fixture target version")?;
+    let channel = option_env!("ELIX_QA_CHANNEL").ok_or("Missing upgrade fixture channel")?;
+    if version == new {
         {
             let store = state.store.lock().unwrap();
             let profiles = store.profiles()?;
-            if profiles.len() != 5 || !store.settings().gaming || !store.settings().developer {
+            let settings = store.settings();
+            if profiles.len() != 5 || !settings.gaming || !settings.developer || settings.channel != channel {
                 return Err("Profiles/preferences did not survive upgrade".into());
             }
             if profiles.iter().filter(|p| p.workspace.is_some()).count() != 3 ||
@@ -70,7 +74,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
                     return Err("Profile data missing after upgrade".into());
                 }
             }
-            if store.get("upgrade_seed_version").as_deref() != Some("0.1.0") {
+            if store.get("upgrade_seed_version").as_deref() != Some(old) {
                 return Err("Missing original version marker".into());
             }
         }
@@ -78,7 +82,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
         check_cookies(app, false).await?;
         return Ok(());
     }
-    if version != "0.1.0" {
+    if version != old {
         return Err(format!("Unexpected test version {version}"));
     }
     {
@@ -102,13 +106,14 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
         store.set(
             "preferences",
             &serde_json::to_string(&Settings {
+                channel: channel.into(),
                 developer: true,
                 gaming: true,
                 ..Default::default()
             })
             .unwrap(),
         )?;
-        store.set("upgrade_seed_version", "0.1.0")?;
+        store.set("upgrade_seed_version", old)?;
     }
     stage(app, "Seeding real profile cookies");
     check_cookies(app, true).await?;
@@ -140,8 +145,8 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     }
     stage(app, "Checking real signed update");
     let offered = crate::updater::check(app).await?;
-    if offered["version"] != "0.1.1" {
-        return Err("0.1.1 not detected".into());
+    if offered["version"].as_str() != Some(new) {
+        return Err(format!("{channel} update to {new} was not detected"));
     }
     stage(app, "Downloading and verifying signed update");
     let ready = crate::updater::download(app).await?;
@@ -150,7 +155,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     }
     std::fs::write(
         state.root.join("verified.txt"),
-        "0.1.1 signature verified; corrupt/replay rejected",
+        format!("{channel} {new} signature verified; corrupt/replay rejected"),
     )
     .map_err(|e| e.to_string())?;
     // The real NSIS updater exits this process and restarts with the original argument.

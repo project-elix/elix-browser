@@ -33,4 +33,4 @@ Etterprøv også ELIX-20 ved å trekke første, midterste og siste fane ut av en
 | ELIX-43 · Arbeidsområdeprofiler | Bruk samme nettsted i Jobb, Privat og Gaming. Kontroller informasjonskapsler, pålogging, nettlagring og tillatelser i hver profil etter omstart. |
 | ELIX-69 · Mellom to vinduer | Dra en fane til et eksisterende ELIX-vindu. Kontroller ankomst før originalfanen lukkes. Prøv også at mottakeren lukkes eller avviser underveis. |
 
-ELIX-31 om API til hjelp og søk mangler et konkret søkeeksempel. Spørsmålet om adressefelt eller egen hjelpeside ligger i kortet.
+ELIX-31 om API til hjelp og søk har Alpha 11 som foreløpig mål for avklaring og mangler et konkret søkeeksempel. Spørsmålet om adressefelt eller egen hjelpeside ligger i kortet.

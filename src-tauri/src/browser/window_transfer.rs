@@ -49,8 +49,15 @@ pub fn destination(app: &AppHandle, point: POINT) -> Result<Option<u32>, String>
         if root.is_invalid() { return Ok(None); }
         let mut pid = 0;
         GetWindowThreadProcessId(root, Some(&mut pid));
-        if pid == 0 || pid == std::process::id() || !same_executable(pid) { return Ok(None); }
-        if GetPropW(root, w!("ELIXBrowser.TabTransfer.v1")).0 as usize != pid as usize || !registered(app, pid) {
+        if pid == 0 { return Ok(None); }
+        if pid == std::process::id() {
+            if app.get_window("main").and_then(|w| w.hwnd().ok()) == Some(root) { return Ok(None); }
+            return Err("Slipp fanen over et annet nettleservindu.".into());
+        }
+        let mark = GetPropW(root, w!("ELIXBrowser.TabTransfer.v1")).0 as usize;
+        let elix = same_executable(pid);
+        if mark == 0 && !elix { return Ok(None); }
+        if mark != pid as usize || !elix || !registered(app, pid) {
             return Err("Dette ELIX-vinduet kan ikke motta fanen. Originalfanen er beholdt.".into());
         }
         Ok(Some(pid))
@@ -111,7 +118,12 @@ fn receive(app: &AppHandle, profile: &str, mut tab: Tab) -> Result<(), String> {
         let previous = session.active.clone();
         tab.reset_runtime_state(chrono::Utc::now().timestamp());
         tab.workspace = session.workspace.clone();
-        session.tabs.push(tab);
+        let position = session.tabs.iter().rposition(|peer| !tab.group.is_empty()
+            && peer.workspace == tab.workspace && peer.pinned == tab.pinned && peer.group == tab.group)
+            .or_else(|| session.tabs.iter().rposition(|peer| peer.workspace == tab.workspace && peer.pinned == tab.pinned))
+            .map(|index| index + 1)
+            .unwrap_or_else(|| if tab.pinned { 0 } else { session.tabs.len() });
+        session.tabs.insert(position, tab);
         previous
     };
     if let Err(error) = super::activate(app, &id).and_then(|_| super::persist(app)) {

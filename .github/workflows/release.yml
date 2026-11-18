@@ -27,6 +27,8 @@ jobs:
   upgrade-verification:
     if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/upgrade-test.yml
+    with:
+      channel: ${{ inputs.channel }}
   build:
     needs: [native-verification, upgrade-verification]
     if: github.ref == 'refs/heads/main'
@@ -91,6 +93,8 @@ jobs:
           $dest = Join-Path $env:RUNNER_TEMP 'ELIX-signed-install'
           $review = Join-Path $env:RUNNER_TEMP 'ELIX-clean-release-review'
           ./scripts/verify-installed-ui.ps1 -Installer $installer.FullName -InstallDirectory $dest -OutputDirectory $review
+          $upgraded = Get-Content "$env:RUNNER_TEMP/profile-upgrade-review/profile-upgrade.json" -Raw | ConvertFrom-Json
+          if ((Get-FileHash "$dest/elix-browser.exe").Hash -ne $upgraded.exe_sha256) { throw 'Clean and upgraded signed installations differ' }
           Copy-Item "$review/signed-ready.png" 'signed-release.png'
       - name: Record signed clean install and upgrade evidence
         shell: pwsh

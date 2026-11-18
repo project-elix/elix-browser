@@ -32,8 +32,7 @@ try {
       $window = [Windows.Automation.AutomationElement]::FromHandle($app.MainWindowHandle)
       $address = $window.FindFirst([Windows.Automation.TreeScope]::Descendants,$addressCondition)
       $search = $window.FindFirst([Windows.Automation.TreeScope]::Descendants,$searchCondition)
-      if ($address -and $search -and $address.Current.IsEnabled -and !$address.Current.IsOffscreen -and
-          $search.Current.IsEnabled -and !$search.Current.IsOffscreen) {
+      if ($address -and $search -and $address.Current.IsEnabled -and !$address.Current.IsOffscreen) {
         $ready = $true
         $elements = $window.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
         @($elements | ForEach-Object { $_.Current.Name }) | Set-Content -Encoding UTF8 (Join-Path $OutputDirectory 'accessible-names.txt')

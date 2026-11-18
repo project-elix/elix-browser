@@ -35,8 +35,15 @@ pub fn encode(session: &Session, named: bool) -> Result<String, String> {
 pub fn decode(data: &str) -> Option<Session> {
     let stored: StoredSession = serde_json::from_str(data).ok()?;
     let mut session = stored.session;
+    if stored.layout_version > 1 { return None; }
     let mut ids = HashSet::new();
-    if stored.layout_version > 1 || session.tabs.len() > 100 || session.workspaces.len() > 20
+    if stored.layout_version == 0 {
+        // Older releases tolerated stale IDs and ignored persisted split references.
+        // Keep their eligible pages when upgrading to the versioned format.
+        if !session.tabs.is_empty() && !session.tabs.iter().any(|t|
+            !t.private && security::stored_destination_allowed(&t.url)) { return None; }
+        session.split = None;
+    } else if session.tabs.len() > 100 || session.workspaces.len() > 20
         || session.tabs.iter().any(|t| t.id.is_empty() || !ids.insert(&t.id) || t.private
             || !security::stored_destination_allowed(&t.url))
         || (!session.tabs.is_empty() && !ids.contains(&session.active))
@@ -77,6 +84,17 @@ pub async fn open(app: AppHandle, profile: String, name: String) -> Result<(),St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_sessions_restore_ordinary_tabs_even_with_a_stale_active_id() {
+        let public = Tab::new("https://example.com/".into());
+        let mut private = Tab::new("https://private.test/".into()); private.private = true;
+        let legacy = Session { active: "stale".into(), tabs: vec![public,private], ..Default::default() };
+        let restored = decode(&serde_json::to_string(&legacy).unwrap()).unwrap();
+        assert_eq!(restored.tabs.len(), 1);
+        assert_eq!(restored.tabs[0].url, "https://example.com/");
+        assert_eq!(restored.active, restored.tabs[0].id);
+    }
+
     #[test]
     fn two_workspaces_split_order_private_content_and_recovery() {
         let dir=tempfile::tempdir().unwrap();

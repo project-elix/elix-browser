@@ -63,14 +63,14 @@ pub fn recover_windows(app: &AppHandle) -> Result<usize, String> {
     let mut tabs = Vec::new();
     let mut consumed = Vec::new();
     for (key, data) in rows {
-        if let Ok(session) = serde_json::from_str::<browser::Session>(&data) {
-            tabs.extend(
-                session
-                    .tabs
-                    .into_iter()
-                    .filter(|t| !t.private && crate::security::stored_destination_allowed(&t.url)),
-            );
-            consumed.push(key);
+        let backup_key = key.replacen("window_session:", "window_session_backup:", 1);
+        let layout = browser::saved_sessions::decode(&data).or_else(|| {
+            let backup = state.store.lock().unwrap().get(&backup_key)?;
+            browser::saved_sessions::decode(&backup)
+        });
+        if let Some(session) = layout {
+            tabs.extend(session.tabs);
+            consumed.extend([key, backup_key]);
         }
     }
     let count = tabs.len();
@@ -165,6 +165,22 @@ pub fn ready(app: &AppHandle) {
 #[derive(Deserialize)]
 pub struct DropPoint { x: f64, y: f64 }
 
+#[cfg(any(windows, test))]
+mod pending {
+    use std::{collections::HashSet, sync::{LazyLock, Mutex}};
+    static IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+    pub(super) struct Transfer<'a>(&'a str);
+    impl<'a> Transfer<'a> {
+        pub(super) fn reserve(id: &'a str) -> Result<Self, String> {
+            if IN_FLIGHT.lock().unwrap().insert(id.to_owned()) { Ok(Self(id)) }
+            else { Err("Fanen er allerede på vei til et annet vindu.".into()) }
+        }
+    }
+    impl Drop for Transfer<'_> {
+        fn drop(&mut self) { IN_FLIGHT.lock().unwrap().remove(self.0); }
+    }
+}
+
 pub async fn detach(app: AppHandle, id: String, outside_only: bool, drop_point: Option<DropPoint>) -> Result<bool, String> {
     detach_inner(app, id, outside_only, false, drop_point).await
 }
@@ -221,31 +237,27 @@ async fn detach_inner(
                 .add("info", "window_transfer_drop_inside");
             return Ok(false);
         }
+        let _pending = pending::Transfer::reserve(&id)?;
         let state = app.state::<AppState>();
         state.logs.add("info", "window_transfer_requested");
-        if state.downloads.lock().unwrap().iter().any(|d| {
-            d.view_id == id
-                && (d.can_resume || matches!(d.status.as_str(), "paused" | "downloading"))
-        }) {
-            return Err("Fullfør eller avbryt nedlastingen før du flytter fanen".into());
-        }
-        let tab = state
-            .session
-            .lock()
-            .unwrap()
-            .tabs
-            .iter()
-            .find(|t| t.id == id)
-            .cloned()
-            .ok_or("Ukjent fane")?;
-        let original_url = tab.url.clone();
-        let handoff = Handoff {
-            saved_session: None,
-            profile: state.profile.lock().unwrap().clone(),
-            tab,
-            x: point.x.saturating_sub(200),
-            y: point.y.saturating_sub(40),
+        let handoff = {
+            let _transition = state.session_transition.lock().unwrap();
+            if state.downloads.lock().unwrap().iter().any(|d| {
+                d.view_id == id && (d.can_resume || matches!(d.status.as_str(), "paused" | "downloading"))
+            }) {
+                return Err("Fullfør eller avbryt nedlastingen før du flytter fanen".into());
+            }
+            let tab = state.session.lock().unwrap().tabs.iter().find(|t| t.id == id)
+                .cloned().ok_or("Ukjent fane")?;
+            Handoff {
+                saved_session: None,
+                profile: state.profile.lock().unwrap().clone(),
+                tab,
+                x: point.x.saturating_sub(200),
+                y: point.y.saturating_sub(40),
+            }
         };
+        let source_tab = handoff.tab.clone();
         let original_profile = handoff.profile.clone();
         let outcome = if let Some(pid) = target {
             if handoff.tab.private { return Err("Private faner beholdes i vinduet de ble åpnet i.".into()); }
@@ -256,17 +268,13 @@ async fn detach_inner(
             return Err(error);
         }
         state.logs.add("info", "window_transfer_ready");
-        if *state.profile.lock().unwrap() == original_profile && state
-            .session
-            .lock()
-            .unwrap()
-            .tabs
-            .iter()
-            .any(|t| t.id == id && t.url == original_url)
-        {
-            // Remove atomically without ever publishing the moved page to Ctrl+Shift+T.
-            browser::close_transferred(&app, &id)?;
+        let _transition = state.session_transition.lock().unwrap();
+        let current_profile = state.profile.lock().unwrap().clone();
+        if !source_unchanged(&current_profile, &original_profile, &state.session.lock().unwrap(), &source_tab) {
+            return Err("Målvinduet mottok fanen. Kilden ble endret under flyttingen og er beholdt.".into());
         }
+        // Never publish a transferred page to the source window's reopen stack.
+        browser::close_transferred(&app, &id).map_err(|error| format!("Målvinduet mottok fanen, men kilden kunne ikke lukkes. {error}"))?;
         Ok(true)
     }
 }
@@ -355,5 +363,40 @@ pub async fn launch_window(app: &AppHandle, handoff: Handoff, _reject_ready: boo
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+}
+
+#[cfg(any(windows, test))]
+fn source_unchanged(profile: &str, original_profile: &str, session: &browser::Session, source: &Tab) -> bool {
+    profile == original_profile && session.tabs.iter().any(|current| {
+        current.id == source.id && current.url == source.url && current.private == source.private
+            && current.pinned == source.pinned && current.muted == source.muted
+            && current.workspace == source.workspace && current.group == source.group
+            && current.group_manual == source.group_manual
+    })
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    #[test]
+    fn only_one_destination_can_receive_a_source_at_a_time() {
+        let source = pending::Transfer::reserve("same-tab").unwrap();
+        assert!(pending::Transfer::reserve("same-tab").is_err());
+        assert!(pending::Transfer::reserve("other-tab").is_ok());
+        drop(source);
+        assert!(pending::Transfer::reserve("same-tab").is_ok());
+    }
+    #[test]
+    fn changed_source_survives_a_destination_acknowledgment() {
+        let source = Tab::new("https://example.com".into());
+        let mut session = browser::Session { tabs: vec![source.clone()], ..Default::default() };
+        assert!(source_unchanged("one", "one", &session, &source));
+        assert!(!source_unchanged("two", "one", &session, &source));
+        session.tabs[0].pinned = true;
+        assert!(!source_unchanged("one", "one", &session, &source));
+        session.tabs[0] = source.clone();
+        session.tabs[0].url = "https://example.com/next".into();
+        assert!(!source_unchanged("one", "one", &session, &source));
     }
 }
