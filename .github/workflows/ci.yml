@@ -62,6 +62,11 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $exe = Join-Path $dest 'elix-browser.exe'
           if (!(Test-Path $exe)) { throw 'Installed executable missing' }
+          $reviewFile = "$env:RUNNER_TEMP/stable1-profile-review/stable1-profile.json"
+          if (Test-Path $reviewFile) {
+            $upgraded = Get-Content $reviewFile -Raw | ConvertFrom-Json
+            if ((Get-FileHash $exe).Hash -ne $upgraded.exe_sha256) { throw 'Clean and upgraded installed executables differ' }
+          }
           $capability = Get-ItemPropertyValue 'HKCU:\Software\RegisteredApplications' 'ELIX Browser'
           if ($capability -ne 'Software\Clients\StartMenuInternet\ELIX Browser\Capabilities') { throw 'Default browser registration missing' }
           $associations = Get-ItemProperty "HKCU:\$capability\URLAssociations"

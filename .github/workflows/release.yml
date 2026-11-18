@@ -93,6 +93,8 @@ jobs:
           if ($env:RELEASE_CHANNEL -eq 'stable' -and $env:RELEASE_VERSION -eq '0.1.4') {
             $review = Join-Path $env:RUNNER_TEMP 'ELIX-clean-stable1-review'
             ./scripts/verify-installed-ui.ps1 -Installer $installer.FullName -InstallDirectory $dest -OutputDirectory $review
+            $upgraded = Get-Content "$env:RUNNER_TEMP/stable1-profile-review/stable1-profile.json" -Raw | ConvertFrom-Json
+            if ((Get-FileHash "$dest/elix-browser.exe").Hash -ne $upgraded.exe_sha256) { throw 'Clean and upgraded signed installations differ' }
             Copy-Item "$review/signed-ready.png" 'signed-release.png'
             return
           }
