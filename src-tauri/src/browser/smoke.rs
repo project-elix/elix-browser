@@ -78,6 +78,7 @@ pub fn start_detached(app: AppHandle) {
                 Ok(())
             })();
             let answer = result.map(|_| "PASS".to_string()).unwrap_or_else(|err|format!("FAIL: {err}"));
+            let _ = state.store.lock().unwrap().set("smoke_named_window_id", &state.window_id);
             let _ = state.store.lock().unwrap().set("smoke_named_window_result",&answer);
             // The launcher receives the browser-ready acknowledgement before the child closes.
             wait(|| state.store.lock().unwrap().get("smoke_named_window_done").as_deref()==Some("true")).ok();
@@ -166,10 +167,32 @@ fn saved_window_test(app: &AppHandle, origin: &str) -> Result<(),String> {
     store.set("smoke_named_window_done","true")?;
     completed?;
     let result=store.get("smoke_named_window_result").unwrap_or_default();
+    let child = store.get("smoke_named_window_id").ok_or("Named session child did not report its window ID")?;
     drop(store);
     if result!="PASS" { return Err(format!("Named session child failed: {result}")); }
     if state.session.lock().unwrap().active != original || app.get_webview(&original).is_none() {
         return Err("Opening a saved session replaced the source page".into());
+    }
+    // Recover this fixture while its closed window is the only eligible window.
+    // A later test detaches and recovers a different tab in the same profile.
+    let owner_key = format!("window_pid:{child}");
+    wait(|| state.store.lock().unwrap().get(&owner_key).as_deref() == Some("0"))?;
+    let existing = state.session.lock().unwrap().tabs.iter()
+        .map(|tab| tab.id.clone()).collect::<std::collections::HashSet<_>>();
+    let expected: Vec<_> = layout.tabs.iter().filter(|tab| !tab.private).collect();
+    let count = browser::detach::recover_windows(app)?;
+    let recovered: Vec<_> = state.session.lock().unwrap().tabs.iter()
+        .filter(|tab| !existing.contains(&tab.id)).cloned().collect();
+    if count != expected.len() || recovered.len() != expected.len()
+        || recovered.iter().zip(expected).any(|(actual, saved)| actual.url != saved.url
+            || actual.workspace != saved.workspace || actual.group != saved.group || actual.private) {
+        return Err(format!("Named window recovery changed its regular tabs: recovered {count}"));
+    }
+    if browser::detach::recover_windows(app)? != 0 {
+        return Err("Named window recovery duplicated tabs".into());
+    }
+    for tab in recovered {
+        browser::close_transferred(app, &tab.id)?;
     }
     Ok(())
 }
@@ -283,8 +306,9 @@ fn detached_window_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     {
         return Err("Saved transferred session lost tab metadata".into());
     }
-    if browser::detach::recover_windows(app)? != 1 {
-        return Err("Detached session recovery failed".into());
+    let recovered_count = browser::detach::recover_windows(app)?;
+    if recovered_count != 1 {
+        return Err(format!("Expected one tab from the closed transfer window, recovered {recovered_count}"));
     }
     let recovered = state
         .session
