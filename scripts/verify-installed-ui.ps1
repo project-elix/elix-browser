@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory=$true)][string]$Installer,
   [Parameter(Mandatory=$true)][string]$OutputDirectory,
   [string]$InstallDirectory = (Join-Path $env:RUNNER_TEMP 'ELIX-signed-ui-review'),
-  [switch]$VerifyReleaseDownloads
+  [Alias('VerifyStable1Downloads')][switch]$VerifyReleaseDownloads
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Windows.Forms,System.Drawing

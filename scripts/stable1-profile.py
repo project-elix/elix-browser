@@ -7,7 +7,7 @@ import sqlite3
 parser = argparse.ArgumentParser()
 parser.add_argument("action", choices=["seed", "verify"])
 parser.add_argument("root", type=Path)
-parser.add_argument("--channel", required=True, choices=["stable", "developer"])
+parser.add_argument("--channel", default="developer", choices=["stable", "developer"])
 args = parser.parse_args()
 database = args.root / "elix.sqlite"
 if not database.is_file():

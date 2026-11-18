@@ -26,6 +26,12 @@ server-only environment file; set a real HTTPS origin, a cryptographically rando
 AUTH_PEPPER (at least 32 characters), the existing Brevo credentials and verified sender.
 Do not paste secrets into commits, logs or the frontend.
 
+Stable 1 and Alpha 9 use the email-code client. Once a user sets a password,
+those clients cannot start another session for that account. Roll out password
+enrollment to devices with a password-capable client. Returning to a server
+which predates password enrollment would re-enable code-only login for accounts
+that require passwords. Use a compatible service build when rolling back.
+
 Alpha 10 adds password sign-in and recovery. Deploy the matching service release
 with the existing SQLite database, AUTH_PEPPER and mail configuration. The service
 adds its password table at startup. Registration, migration from an email-code

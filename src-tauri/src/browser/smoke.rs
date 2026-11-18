@@ -1333,6 +1333,7 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     browser::activate(app, &id)?;
     wait(|| shell_bool(app, "!!document.querySelector('.media-source[role=dialog]')").unwrap_or(false))?;
     if view.window().label() != "media-player" || !player.is_visible().unwrap_or(false)
+        || !player.is_always_on_top().unwrap_or(false)
         || !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? {
         return Err("Selecting the source tab interrupted or returned the miniplayer".into());
     }

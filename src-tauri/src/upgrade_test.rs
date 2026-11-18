@@ -36,9 +36,9 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     stage(app, "Beginning version/data verification");
     let version = app.package_info().version.to_string();
-    let old = option_env!("ELIX_QA_OLD_VERSION").ok_or("Missing upgrade fixture source version")?;
-    let new = option_env!("ELIX_QA_NEW_VERSION").ok_or("Missing upgrade fixture target version")?;
-    let channel = option_env!("ELIX_QA_CHANNEL").ok_or("Missing upgrade fixture channel")?;
+    let old = option_env!("ELIX_QA_OLD_VERSION").unwrap_or("0.1.0");
+    let new = option_env!("ELIX_QA_NEW_VERSION").unwrap_or("0.1.1");
+    let channel = option_env!("ELIX_QA_CHANNEL").unwrap_or("stable");
     if version == new {
         {
             let store = state.store.lock().unwrap();

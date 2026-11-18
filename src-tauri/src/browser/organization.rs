@@ -189,8 +189,10 @@ fn reorder_tabs(tabs: &mut Vec<Tab>, id: &str, before: Option<&str>, ungroup_at:
     let workspace = source.workspace.clone();
     let pinned = source.pinned;
     let mut tab = tabs.remove(from);
-    tab.group_manual=Some(true);
-    if ungroup_at.is_some() { tab.group.clear(); }
+    if ungroup_at.is_some() && !tab.group.is_empty() {
+        tab.group.clear();
+        tab.group_manual = Some(true);
+    }
     // Resolve the insertion point after removal: earlier -> later must still
     // insert before the target. A null target appends to this partition only.
     let to = match before {
@@ -337,6 +339,21 @@ mod tests {
         assert_eq!(ids(&tabs), ["c", "b", "a"]);
         reorder_tabs(&mut tabs, "b", Some("b"), None).unwrap();
         assert_eq!(ids(&tabs), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn reordering_keeps_auto_membership_until_the_user_leaves_the_group() {
+        let mut tab = ordered_tab("auto", "Home", false);
+        tab.group = "Lesing".into();
+        tab.group_manual = Some(false);
+        let other = ordered_tab("other", "Home", false);
+        let mut tabs = vec![tab, other];
+        reorder_tabs(&mut tabs, "auto", None, None).unwrap();
+        assert_eq!(tabs[1].group, "Lesing");
+        assert_eq!(tabs[1].group_manual, Some(false));
+        reorder_tabs(&mut tabs, "auto", Some("other"), Some("other")).unwrap();
+        assert!(tabs[0].group.is_empty());
+        assert_eq!(tabs[0].group_manual, Some(true));
     }
 
     #[test]
