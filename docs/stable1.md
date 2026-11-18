@@ -22,6 +22,6 @@ Knytt hvert resultat til samme commit og Windows-bygg-ID. Ved godkjenning av pub
 | ELIX-20 | Flytt en fane inn i en gruppe og ut igjen. Kontroller rekkefølge og medlemskap. |
 | ELIX-23 | Flytt avspilling til minispilleren og tilbake. Kontroller at bare én lydkilde spiller. |
 | ELIX-33 | Søk med kolon i vanlig søketekst og kontroller at nettadresser behandles som adresser. |
-| ELIX-34 | Bruk en ny nedlastingslenke med omdirigering og kontroller at rett fil fullføres. |
+| ELIX-34 | Lim inn den offentlige Alpha 9-signaturens GitHub-lenke og deretter en fersk signert CDN-adresse i ELIX. Kontroller to fullførte filer med riktig filnavn og SHA-256. |
 
 Før publiseringsbeslutningen skal Trello-kortet for Stable 1 inneholde godkjenningsresultat eller konkret feil for hver rad, bygglenke, commit, installerens SHA-256 og referanse til signaturen. Resultatene fra Alpha 9 er sammenligningsgrunnlag.

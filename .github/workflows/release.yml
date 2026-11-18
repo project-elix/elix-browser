@@ -90,6 +90,12 @@ jobs:
         run: |
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           $dest = Join-Path $env:RUNNER_TEMP 'ELIX-signed-install'
+          if ($env:RELEASE_CHANNEL -eq 'stable' -and $env:RELEASE_VERSION -eq '0.1.4') {
+            $review = Join-Path $env:RUNNER_TEMP 'ELIX-clean-stable1-review'
+            ./scripts/verify-installed-ui.ps1 -Installer $installer.FullName -InstallDirectory $dest -OutputDirectory $review
+            Copy-Item "$review/signed-ready.png" 'signed-release.png'
+            return
+          }
           $p = Start-Process $installer.FullName -ArgumentList @('/S', "/D=$dest") -PassThru
           if (!$p.WaitForExit(120000) -or $p.ExitCode -ne 0) { throw 'Signed installer failed' }
           $app = Start-Process "$dest/elix-browser.exe" -PassThru

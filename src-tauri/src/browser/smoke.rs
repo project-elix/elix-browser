@@ -1102,6 +1102,33 @@ fn native_child_geometry(view: &tauri::Webview, window: &tauri::Window) -> Resul
 }
 
 #[cfg(windows)]
+fn audible_views(app: &AppHandle) -> Result<Vec<String>, String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_8;
+    use windows::core::{Interface, BOOL};
+    let mut audible = Vec::new();
+    for (id, view) in app.webviews() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        view.with_webview(move |platform| {
+            let result = (|| -> windows::core::Result<bool> {
+                unsafe {
+                    let core = platform.controller().CoreWebView2()?.cast::<ICoreWebView2_8>()?;
+                    let mut playing = BOOL(0);
+                    let mut muted = BOOL(0);
+                    core.IsDocumentPlayingAudio(&mut playing)?;
+                    core.IsMuted(&mut muted)?;
+                    Ok(playing.as_bool() && !muted.as_bool())
+                }
+            })();
+            let _ = tx.send(result.map_err(|e| e.to_string()));
+        }).map_err(|e| e.to_string())?;
+        if rx.recv_timeout(Duration::from_secs(3)).map_err(|e| e.to_string())?? {
+            audible.push(id);
+        }
+    }
+    Ok(audible)
+}
+
+#[cfg(windows)]
 fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), String> {
     use windows::Win32::UI::{
         Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, INPUT_KEYBOARD, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, KEYBDINPUT, KEYEVENTF_KEYUP, VK_ESCAPE},
@@ -1228,11 +1255,37 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     if !view_bool(&view, "window.__elixMediaToken==='original'")? { return Err("Reset lost the live player page before profile cleanup".into()); }
     // Audio-only sites use the actual audio element and native controls; the
     // page itself must remain hidden, and removing controls must be reversible.
-    if !view_bool(&view, "(()=>{document.querySelector('video').remove();const audio=document.createElement('audio');audio.muted=true;audio.style.width='123px';document.body.append(audio);window.__elixAudioElement=audio;window.__elixAudioContext=new AudioContext();const output=window.__elixAudioContext.createMediaStreamDestination();audio.srcObject=output.stream;return true})()")? { return Err("Cannot create audio-only fixture".into()); }
+    if !view_bool(&view, r#"(()=>{
+        document.querySelector('video').remove();
+        const audio = document.createElement('audio');
+        audio.style.width = '123px'; document.body.append(audio);
+        const context = new AudioContext(), tone = context.createOscillator(), output = context.createMediaStreamDestination();
+        const level = context.createGain(); level.gain.value = 0.12;
+        tone.connect(level).connect(output); tone.start();
+        audio.srcObject = output.stream;
+        window.__elixAudioFixture = {audio, context, tone, output};
+        context.resume().then(()=>audio.play());
+        return true;
+    })()"#)? { return Err("Cannot create audio-only fixture".into()); }
+    let only_original_audible = || {
+        view_bool(&view, r#"(()=>{
+            const {audio,output}=window.__elixAudioFixture, playing=[...document.querySelectorAll('audio,video')]
+                .filter(element=>!element.paused && !element.ended && !element.muted && element.volume>0);
+            return playing.length===1 && playing[0]===audio && audio.srcObject===output.stream;
+        })()"#).unwrap_or(false) && audible_views(app).is_ok_and(|views| views == [id.clone()])
+    };
+    wait(only_original_audible).map_err(|_| "Original audio did not play in its single native WebView".to_string())?;
     browser::media::perform(app, "open", Some(&id))?;
-    wait(|| view_bool(&view, "window.__elixMediaPresentation?.kind==='audio'&&document.querySelector('audio')===window.__elixAudioElement&&window.__elixAudioElement.controls&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='hidden'").unwrap_or(false))?;
+    wait(|| view_bool(&view, "window.__elixMediaPresentation?.kind==='audio'&&window.__elixAudioFixture.audio.controls&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='hidden'").unwrap_or(false))?;
+    wait(only_original_audible).map_err(|_| "Popout lost or duplicated the original audible WebView or media element".to_string())?;
+    player.set_fullscreen(true).map_err(|e| e.to_string())?;
+    wait(|| player.is_fullscreen().unwrap_or(false) && native_child_geometry(&view,&player).is_ok_and(|r| r["fills_parent"]==true))?;
+    player.set_fullscreen(false).map_err(|e| e.to_string())?;
+    player.set_size(tauri::LogicalSize::new(540., 320.)).map_err(|e| e.to_string())?;
+    wait(|| !player.is_fullscreen().unwrap_or(true) && native_child_geometry(&view,&player).is_ok_and(|r| r["fills_parent"]==true))?;
     browser::media::perform(app, "return", None)?;
-    if !view_bool(&view, "!window.__elixMediaPresentation&&!window.__elixAudioElement.controls&&window.__elixAudioElement.style.width==='123px'&&!!window.__elixAudioElement.srcObject")? { return Err("Audio popout replaced its stream or failed to restore native controls".into()); }
+    if !view_bool(&view, "!window.__elixMediaPresentation&&!window.__elixAudioFixture.audio.controls&&window.__elixAudioFixture.audio.style.width==='123px'")? { return Err("Audio popout failed to restore native controls".into()); }
+    wait(only_original_audible).map_err(|_| "Returning the popout lost or duplicated the audible source".to_string())?;
     browser::media::perform(app, "open", Some(&id))?;
     // A destination document can never remain visible as a whole-page popout.
     view.navigate(format!("{origin}/first").parse().map_err(|_| "Invalid media navigation URL")?).map_err(|e| e.to_string())?;

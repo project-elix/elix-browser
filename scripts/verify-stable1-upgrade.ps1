@@ -20,7 +20,7 @@ if ((Get-FileHash $old -Algorithm SHA256).Hash -ne 'bc03406019e6eb767aee5c571165
 ./scripts/verify-installed-ui.ps1 -Installer $old -OutputDirectory "$out/alpha9" -InstallDirectory $installDir
 python scripts/stable1-profile.py seed $root
 if ($LASTEXITCODE -ne 0) { throw 'Unable to seed the Alpha 9 profile.' }
-./scripts/verify-installed-ui.ps1 -Installer $Installer -OutputDirectory "$out/stable1" -InstallDirectory $installDir
+./scripts/verify-installed-ui.ps1 -Installer $Installer -OutputDirectory "$out/stable1" -InstallDirectory $installDir -VerifyStable1Downloads
 $installed = (Get-FileHash "$installDir/elix-browser.exe").Hash
 $expected = (Get-FileHash 'src-tauri/target/release/elix-browser.exe').Hash
 if ($installed -ne $expected) { throw 'Installed executable differs from the candidate build.' }
@@ -35,6 +35,7 @@ $evidence = [ordered]@{
   baseline = '0.1.4-dev.9'
   version = '0.1.4'
   profile_upgrade = 'passed'
+  elix_34_github_release_and_fresh_cdn = 'passed'
 }
 if (Test-Path "$Installer.sig") {
   node scripts/verify-installer-signature.mjs $Installer '0.1.4'

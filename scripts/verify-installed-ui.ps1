@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$Installer,
   [Parameter(Mandatory=$true)][string]$OutputDirectory,
-  [string]$InstallDirectory = (Join-Path $env:RUNNER_TEMP 'ELIX-signed-ui-review')
+  [string]$InstallDirectory = (Join-Path $env:RUNNER_TEMP 'ELIX-signed-ui-review'),
+  [switch]$VerifyStable1Downloads
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Windows.Forms,System.Drawing
@@ -45,6 +46,32 @@ try {
   if (!$ready) { throw 'Address bar and start-page search were not usable within 120 seconds' }
   @{ready=$ready;seconds=$clock.Elapsed.TotalSeconds;product_version=(Get-Item "$dest/elix-browser.exe").VersionInfo.ProductVersion} | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'ready-result.json')
   Write-Output "PASS: installed production browser address bar and start-page search are usable after $([Math]::Round($clock.Elapsed.TotalSeconds,1)) seconds"
+  if ($VerifyStable1Downloads) {
+    $links = python scripts/stable1-download.py links
+    if ($LASTEXITCODE -ne 0) { throw 'Could not obtain a valid fresh GitHub release asset' }
+    $shell = New-Object -ComObject WScript.Shell
+    $profileRoot = Join-Path $env:LOCALAPPDATA 'no.projectelix.browser'
+    $count = 0
+    foreach ($url in ($links | ConvertFrom-Json)) {
+      $count++
+      if (!$shell.AppActivate($app.Id)) { throw 'Could not focus the installed browser' }
+      $address = $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $addressCondition)
+      $address.SetFocus()
+      Set-Clipboard -Value $url
+      [Windows.Forms.SendKeys]::SendWait('^a')
+      [Windows.Forms.SendKeys]::SendWait('^v')
+      $value = $address.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+      $limit = [DateTime]::UtcNow.AddSeconds(5)
+      while ($value.Current.Value -ne $url -and [DateTime]::UtcNow -lt $limit) { Start-Sleep -Milliseconds 100 }
+      if ($value.Current.Value -ne $url) { throw 'The address field did not receive the complete asset URL' }
+      [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+      python scripts/stable1-download.py verify $profileRoot $count
+      if ($LASTEXITCODE -ne 0) { throw "Installed browser download $count failed" }
+    }
+    if ($count -ne 2) { throw 'Both the release link and fresh CDN link must pass' }
+    Write-Output 'PASS: ordinary address-bar navigation downloaded both the GitHub release and its fresh signed CDN URL; both file digests matched.'
+  }
+
 } finally {
   Save-Desktop 'startup-final.png'
   if (!$app.HasExited) {
