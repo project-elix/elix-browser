@@ -48,6 +48,7 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
     )
     .initialization_script_for_all_frames(include_str!("media-session.js"))
     .initialization_script_for_all_frames(include_str!("dormancy.js"))
+    .initialization_script_for_all_frames(include_str!("transfer-input.js"))
     .data_directory(directory)
     .incognito(private)
     .browser_extensions_enabled(!private)

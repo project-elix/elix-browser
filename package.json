@@ -12,7 +12,7 @@
     "desktop": "tauri dev",
     "check:release": "node scripts/validate-release.mjs",
     "version:set": "node scripts/set-version.mjs",
-    "test:ui": "node tests/ui-alpha8.mjs && node tests/media-presentation.mjs"
+    "test:ui": "node tests/ui-alpha8.mjs && node tests/media-presentation.mjs && node tests/tab-transfer-input.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.5",

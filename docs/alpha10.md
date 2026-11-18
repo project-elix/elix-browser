@@ -31,6 +31,6 @@ Etterprøv også ELIX-20 ved å trekke første, midterste og siste fane ut av en
 | ELIX-41 · Vertikale faner | Prøv venstre og høyre side, juster bredden, flytt og fest faner, fold inn og ut. Kontroller plassering og aktiv fane etter omstart. |
 | ELIX-42 · Smart fane-dvale | Sammenlign minnebruk for samme fanesett. Lyd, møte, aktiv nedlasting og festet fane skal fortsette. En parkert fane skal våkne ved valg. |
 | ELIX-43 · Arbeidsområdeprofiler | Bruk samme nettsted i Jobb, Privat og Gaming. Kontroller informasjonskapsler, pålogging, nettlagring og tillatelser i hver profil etter omstart. |
-| ELIX-69 · Mellom to vinduer | Dra en fane til et eksisterende ELIX-vindu. Kontroller ankomst før originalfanen lukkes. Prøv også at mottakeren lukkes eller avviser underveis. |
+| ELIX-69 · Mellom to vinduer | Dra en vanlig fane til et åpent ELIX-vindu med samme profil. Siden lastes inn på nytt. Kildefanen lukkes når mottakeren har bekreftet og lagret den. Private faner blir i kildevinduet. Skriv i et felt og prøv å flytte fanen. ELIX skal beholde den og be deg lagre eller sende inn før omlasting. Sjekk også avvist mottaker og sider med innebygde felt som ELIX ikke kan kontrollere. |
 
 ELIX-31 om API til hjelp og søk har Alpha 11 som foreløpig mål for avklaring og mangler et konkret søkeeksempel. Spørsmålet om adressefelt eller egen hjelpeside ligger i kortet.

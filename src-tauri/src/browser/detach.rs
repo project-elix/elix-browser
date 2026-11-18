@@ -190,6 +190,22 @@ pub async fn rejected_detach_for_test(app: AppHandle, id: String) -> Result<bool
     detach_inner(app, id, false, true, None).await
 }
 
+#[cfg(windows)]
+fn check_field_edits(app: &AppHandle, id: &str) -> Result<(), String> {
+    // An unloaded tab has no live document to lose.
+    let Some(view) = app.get_webview(id) else { return Ok(()); };
+    let unknown = "ELIX kunne ikke kontrollere alle feltene på siden. Fanen blir i dette vinduet.";
+    let (tx, rx) = std::sync::mpsc::channel();
+    view.eval_with_callback(include_str!("transfer-input-check.js"), move |value| { let _ = tx.send(value); })
+        .map_err(|_| unknown.to_string())?;
+    let value = rx.recv_timeout(std::time::Duration::from_secs(2)).map_err(|_| unknown.to_string())?;
+    match serde_json::from_str::<String>(&value).ok().as_deref() {
+        Some("clean") => Ok(()),
+        Some("edited") => Err("Fanen har redigerte felt. Lagre eller send inn endringene og last inn siden på nytt før du flytter fanen.".into()),
+        _ => Err(unknown.into()),
+    }
+}
+
 async fn detach_inner(
     app: AppHandle,
     id: String,
@@ -257,10 +273,11 @@ async fn detach_inner(
                 y: point.y.saturating_sub(40),
             }
         };
+        if handoff.tab.private { return Err("Private faner blir i vinduet de ble åpnet i.".into()); }
+        check_field_edits(&app, &id)?;
         let source_tab = handoff.tab.clone();
         let original_profile = handoff.profile.clone();
         let outcome = if let Some(pid) = target {
-            if handoff.tab.private { return Err("Private faner beholdes i vinduet de ble åpnet i.".into()); }
             super::window_transfer::send(pid, &handoff).await
         } else { launch_window(&app, handoff, _reject_ready).await };
         if let Err(error) = outcome {
@@ -268,10 +285,12 @@ async fn detach_inner(
             return Err(error);
         }
         state.logs.add("info", "window_transfer_ready");
+        // The user can still edit the source while its destination starts.
+        check_field_edits(&app, &id).map_err(|error| format!("Målvinduet har mottatt siden. {error}"))?;
         let _transition = state.session_transition.lock().unwrap();
         let current_profile = state.profile.lock().unwrap().clone();
         if !source_unchanged(&current_profile, &original_profile, &state.session.lock().unwrap(), &source_tab) {
-            return Err("Målvinduet mottok fanen. Kilden ble endret under flyttingen og er beholdt.".into());
+            return Err("Målvinduet mottok fanen. Kildefanen eller profilen ble endret før flyttingen var ferdig.".into());
         }
         // Never publish a transferred page to the source window's reopen stack.
         browser::close_transferred(&app, &id).map_err(|error| format!("Målvinduet mottok fanen, men kilden kunne ikke lukkes. {error}"))?;

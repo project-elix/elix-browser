@@ -87,8 +87,8 @@ export function useTabDrag(session:Session,callbacks:Callbacks) {
   const action=target&&reorderAction(current.current.session,d.id,target.id,target.edge,true);
   if(action)void rpc('reorder_tab',action).catch(current.current.callbacks.onError);
   else if(point.x<0||point.y<0||point.x>=window.innerWidth||point.y>=window.innerHeight){
-   current.current.callbacks.onNotice('Flytter fanen …');
-   void rpc<boolean>('detach_tab',{id:d.id,outside_only:true,drop_point:point}).then(moved=>current.current.callbacks.onNotice(moved?'Fanen er flyttet.':'')).catch(current.current.callbacks.onError);
+   current.current.callbacks.onNotice('Siden lastes inn på nytt i målvinduet …');
+   void rpc<boolean>('detach_tab',{id:d.id,outside_only:true,drop_point:point}).then(moved=>current.current.callbacks.onNotice(moved?'Fanen er flyttet og siden er lastet inn på nytt.':'')).catch(current.current.callbacks.onError);
   }
  },[stop,targetAt]);
  const tabPointerDown=useCallback((event:ReactPointerEvent<HTMLElement>,id:string)=>{
