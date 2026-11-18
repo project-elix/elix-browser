@@ -1,0 +1,4 @@
+pywinauto==0.6.9
+Pillow==11.3.0
+pycaw==20251023
+psutil==7.1.3
