@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$Installer,
-  [Parameter(Mandatory=$true)][string]$OutputDirectory
+  [Parameter(Mandatory=$true)][string]$OutputDirectory,
+  [string]$InstallDirectory = (Join-Path $env:RUNNER_TEMP 'ELIX-signed-ui-review')
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Windows.Forms,System.Drawing
@@ -14,7 +15,7 @@ function Save-Desktop([string]$Name) {
     $image.Save((Join-Path $OutputDirectory $Name),[Drawing.Imaging.ImageFormat]::Png)
   } finally { $graphics.Dispose(); $image.Dispose() }
 }
-$dest = Join-Path $env:RUNNER_TEMP 'ELIX-signed-ui-review'
+$dest = $InstallDirectory
 $install = Start-Process $Installer -ArgumentList @('/S', "/D=$dest") -PassThru
 if (!$install.WaitForExit(120000) -or $install.ExitCode -ne 0) { throw 'Installer failed' }
 $app = Start-Process "$dest/elix-browser.exe" -PassThru
@@ -46,5 +47,8 @@ try {
   Write-Output "PASS: installed production browser address bar and start-page search are usable after $([Math]::Round($clock.Elapsed.TotalSeconds,1)) seconds"
 } finally {
   Save-Desktop 'startup-final.png'
-  if (!$app.HasExited) { Stop-Process -Id $app.Id -Force }
+  if (!$app.HasExited) {
+    [void]$app.CloseMainWindow()
+    if (!$app.WaitForExit(15000)) { Stop-Process -Id $app.Id -Force; $app.WaitForExit() }
+  }
 }

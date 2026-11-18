@@ -55,7 +55,7 @@ try {
     case 'close_tab':state.session.tabs=state.session.tabs.filter(t=>t.id!==r.id);state.session.active=state.session.tabs.at(-1).id;break;
     case 'group_tab':{const t=state.session.tabs.find(t=>t.id===r.id);t.group=r.group;t.workspace=r.workspace;break;}
     case 'workspace':state.session.workspace=r.name;if(!state.session.workspaces.includes(r.name))state.session.workspaces.push(r.name);break;
-    case 'reorder_tab':{const from=state.session.tabs.findIndex(t=>t.id===r.id),[t]=state.session.tabs.splice(from,1),to=r.before?state.session.tabs.findIndex(t=>t.id===r.before):state.session.tabs.length;state.session.tabs.splice(to,0,t);break;}
+    case 'reorder_tab':{const from=state.session.tabs.findIndex(t=>t.id===r.id),[t]=state.session.tabs.splice(from,1),to=r.before?state.session.tabs.findIndex(t=>t.id===r.before):state.session.tabs.length;if(r.ungroup_at)t.group='';state.session.tabs.splice(to,0,t);break;}
     case 'create_bookmark_group':lib.groups.push(r.name);emit('bookmarks-changed',null);return;
     case 'rename_bookmark_group':lib.groups=lib.groups.map(g=>g===r.name?r.new_name:g);for(const i of lib.items)if(i.group===r.name)i.group=r.new_name;emit('bookmarks-changed',null);return;
     case 'remove_bookmark_group':lib.groups=lib.groups.filter(g=>g!==r.name);for(const i of lib.items)if(i.group===r.name)i.group='';emit('bookmarks-changed',null);return;
@@ -175,6 +175,46 @@ try {
  await groupHeading.click();
  await row('peer').waitFor();
  console.log('PASS: drag into collapsed tab group with visible target and membership update');
+ // Extract each possible member, including the last member dropped in place beside an ungrouped tab.
+ const originalSession=await page.evaluate(()=>structuredClone(window.__uiTest.state.session));
+ for(const source of ['original','peer','third']){
+  await page.evaluate(session=>{
+   const ui=window.__uiTest;
+   ui.state.session=structuredClone(session);
+   ui.state.session.tabs.slice(0,3).forEach(tab=>{tab.group='Lesing'});
+   ui.emit('browser-changed',ui.state.session);
+  },originalSession);
+  const outside=originalSession.tabs[3].id;
+  await row(source).waitFor();
+  await grab(row(source));
+  const target=await row(outside).boundingBox();
+  await page.mouse.move(target.x+45,target.y+2,{steps:8});
+  await page.locator('.sidebar-tabs .drop-before').waitFor();
+  assert.match(await page.locator('.tab-drag-preview').innerText(),/Ta ut av gruppen/);
+  await page.mouse.up();
+  await page.waitForFunction(id=>window.__uiTest.state.session.tabs.find(tab=>tab.id===id).group==='',source);
+  const snapshot=await page.evaluate(()=>window.__uiTest.state.session);
+  assert.deepEqual(snapshot.tabs.slice(0,2).map(tab=>[tab.id,tab.group]),
+   ['original','peer','third'].filter(id=>id!==source).map(id=>[id,'Lesing']));
+  assert.equal(snapshot.tabs[2].id,source);
+  assert.equal(snapshot.active,'original');
+ }
+ // The dedicated drop area also works when every tab belongs to one group.
+ await page.evaluate(()=>{
+  const ui=window.__uiTest;
+  ui.state.session.tabs.forEach(tab=>{tab.group='Lesing'});
+  ui.emit('browser-changed',ui.state.session);
+ });
+ const activeBox=await grab(strip('original'));
+ await page.mouse.move(activeBox.x+65,activeBox.y+activeBox.height/2,{steps:4});
+ const zone=page.locator('[data-tab-ungroup]');
+ const zoneBox=await zone.boundingBox();
+ await page.mouse.move(zoneBox.x+25,zoneBox.y+zoneBox.height/2,{steps:8});
+ await page.locator('.tab-ungroup-target.targeted').waitFor();
+ await page.mouse.up();
+ await page.waitForFunction(()=>window.__uiTest.state.session.tabs.find(t=>t.id==='original').group==='');
+ assert.ok(await page.evaluate(()=>window.__uiTest.state.session.tabs.filter(t=>t.id!=='original').every(t=>t.group==='Lesing')));
+ console.log('PASS: removing the first, middle or final group member leaves siblings and active tab intact');
  // Bookmarks use the same collection in the page and toolbar; mutations retain profile identity.
  await page.getByRole('button',{name:'Bokmerker',exact:true}).click();
  const library=page.locator('.bookmark-collection-page');

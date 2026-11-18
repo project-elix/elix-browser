@@ -140,13 +140,15 @@ fn update_group(
     if !moved && tab.group == group {
         return Ok(false);
     }
-    tab.group = group.into();
+    let old_group = std::mem::replace(&mut tab.group, group.into());
     tab.workspace = workspace.into();
     let pinned = tab.pinned;
     // Commit group membership and its position together, including workspace moves.
-    if !group.is_empty() {
+    // Removing a middle member must not split its old group into two headings.
+    let cluster = if group.is_empty() && !moved { old_group.as_str() } else { group };
+    if !cluster.is_empty() {
         if let Some(last) = s.tabs.iter().rposition(|t| {
-            t.id != id && t.workspace == workspace && t.pinned == pinned && t.group == group
+            t.id != id && t.workspace == workspace && t.pinned == pinned && t.group == cluster
         }) {
             let tab = s.tabs.remove(from);
             let insert = if from < last { last } else { last + 1 };
@@ -163,9 +165,14 @@ fn update_group(
     Ok(moved)
 }
 
-fn reorder_tabs(tabs: &mut Vec<Tab>, id: &str, before: Option<&str>) -> Result<(), String> {
+fn reorder_tabs(tabs: &mut Vec<Tab>, id: &str, before: Option<&str>, ungroup_at: Option<&str>) -> Result<(), String> {
     let from = tabs.iter().position(|t| t.id == id).ok_or("Ukjent fane")?;
     let source = &tabs[from];
+    if let Some(anchor) = ungroup_at {
+        let eligible = tabs.iter().any(|tab| tab.id == anchor && tab.id != id && tab.group.is_empty()
+            && tab.workspace == source.workspace && tab.pinned == source.pinned);
+        if !eligible { return Err("Målfanen er ikke lenger utenfor gruppen".into()); }
+    }
     if let Some(before) = before {
         let target = tabs.iter().find(|t| t.id == before).ok_or("Ukjent fane")?;
         if source.workspace != target.workspace || source.pinned != target.pinned {
@@ -177,7 +184,8 @@ fn reorder_tabs(tabs: &mut Vec<Tab>, id: &str, before: Option<&str>) -> Result<(
     }
     let workspace = source.workspace.clone();
     let pinned = source.pinned;
-    let tab = tabs.remove(from);
+    let mut tab = tabs.remove(from);
+    if ungroup_at.is_some() { tab.group.clear(); }
     // Resolve the insertion point after removal: earlier -> later must still
     // insert before the target. A null target appends to this partition only.
     let to = match before {
@@ -191,11 +199,11 @@ fn reorder_tabs(tabs: &mut Vec<Tab>, id: &str, before: Option<&str>) -> Result<(
     Ok(())
 }
 
-pub fn reorder(app: &AppHandle, id: &str, before: Option<&str>) -> Result<(), String> {
+pub fn reorder(app: &AppHandle, id: &str, before: Option<&str>, ungroup_at: Option<&str>) -> Result<(), String> {
     {
         let state = app.state::<AppState>();
         let mut s = state.session.lock().unwrap();
-        reorder_tabs(&mut s.tabs, id, before)?;
+        reorder_tabs(&mut s.tabs, id, before, ungroup_at)?;
     }
     super::emit(app);
     super::persist(app)
@@ -318,22 +326,22 @@ mod tests {
     #[test]
     fn reorder_inserts_before_target_in_both_directions() {
         let mut tabs = vec![ordered_tab("a", "Home", false), ordered_tab("b", "Home", false), ordered_tab("c", "Home", false)];
-        reorder_tabs(&mut tabs, "a", Some("c")).unwrap();
+        reorder_tabs(&mut tabs, "a", Some("c"), None).unwrap();
         assert_eq!(ids(&tabs), ["b", "a", "c"]);
-        reorder_tabs(&mut tabs, "c", Some("b")).unwrap();
+        reorder_tabs(&mut tabs, "c", Some("b"), None).unwrap();
         assert_eq!(ids(&tabs), ["c", "b", "a"]);
-        reorder_tabs(&mut tabs, "b", Some("b")).unwrap();
+        reorder_tabs(&mut tabs, "b", Some("b"), None).unwrap();
         assert_eq!(ids(&tabs), ["c", "b", "a"]);
     }
 
     #[test]
     fn reorder_appends_within_partition_and_preserves_unrelated_order() {
         let mut tabs = vec![ordered_tab("a", "Home", false), ordered_tab("p", "Home", true), ordered_tab("b", "Home", false), ordered_tab("w", "Work", false), ordered_tab("c", "Home", false), ordered_tab("x", "Work", false)];
-        reorder_tabs(&mut tabs, "a", None).unwrap();
+        reorder_tabs(&mut tabs, "a", None, None).unwrap();
         assert_eq!(ids(&tabs), ["p", "b", "w", "c", "a", "x"]);
-        reorder_tabs(&mut tabs, "p", None).unwrap();
+        reorder_tabs(&mut tabs, "p", None, None).unwrap();
         assert_eq!(ids(&tabs), ["p", "b", "w", "c", "a", "x"]);
-        reorder_tabs(&mut tabs, "w", None).unwrap();
+        reorder_tabs(&mut tabs, "w", None, None).unwrap();
         assert_eq!(ids(&tabs), ["p", "b", "c", "a", "x", "w"]);
     }
 
@@ -341,7 +349,7 @@ mod tests {
     fn invalid_reorder_does_not_mutate_tabs() {
         let mut tabs = vec![ordered_tab("a", "Home", false), ordered_tab("p", "Home", true), ordered_tab("w", "Work", false)];
         for (id, target) in [("missing", None), ("a", Some("missing")), ("a", Some("p")), ("a", Some("w"))] {
-            assert!(reorder_tabs(&mut tabs, id, target).is_err());
+            assert!(reorder_tabs(&mut tabs, id, target, None).is_err());
             assert_eq!(ids(&tabs), ["a", "p", "w"]);
         }
     }
@@ -371,6 +379,45 @@ mod tests {
         assert_eq!(ids(&session.tabs), ["other", "first", "moving", "work", "unrelated", "pinned"]);
         assert_eq!(session.tabs[3].group, "Lesing");
         assert_eq!(session.tabs[3].workspace, "Home");
+    }
+
+    #[test]
+    fn extracting_a_member_preserves_the_other_members_and_their_order() {
+        for source in ["one", "two", "three"] {
+            for use_row in [false, true] {
+                let mut session = super::super::Session {
+                    active: "two".into(),
+                    workspaces: vec!["Home".into()],
+                    tabs: ["one", "two", "three", "outside", "unrelated"].into_iter()
+                        .map(|id| ordered_tab(id, "Home", false)).collect(),
+                    ..Default::default()
+                };
+                for tab in &mut session.tabs[..3] { tab.group = "Lesing".into(); }
+                session.tabs[4].group = "Spill".into();
+                if use_row {
+                    reorder_tabs(&mut session.tabs, source, Some("unrelated"), Some("outside")).unwrap();
+                } else {
+                    update_group(&mut session, source, "", "Home").unwrap();
+                }
+                let peers: Vec<_> = session.tabs.iter().filter(|t| t.id != source)
+                    .map(|t| (t.id.as_str(),t.group.as_str())).collect();
+                let expected: Vec<_> = [("one","Lesing"),("two","Lesing"),("three","Lesing"),
+                    ("outside",""),("unrelated","Spill")].into_iter().filter(|(id,_)| *id != source).collect();
+                assert_eq!(peers, expected);
+                assert_eq!(session.tabs[if use_row {3} else {2}].id, source);
+                assert!(session.tabs.iter().find(|t| t.id == source).unwrap().group.is_empty());
+                assert_eq!(session.active, "two");
+            }
+        }
+    }
+
+    #[test]
+    fn stale_ungroup_target_keeps_membership_and_order_intact() {
+        let mut tabs = vec![ordered_tab("a", "Home", false), ordered_tab("b", "Home", false)];
+        for tab in &mut tabs { tab.group = "Spill".into(); }
+        assert!(reorder_tabs(&mut tabs, "a", None, Some("b")).is_err());
+        assert_eq!(ids(&tabs), ["a","b"]);
+        assert!(tabs.iter().all(|tab| tab.group == "Spill"));
     }
 
     #[test]

@@ -16,6 +16,8 @@ export default function TabDragPreview({drag,tabs}:{drag:DragPreview|null;tabs:T
  const targetTitle=target?.url.startsWith('elix:')?internalTitle(target.url):target?.title;
  const dropHint=drag.target?.edge==='group'
   ?`Slipp i gruppen ${target?.group??drag.target.group}`
+  :drag.target?.edge==='ungroup'?'Ta fanen ut av gruppen'
+  :target&&tab.group&&!target.group?`Ta ut av gruppen · ${drag.target?.edge==='before'?'før':'etter'} ${targetTitle}`
   :target?`Slipp ${drag.target?.edge==='before'?'før':'etter'} ${targetTitle}`:null;
  return <>
   <div className={`tab-drag-preview ${position.docked?'tab-drag-docked':''}`} style={{left:position.left,top:position.top,width:position.width}} aria-hidden="true">

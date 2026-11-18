@@ -635,7 +635,7 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     if app.state::<AppState>().session.lock().unwrap().active != b {
         return Err("Renaming another tab's group changed the selected tab".into());
     }
-    browser::organization::reorder(app, &b, Some(&a))?;
+    browser::organization::reorder(app, &b, Some(&a), None)?;
     {
         let state = app.state::<AppState>();
         let s = state.session.lock().unwrap();
@@ -757,7 +757,7 @@ pub fn start(app: AppHandle) {
         let code = if result.is_ok() { 0 } else { 1 };
         #[cfg(windows)]
         if code != 0 { let _ = capture_native_screen("native-failure.png"); }
-        let message=match result{Ok(())=>"PASS: Alpha 7 reorder/reopen, native mute, native Ctrl+Alt+S split toggle/wake/controls/bounds, cookie deletion, real child-window handoff with shared profile cookies and saved recovery, failed handoff retains source; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history reuse and settings preserve original page state; Ctrl+T/button address autofocus; real multipage PDF native wheel scroll down/up; video HTML fullscreen fills native window and restores split; miniplayer reparent/resize/hide/show/return preserves live page and playback; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, same-origin per-tab dormancy isolation/repeated wake/lazy restoration, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        let message=match result{Ok(())=>"PASS: Alpha 7 reorder/reopen, native mute, native Ctrl+Alt+S split toggle/wake/controls/bounds, cookie deletion, real child-window handoff with shared profile cookies and saved recovery, failed handoff retains source; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history reuse and settings preserve original page state; Ctrl+T/button address autofocus; 24-page PDF scrolled to the last page and back with the native wheel three times; video HTML fullscreen fills native window and restores split; miniplayer reparent/resize/hide/show/return preserves live page and playback; native HTTP navigation, title/status, decoded matching tab/bookmark favicons, failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, same-origin per-tab dormancy isolation/repeated wake/lazy restoration, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         #[cfg(windows)]
         let message = format!(
             "{message}\nDownload native diagnostics: {}",
@@ -1024,11 +1024,22 @@ fn pdf_scroll_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<()
     unsafe { SetCursorPos(x, y) }.map_err(|e| e.to_string())?;
     mouse(MOUSEEVENTF_LEFTDOWN, 0)?;
     mouse(MOUSEEVENTF_LEFTUP, 0)?;
-    mouse(MOUSEEVENTF_WHEEL, -120 * 60)?;
-    wait(blue).map_err(|_| "Native PDF mouse wheel did not reach the last page".to_string())?;
-    capture_native_screen("native-pdf-last-page.png")?;
-    mouse(MOUSEEVENTF_WHEEL, 120 * 60)?;
-    wait(red).map_err(|_| "Native PDF mouse wheel did not return to the first page".to_string())?;
+    // Send multiple wheel gestures until the unique first/last page color is
+    // visible. The number of lines per wheel notch depends on Windows settings.
+    let scroll_to = |delta: i32, reached: &dyn Fn() -> bool| -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while Instant::now() < deadline {
+            mouse(MOUSEEVENTF_WHEEL, delta)?;
+            std::thread::sleep(Duration::from_millis(150));
+            if reached() { return Ok(()); }
+        }
+        Err(format!("PDF wheel input {delta} did not reach its destination"))
+    };
+    for round in 1..=3 {
+        scroll_to(-120 * 15, &blue).map_err(|e| format!("Round {round}, last page: {e}"))?;
+        if round == 1 { capture_native_screen("native-pdf-last-page.png")?; }
+        scroll_to(120 * 15, &red).map_err(|e| format!("Round {round}, first page: {e}"))?;
+    }
     browser::activate(app, return_tab)?;
     browser::close(app, &id)?;
     Ok(())
@@ -1584,11 +1595,14 @@ fn record_cancel_fixture(index: Option<usize>, sent: usize, ended: bool, aborted
 }
 
 fn pdf_fixture() -> Vec<u8> {
+    const PAGES: usize = 24;
+    let kids = (0..PAGES).map(|i| format!("{} 0 R", 3 + 2 * i)).collect::<Vec<_>>().join(" ");
     let mut objects = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
-        "<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>".to_owned(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {PAGES} >>"),
     ];
-    for (index, color) in ["1 0 0", "0 1 0", "0 0 1"].iter().enumerate() {
+    for index in 0..PAGES {
+        let color = if index == 0 { "1 0 0" } else if index == PAGES - 1 { "0 0 1" } else { "0 1 0" };
         objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 900] /Resources << >> /Contents {} 0 R >>", 4 + index * 2));
         let commands = format!("{color} rg\n0 0 600 900 re f\n");
         objects.push(format!("<< /Length {} >>\nstream\n{commands}endstream", commands.len()));
@@ -1890,8 +1904,13 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     wait(|| title(app, &first, "ELIX native one"))?;
     progress("sidebar: before");
     sidebar_test(app, &first)?;
-    progress("sidebar: after");
-    progress("PDF scroll: before");
+    progress("sidebar: after; bookmark favicon: before");
+    let shell = app.get_webview("shell").ok_or("Missing shell for bookmarking")?;
+    wait(|| shell_bool(app, "document.querySelector('.tab.active img.tab-favicon')?.naturalWidth > 0 && !document.querySelector('button[aria-label=\"Legg til bokmerke\"]').disabled").unwrap_or(false))?;
+    shell.eval("document.querySelector('button[aria-label=\"Legg til bokmerke\"]').click()").map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "(()=>{const active=document.querySelector('.tab.active img.tab-favicon');return active?.naturalWidth>0 && [...document.querySelectorAll('.bookmark-bar .bookmark-open img')].some(img=>img.naturalWidth>0 && img.src===active.src)})()").unwrap_or(false))
+        .map_err(|_| "The bookmarked page did not display its native favicon in the bookmark bar".to_string())?;
+    progress("bookmark favicon: after; PDF scroll: before");
     #[cfg(windows)]
     pdf_scroll_test(app, &origin, &first)?;
     progress("PDF scroll: after");

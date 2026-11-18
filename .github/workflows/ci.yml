@@ -36,6 +36,23 @@ jobs:
           ELIX_UI_OUTPUT: alpha8-ui
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - run: npm run tauri build -- --features smoke-tests --bundles nsis -- --locked
+      - name: Test Stable 1 installer over an existing Alpha 9 profile
+        env:
+          ELIX_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: pwsh
+        run: |
+          if ((Get-Content package.json -Raw | ConvertFrom-Json).version -ne '0.1.4') { return }
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          ./scripts/verify-stable1-upgrade.ps1 -Installer $installer.FullName
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preflight-stable1-profile-review
+          path: |
+            ${{ runner.temp }}/stable1-profile-review/stable1-profile.json
+            ${{ runner.temp }}/stable1-profile-review/*/*.png
+            ${{ runner.temp }}/stable1-profile-review/*/ready-result.json
+          if-no-files-found: ignore
       - name: Test installed app starts
         shell: pwsh
         run: |
