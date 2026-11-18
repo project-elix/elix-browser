@@ -1,0 +1,79 @@
+name: Verify existing signed Stable 1 package
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Original release.yml run ID that produced the signed Stable 1 installer
+        required: true
+        type: string
+      source_sha:
+        description: Full 40-character commit SHA of that release build
+        required: true
+        type: string
+permissions: {}
+jobs:
+  windows:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      contents: read
+    env:
+      QUALIFY_RELEASE_RUN: ${{ inputs.release_run_id }}
+      QUALIFY_SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate release inputs
+        shell: pwsh
+        run: |
+          if ($env:QUALIFY_RELEASE_RUN -notmatch '^[1-9][0-9]*$' -or $env:QUALIFY_SOURCE_SHA -cnotmatch '^[a-f0-9]{40}$') {
+            throw 'Provide the numeric release run and its full lowercase commit SHA.'
+          }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: verified-source
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-stable1-profile-review
+          path: ${{ runner.temp }}/original-review
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.release_run_id }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-stable1-installer
+          path: ${{ runner.temp }}/original-installer
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.release_run_id }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify the installer pair against the original release run
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/installed-qa/package.py --review "$env:RUNNER_TEMP/original-review" --installer-artifact "$env:RUNNER_TEMP/original-installer" --verifier verified-source --output "$env:RUNNER_TEMP/verified-stable1"
+      - name: Install desktop UI test dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r scripts/installed-qa/requirements.txt
+      - name: Verify normal desktop interactions in fresh disposable profiles
+        shell: pwsh
+        env:
+          ELIX_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          python scripts/installed-qa/run.py "$env:RUNNER_TEMP/verified-stable1" "$env:RUNNER_TEMP/stable1-ui-evidence"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: signed-stable1-desktop-evidence
+          path: ${{ runner.temp }}/stable1-ui-evidence/
+          if-no-files-found: warn
+          retention-days: 30
