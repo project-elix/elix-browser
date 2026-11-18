@@ -87,6 +87,10 @@ export function useTabDrag(session:Session,callbacks:Callbacks) {
   const action=target&&reorderAction(current.current.session,d.id,target.id,target.edge,true);
   if(action)void rpc('reorder_tab',action).catch(current.current.callbacks.onError);
   else if(point.x<0||point.y<0||point.x>=window.innerWidth||point.y>=window.innerHeight){
+   if(current.current.session.tabs.find(tab=>tab.id===d.id)?.private){
+    current.current.callbacks.onNotice('Private faner blir i vinduet de ble åpnet i.');
+    return;
+   }
    current.current.callbacks.onNotice('Siden lastes inn på nytt i målvinduet …');
    void rpc<boolean>('detach_tab',{id:d.id,outside_only:true,drop_point:point}).then(moved=>current.current.callbacks.onNotice(moved?'Fanen er flyttet og siden er lastet inn på nytt.':'')).catch(current.current.callbacks.onError);
   }
