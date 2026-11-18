@@ -728,7 +728,15 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
         return Err("Internal page retained a stale loading indicator".into());
     }
     browser::activate(app, remote)?;
+    let address_focused = "document.hasFocus() && document.activeElement?.getAttribute('aria-label')==='Adressefelt'";
+    shell.set_focus().map_err(|e| e.to_string())?;
+    shell.eval("document.querySelector('input[aria-label=\"Adressefelt\"]').focus()")
+        .map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, address_focused).unwrap_or(false))?;
     browser::close(app, &settings_id)?;
+    if !shell_bool(app, address_focused)? {
+        return Err("Closing a background tab took focus from the address field".into());
+    }
     if !view_bool(&original, "window.__elixSettingsSource==='preserved'")? {
         return Err("Returning from settings reloaded the original webpage".into());
     }

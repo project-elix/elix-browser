@@ -379,7 +379,7 @@ fn close_inner(app: &AppHandle, id: &str, remember: bool) -> Result<(), String> 
     if let Some(v) = app.get_webview(id) {
         v.close().map_err(|e| e.to_string())?;
     }
-    let next = {
+    let (next, ended_split) = {
         let state = app.state::<AppState>();
         let mut s = state.session.lock().unwrap();
         let index = s
@@ -392,22 +392,32 @@ fn close_inner(app: &AppHandle, id: &str, remember: bool) -> Result<(), String> 
             s.closed.insert(0, closed);
             s.closed.truncate(20);
         }
-        if s.split
+        let ended_split = s.split
             .as_ref()
-            .is_some_and(|pair| pair.iter().any(|x| x == id))
-        {
+            .is_some_and(|pair| pair.iter().any(|x| x == id));
+        if ended_split {
             s.clear_split(chrono::Utc::now().timestamp());
         }
         if s.tabs.is_empty() {
             s.tabs.push(Tab::new("elix://start".into()));
         }
-        if s.active == id {
+        let next = if s.active == id {
             s.active = s.tabs[index.min(s.tabs.len() - 1)].id.clone();
-        }
-        s.active.clone()
+            Some(s.active.clone())
+        } else {
+            None
+        };
+        (next, ended_split)
     };
     private::cleanup_if_empty(app);
-    activate(app, &next)?;
+    if let Some(next) = next {
+        activate(app, &next)?;
+    } else {
+        if ended_split {
+            organization::layout(app)?;
+        }
+        emit(app);
+    }
     persist(app)
 }
 pub fn suspend(app: &AppHandle, id: &str) -> Result<(), String> {
