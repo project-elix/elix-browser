@@ -46,6 +46,9 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         &tab.id,
         WebviewUrl::External("about:blank".parse().map_err(|_| "Ugyldig URL")?),
     )
+    // activate() explicitly focuses the selected page. Creating its dormant
+    // split peer must leave both the selected pane and the shell controls alone.
+    .focused(false)
     .initialization_script_for_all_frames(include_str!("media-session.js"))
     .initialization_script_for_all_frames(include_str!("dormancy.js"))
     .initialization_script_for_all_frames(include_str!("transfer-input.js"))

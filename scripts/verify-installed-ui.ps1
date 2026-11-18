@@ -49,6 +49,34 @@ try {
   if ($VerifyReleaseDownloads) {
     $links = python scripts/stable1-download.py links
     if ($LASTEXITCODE -ne 0) { throw 'Could not obtain a valid fresh GitHub release asset' }
+    # Send each chord in one Win32 input packet. WinForms SendKeys can deliver
+    # a bare "v" when its modifier events overlap WebView2 focus changes.
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class ElixAcceptanceKeys {
+  [StructLayout(LayoutKind.Sequential)]
+  struct Keyboard { public ushort key, scan; public uint flags, time; public UIntPtr extra; }
+  [StructLayout(LayoutKind.Sequential)]
+  struct Mouse { public int x, y; public uint data, flags, time; public UIntPtr extra; }
+  [StructLayout(LayoutKind.Explicit)]
+  struct Payload { [FieldOffset(0)] public Mouse mouse; [FieldOffset(0)] public Keyboard keyboard; }
+  [StructLayout(LayoutKind.Sequential)]
+  struct Input { public uint type; public Payload payload; }
+  [DllImport("user32.dll", SetLastError=true)]
+  static extern uint SendInput(uint count, Input[] inputs, int size);
+  static Input Key(ushort key, bool released) {
+    return new Input { type=1, payload=new Payload { keyboard=new Keyboard { key=key, flags=released ? 2u : 0u } } };
+  }
+  public static void ReplaceFromClipboard() {
+    Input[] keys = { Key(0x11,false), Key(0x41,false), Key(0x41,true),
+                     Key(0x56,false), Key(0x56,true), Key(0x11,true) };
+    if (SendInput((uint)keys.Length, keys, Marshal.SizeOf<Input>()) != keys.Length)
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+  }
+}
+'@
     $shell = New-Object -ComObject WScript.Shell
     $profileRoot = Join-Path $env:LOCALAPPDATA 'no.projectelix.browser'
     $count = 0
@@ -56,17 +84,34 @@ try {
       $count++
       if (!$shell.AppActivate($app.Id)) { throw 'Could not focus the installed browser' }
       $address = $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $addressCondition)
-      $address.SetFocus()
       Set-Clipboard -Value $url
-      [Windows.Forms.SendKeys]::SendWait('^a')
-      [Windows.Forms.SendKeys]::SendWait('^v')
       $value = $address.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
-      $limit = [DateTime]::UtcNow.AddSeconds(5)
-      while ($value.Current.Value -ne $url -and [DateTime]::UtcNow -lt $limit) { Start-Sleep -Milliseconds 100 }
-      if ($value.Current.Value -ne $url) { throw 'The address field did not receive the complete asset URL' }
+      $readyToSubmit = $false
+      for ($attempt = 1; $attempt -le 3 -and !$readyToSubmit; $attempt++) {
+        $address.SetFocus()
+        $limit = [DateTime]::UtcNow.AddSeconds(3)
+        while (!$address.Current.HasKeyboardFocus -and [DateTime]::UtcNow -lt $limit) { Start-Sleep -Milliseconds 100 }
+        if (!$address.Current.HasKeyboardFocus) { continue }
+        [ElixAcceptanceKeys]::ReplaceFromClipboard()
+        $limit = [DateTime]::UtcNow.AddSeconds(3)
+        while ($value.Current.Value -ne $url -and [DateTime]::UtcNow -lt $limit) { Start-Sleep -Milliseconds 100 }
+        $readyToSubmit = $value.Current.Value -ceq $url
+      }
+      if (!$readyToSubmit) { throw "Could not enter complete asset address $count in the focused field" }
       [Windows.Forms.SendKeys]::SendWait('{ENTER}')
       python scripts/stable1-download.py verify $profileRoot $count
       if ($LASTEXITCODE -ne 0) { throw "Installed browser download $count failed" }
+      $failedAttachment = [Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::NameProperty,
+        ('Siden kunne ikke lastes inn (nettverksfeil 9). Pr'+[char]0x00f8+'v igjen.'))
+      $limit = [DateTime]::UtcNow.AddSeconds(4)
+      do {
+        $banner = $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $failedAttachment)
+        if (!$banner) { break }
+        Start-Sleep -Milliseconds 200
+      } while ([DateTime]::UtcNow -lt $limit)
+      if ($banner) { throw 'A completed attachment still shows a navigation failure in ELIX' }
+
     }
     if ($count -ne 2) { throw 'Both the release link and fresh CDN link must pass' }
     Write-Output 'PASS: ordinary address-bar navigation downloaded both the GitHub release and its fresh signed CDN URL; both file digests matched.'

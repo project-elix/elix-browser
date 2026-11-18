@@ -19,7 +19,9 @@ export default function Sidebar({mode,active,onGo,onMode,busy,bookmarks,bookmark
  useEffect(()=>{
   if(!desktop)return;
   let disposed=false,unlisten:UnlistenFn|undefined;
-  void listen('page-focused',()=>close()).then(stop=>{if(disposed)stop();else unlisten=stop}).catch(onError);
+  // Native focus events cross the WebView boundary asynchronously. A click on
+  // the gear can already have returned focus to the shell when an old one arrives.
+  void listen('page-focused',()=>{if(!document.hasFocus())close()}).then(stop=>{if(disposed)stop();else unlisten=stop}).catch(onError);
   return()=>{disposed=true;unlisten?.()};
  },[close,onError]);
  useEffect(()=>{

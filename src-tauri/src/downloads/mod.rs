@@ -1,4 +1,6 @@
 pub mod history;
+#[cfg(any(windows, test))]
+pub(crate) mod navigation;
 #[cfg(windows)]
 pub mod windows;
 pub use history::Download;

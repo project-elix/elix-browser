@@ -768,10 +768,10 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     {
         let state = app.state::<AppState>();
         let session = state.session.lock().unwrap();
-        if session.split.as_ref() != Some(&[b.clone(), a.clone()])
+        if session.active != b || session.split.as_ref() != Some(&[b.clone(), a.clone()])
             || session.tabs.iter().any(|tab| tab.id == a && tab.suspended)
         {
-            return Err("Ctrl+Alt+S did not wake and split the selected peer".into());
+            return Err("Ctrl+Alt+S failed to wake the peer while preserving the selected pane".into());
         }
     }
     wait(|| {
@@ -904,6 +904,7 @@ fn open_split_controls(app: &AppHandle) -> Result<(), String> {
     // Alpha 8 keeps controls behind the bottom gear. Native page focus closes
     // that panel, so reopen it after the shortcut before inspecting its state.
     shell.set_focus().map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "document.hasFocus()").unwrap_or(false))?;
     shell.eval("(()=>{const gear=document.querySelector('.gear-trigger');if(gear?.getAttribute('aria-expanded')!=='true')gear?.click()})()")
         .map_err(|e| e.to_string())?;
     wait(|| shell_bool(app, "!!document.querySelector('.gear-section-toggle[aria-controls=\"gear-split\"]')").unwrap_or(false))?;
@@ -952,6 +953,14 @@ fn native_split_shortcut(app: &AppHandle, tab_id: &str, enabled: bool) -> Result
     // Hold both modifiers until the native WebView accelerator reaches the shell.
     wait(|| app.state::<AppState>().session.lock().unwrap().split.is_some() == enabled)?;
     drop(held_keys);
+    // The model changes before the WebView bounds are applied. Interact with
+    // the shell only once the shortcut has actually laid out the native page.
+    let scale = view.window().scale_factor().map_err(|e| e.to_string())?;
+    wait(|| {
+        let width = app.state::<AppState>().bounds.lock().unwrap().width;
+        let expected = if enabled { (width - 8.).max(2.) / 2. } else { width };
+        view.size().is_ok_and(|size| (size.width as f64 - expected * scale).abs() <= 3.)
+    })?;
     open_split_controls(app)?;
     wait(|| {
         shell_bool(app, "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.includes('Avslutt delt visning'))")
@@ -2259,6 +2268,11 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
         if download.name != "elix-fixture.yaml"
             || std::fs::read_to_string(&download.path).map_err(|e| e.to_string())? != "elix-native-download" {
             return Err("Direct or redirected attachment lost its filename or contents".into());
+        }
+        let error = app.state::<AppState>().session.lock().unwrap().tabs.iter()
+            .find(|tab| tab.id == id).ok_or("Missing attachment source tab")?.navigation_error.clone();
+        if let Some(message) = error {
+            return Err(format!("Completed direct or redirected attachment still reports a page failure: {message}"));
         }
         browser::close(app, &id)?;
     }

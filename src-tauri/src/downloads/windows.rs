@@ -24,6 +24,7 @@ pub unsafe fn attach(
     core: &ICoreWebView2,
     app: tauri::AppHandle,
     view_id: String,
+    on_accepted: impl Fn(&str) + 'static,
 ) -> windows::core::Result<()> {
     #[cfg(feature = "smoke-tests")]
     trace_navigation(core, &view_id)?;
@@ -78,7 +79,7 @@ pub unsafe fn attach(
                 #[cfg(feature = "smoke-tests")]
                 trace(serde_json::json!({"event":"created","id":id,"view":view_id}));
                 app.state::<AppState>().downloads.lock().unwrap().push(super::Download::new(
-                    id.clone(), path.clone(), profile.clone(), private, uri, view_id.clone(),
+                    id.clone(), path.clone(), profile.clone(), private, uri.clone(), view_id.clone(),
                 ));
                 OPERATIONS.with(|items| items.borrow_mut().insert(identity, ActiveDownload {
                     id: id.clone(), path, operation: operation.clone(),
@@ -118,6 +119,7 @@ pub unsafe fn attach(
                         let _ = app.emit_to("shell", "downloads-changed", ());
                     }
                 }
+                on_accepted(&uri);
                 if app.state::<AppState>().session.lock().unwrap().active == view_id {
                     let _ = app.emit_to("shell", "notice", "Nedlastingen er startet. Åpne Nedlastinger med Ctrl+J for å følge den.");
                 }
@@ -149,7 +151,7 @@ pub unsafe fn attach(
     )
 }
 
-unsafe fn take_string(raw: PWSTR) -> windows::core::Result<String> {
+pub(crate) unsafe fn take_string(raw: PWSTR) -> windows::core::Result<String> {
     let value = raw.to_string();
     windows::Win32::System::Com::CoTaskMemFree(Some(raw.0.cast()));
     Ok(value?)
