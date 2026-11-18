@@ -432,7 +432,7 @@ impl Session {
     /// Restored pages stay unloaded until selected, but are not sleeping views.
     pub fn prepare_restore(&mut self, now: i64) {
         self.tabs
-            .retain(|t| !t.private && security::destination(&t.url).is_ok());
+            .retain(|t| !t.private && security::stored_destination_allowed(&t.url));
         self.tabs.truncate(100);
         if self.tabs.is_empty() {
             self.tabs.push(Tab::new("elix://start".into()));
@@ -441,7 +441,7 @@ impl Session {
             self.workspaces = organization::default_workspaces();
         }
         self.closed
-            .retain(|t| !t.private && security::destination(&t.url).is_ok());
+            .retain(|t| !t.private && security::stored_destination_allowed(&t.url));
         self.closed.truncate(20);
         for tab in &self.tabs {
             if !self.workspaces.contains(&tab.workspace) {

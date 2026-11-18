@@ -5,9 +5,9 @@ use crate::{
 };
 use tauri::webview::{NewWindowResponse, PageLoadEvent, PermissionResponse, WebviewBuilder};
 #[cfg(not(windows))]
-use tauri::{webview::DownloadEvent, Emitter};
+use tauri::webview::DownloadEvent;
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Position, Rect, Size, Webview, WebviewUrl,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Rect, Size, Webview, WebviewUrl,
 };
 pub fn bounds(view: &Webview, b: Bounds) -> Result<(), String> {
     if ![b.x, b.y, b.width, b.height].iter().all(|n| n.is_finite())
@@ -83,11 +83,9 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         if security::remote_allowed(&url) {
             let app = popup_app.clone();
             tauri::async_runtime::spawn(async move {
-                if browser::create_with_mode(app.clone(), url.to_string(), private)
-                    .await
-                    .is_err()
-                {
+                if let Err(error) = browser::create_with_mode(app.clone(), url.to_string(), private).await {
                     app.state::<AppState>().logs.add("warn", "popup_failed");
+                    let _ = app.emit_to("shell", "notice", format!("Kunne ikke åpne lenken i en ny fane. {error}"));
                 }
             });
         }

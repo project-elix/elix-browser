@@ -326,7 +326,7 @@ async fn dispatch(
         Request::SavedPermissions { origin } => {
             let p = state.profile.lock().unwrap().clone();
             let store = state.store.lock().unwrap();
-            Ok(json!(["camera", "microphone", "location", "notifications"]
+            Ok(json!(storage::SITE_PERMISSIONS
                 .iter()
                 .map(|kind| json!({"kind":kind,"decision":store.permission(&p,&origin,kind)}))
                 .collect::<Vec<_>>()))

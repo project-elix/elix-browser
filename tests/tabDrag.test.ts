@@ -1,5 +1,24 @@
 import {describe,it,expect} from 'vitest';
-import {dragPreviewPosition,edgeScroll} from '../src/browser/tabDrag';
+import {dragPreviewPosition,edgeScroll,groupDropTarget} from '../src/browser/tabDrag';
+import type {Session,Tab} from '../src/types';
+
+describe('Dragging to a sidebar group heading',()=>{
+ const tab:Tab={id:'source',url:'elix://start',title:'Start',pinned:false,private:false,loading:false,
+  suspended:false,last_active:0,load_ms:null,http_status:null,navigation_error:null};
+ const session:Session={active:tab.id,tabs:[
+  tab,{...tab,id:'target',group:'Spill',workspace:'Personlig'},
+  {...tab,id:'pinned',pinned:true,group:'Festet'},
+  {...tab,id:'foreign',workspace:'Jobb',group:'Arbeid'},
+ ]};
+ it('offers the named group in the same workspace and pinned partition',()=>{
+  expect(groupDropTarget(session,'source','target')).toEqual({id:'target',edge:'group',group:'Spill',workspace:'Personlig'});
+ });
+ it('rejects missing groups, redundant moves and incompatible tabs',()=>{
+  for(const [source,anchor] of [['source','missing'],['target','source'],['target','target'],['source','pinned'],['source','foreign']]){
+   expect(groupDropTarget(session,source,anchor)).toBeNull();
+  }
+ });
+});
 
 describe('Tab drag shell geometry',()=>{
  it('only scrolls inside the edge zone and increases speed towards the edge',()=>{

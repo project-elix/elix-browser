@@ -840,10 +840,11 @@ fn native_split_shortcut(app: &AppHandle, tab_id: &str, enabled: bool) -> Result
     Ok(())
 }
 #[cfg(windows)]
-fn native_ctrl_shortcut(
+fn native_key(
     app: &AppHandle,
     tab_id: &str,
     letter: u16,
+    with_ctrl: bool,
     acknowledged: impl Fn() -> bool,
 ) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -867,19 +868,21 @@ fn native_ctrl_shortcut(
             },
         }
     }
-    struct ReleaseKeys(u16);
+    struct ReleaseKeys(u16, bool);
     impl Drop for ReleaseKeys {
         fn drop(&mut self) {
             let keys = [key(VIRTUAL_KEY(self.0), true), key(VK_CONTROL, true)];
-            unsafe { SendInput(&keys, std::mem::size_of::<INPUT>() as i32); }
+            let count = if self.1 { 2 } else { 1 };
+            unsafe { SendInput(&keys[..count], std::mem::size_of::<INPUT>() as i32); }
         }
     }
-    let held_keys = ReleaseKeys(letter);
+    let held_keys = ReleaseKeys(letter, with_ctrl);
     let keys = [key(VK_CONTROL, false), key(VIRTUAL_KEY(letter), false)];
-    if unsafe { SendInput(&keys, std::mem::size_of::<INPUT>() as i32) } != keys.len() as u32 {
-        return Err(format!("Could not press native Ctrl+{}", char::from_u32(letter as u32).unwrap_or('?')));
+    let keys = if with_ctrl { &keys[..] } else { &keys[1..] };
+    if unsafe { SendInput(keys, std::mem::size_of::<INPUT>() as i32) } != keys.len() as u32 {
+        return Err(format!("Could not press native key {letter}"));
     }
-    // Hold Ctrl until WebView2's asynchronous accelerator reaches the shell.
+    // WebView2 dispatches page accelerators asynchronously.
     wait(acknowledged)?;
     drop(held_keys);
     Ok(())
@@ -898,7 +901,7 @@ fn history_shortcut_test(app: &AppHandle, tab_id: &str) -> Result<(), String> {
     let mut history_id = None;
     for _ in 0..2 {
         browser::activate(app, tab_id)?;
-        native_ctrl_shortcut(app, tab_id, 72, || {
+        native_key(app, tab_id, 72, true, || {
             let state = app.state::<AppState>();
             let session = state.session.lock().unwrap();
             session.active != tab_id && session.tabs.iter().any(|tab| tab.id == session.active && tab.url == "elix://history" && !tab.private)
@@ -929,7 +932,7 @@ fn new_tab_focus_test(app: &AppHandle, tab_id: &str) -> Result<(), String> {
     for shortcut in [true, false] {
         browser::activate(app, tab_id)?;
         if shortcut {
-            native_ctrl_shortcut(app, tab_id, 84, || {
+            native_key(app, tab_id, 84, true, || {
                 let state = app.state::<AppState>();
                 let session = state.session.lock().unwrap();
                 session.active != tab_id && session.tabs.iter().any(|tab| tab.id == session.active && tab.url == "elix://start")
@@ -1556,6 +1559,8 @@ fn permission_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     browser::close(app, &id)?;
     Ok(())
 }
+// No live tokens. The fixture recognizes only the exact encoded path and query.
+const ASSET_ROUTE: &str = "/release-asset?sig=sample%2Bvalue%2F%3D&rscd=attachment%3B+filename%3Delix-fixture.yaml";
 const SLOW_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
 static CANCEL_BYTES: [std::sync::atomic::AtomicUsize; 2] = [
     std::sync::atomic::AtomicUsize::new(0),
@@ -1607,6 +1612,15 @@ fn serve_fixture(mut stream: std::net::TcpStream) {
     let mut request = [0; 8192];
     let size = stream.read(&mut request).unwrap_or(0);
     let request = String::from_utf8_lossy(&request[..size]);
+    if request.starts_with("GET /release-latest ") {
+        let response = format!("HTTP/1.1 302 Found\r\nLocation: {ASSET_ROUTE}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = stream.write_all(response.as_bytes());
+        return;
+    }
+    if request.starts_with("GET /expired-asset?rscd=attachment ") {
+        let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 7\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nExpired");
+        return;
+    }
     if request.starts_with("GET /scroll.pdf ") {
         let pdf = pdf_fixture();
         let headers = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/pdf\r\nContent-Disposition: inline; filename=elix-scroll.pdf\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", pdf.len());
@@ -1718,7 +1732,7 @@ fn serve_fixture(mut stream: std::net::TcpStream) {
         let _ = stream.write_all(png);
         return;
     }
-    let download = request.starts_with("GET /download ");
+    let download = request.starts_with(&format!("GET {ASSET_ROUTE} "));
     let body = if download {
         "elix-native-download".to_owned()
     } else {
@@ -1726,15 +1740,17 @@ fn serve_fixture(mut stream: std::net::TcpStream) {
             "ELIX native two"
         } else if request.starts_with("GET /private-secret ") {
             "ELIX private fixture"
+        } else if request.starts_with("GET /release-page ") {
+            "ELIX release fixture"
         } else if request.starts_with("GET /permission ") {
             "ELIX permission fixture"
         } else {
             "ELIX native one"
         };
-        format!("<!doctype html><html><head><title>{title}</title><link rel=\"icon\" href=\"/favicon.png\" type=\"image/png\"></head><body>Native WebView2 fixture</body></html>")
+        format!("<!doctype html><html><head><title>{title}</title><link rel=\"icon\" href=\"/favicon.png\" type=\"image/png\"></head><body>Native WebView2 fixture <a id=release href=/release-latest target=_blank>Download release</a></body></html>")
     };
     let extra = if download {
-        "Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=elix-smoke.txt\r\n"
+        "Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=elix-fixture.yaml\r\n"
     } else {
         "Content-Type: text/html; charset=utf-8\r\n"
     };
@@ -1971,28 +1987,39 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     let second =
         tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
     wait(|| title(app, &second, "ELIX native one"))?;
-    browser::navigate(app, &second, &format!("{origin}/download"))?;
-    wait(|| {
-        app.state::<AppState>()
-            .downloads
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|d| d.status == "complete")
+    browser::navigate(app, &second, &format!("{origin}/expired-asset?rscd=attachment"))?;
+    wait(|| app.state::<AppState>().session.lock().unwrap().tabs.iter().any(|t|
+        t.id == second && t.navigation_error.as_deref().is_some_and(|e| e.contains("HTTP 403"))
+    ))?;
+    let direct = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}{ASSET_ROUTE}")))?;
+    browser::navigate(app, &second, &format!("{origin}/release-page"))?;
+    wait_title_or_error(app, &second, "ELIX release fixture")?;
+    let release_page = app.get_webview(&second).ok_or("Missing release page")?;
+    release_page.eval("document.getElementById('release').focus()").map_err(|e| e.to_string())?;
+    wait(|| view_bool(&release_page, "document.activeElement.id==='release'").unwrap_or(false))?;
+    #[cfg(windows)]
+    native_key(app, &second, windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN.0, false, || {
+        app.state::<AppState>().session.lock().unwrap().active != second
     })?;
-    let path = app
-        .state::<AppState>()
-        .downloads
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|d| d.status == "complete")
-        .unwrap()
-        .path
-        .clone();
-    if std::fs::read_to_string(&path).map_err(|e| e.to_string())? != "elix-native-download" {
-        return Err("Downloaded bytes differ".into());
+    #[cfg(not(windows))]
+    release_page.eval("document.getElementById('release').click()").map_err(|e| e.to_string())?;
+    wait(|| app.state::<AppState>().session.lock().unwrap().active != second)?;
+    let popup = app.state::<AppState>().session.lock().unwrap().active.clone();
+    if popup == direct {
+        return Err("Target-blank release link did not create a separate tab".into());
     }
+    for id in [direct, popup] {
+        wait(|| app.state::<AppState>().downloads.lock().unwrap().iter()
+            .any(|d| d.view_id == id && d.status == "complete"))?;
+        let download = app.state::<AppState>().downloads.lock().unwrap().iter()
+            .find(|d| d.view_id == id && d.status == "complete").cloned().ok_or("Missing attachment")?;
+        if download.name != "elix-fixture.yaml"
+            || std::fs::read_to_string(&download.path).map_err(|e| e.to_string())? != "elix-native-download" {
+            return Err("Direct or redirected attachment lost its filename or contents".into());
+        }
+        browser::close(app, &id)?;
+    }
+    browser::activate(app, &second)?;
     progress("download complete bytes: after");
     progress("resumable download: before");
     resumable_download_test(app, &second, &origin)?;

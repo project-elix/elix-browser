@@ -2,9 +2,11 @@ import {useCallback,useEffect,useRef,useState,type MouseEvent as ReactMouseEvent
 import type {Session} from '../types';
 import {rpc} from './bridge';
 import {reorderAction} from './tabTools';
-import {edgeScroll,type Point} from './tabDrag';
+import {edgeScroll,groupDropTarget,type Point} from './tabDrag';
 
-export type TabDropTarget={id:string;edge:'before'|'after'};
+export type TabDropTarget=
+ | {id:string;edge:'before'|'after'}
+ | {id:string;edge:'group';group:string;workspace:string};
 export type TabDragPreview={id:string;point:Point;target:TabDropTarget|null};
 type Drag={id:string;pointerId:number;start:Point;point:Point;active:boolean;capture:Element;workspace:string;pinned:boolean};
 type Callbacks={onError:(error:unknown)=>void;onNotice:(notice:string)=>void};
@@ -15,7 +17,10 @@ export function useTabDrag(session:Session,callbacks:Callbacks) {
  const [held,setHeld]=useState<string|null>(null),[dragging,setDragging]=useState<string|null>(null);
  const [dropTarget,setDropTarget]=useState<TabDropTarget|null>(null),[preview,setPreview]=useState<TabDragPreview|null>(null);
  const targetAt=useCallback((point:Point,id:string):TabDropTarget|null=>{
-  const element=document.elementFromPoint(point.x,point.y)?.closest<HTMLElement>('[data-tab-id]');
+  const hit=document.elementFromPoint(point.x,point.y);
+  const anchorId=hit?.closest<HTMLElement>('[data-tab-group-anchor]')?.dataset.tabGroupAnchor;
+  if(anchorId)return groupDropTarget(current.current.session,id,anchorId);
+  const element=hit?.closest<HTMLElement>('[data-tab-id]');
   if(!element)return null;
   const target=element.dataset.tabId!,rect=element.getBoundingClientRect();
   const edge=element.dataset.tabAxis==='vertical'?(point.y>rect.top+rect.height/2?'after':'before'):(point.x>rect.left+rect.width/2?'after':'before');
@@ -60,6 +65,10 @@ export function useTabDrag(session:Session,callbacks:Callbacks) {
   const d=stop();if(!d?.active)return;
   suppressClick.current=true;
   const point={x:event.clientX,y:event.clientY},target=targetAt(point,d.id);
+  if(target?.edge==='group'){
+   void rpc('group_tab',{id:d.id,group:target.group,workspace:target.workspace}).catch(current.current.callbacks.onError);
+   return;
+  }
   const action=target&&reorderAction(current.current.session,d.id,target.id,target.edge);
   if(action)void rpc('reorder_tab',action).catch(current.current.callbacks.onError);
   else if(point.x<0||point.y<0||point.x>=window.innerWidth||point.y>=window.innerHeight){

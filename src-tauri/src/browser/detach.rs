@@ -68,7 +68,7 @@ pub fn recover_windows(app: &AppHandle) -> Result<usize, String> {
                 session
                     .tabs
                     .into_iter()
-                    .filter(|t| !t.private && crate::security::destination(&t.url).is_ok()),
+                    .filter(|t| !t.private && crate::security::stored_destination_allowed(&t.url)),
             );
             consumed.push(key);
         }
@@ -129,7 +129,7 @@ pub fn startup() -> Result<(String, Option<Handoff>), String> {
         let handoff: Handoff =
             serde_json::from_slice(&bytes).map_err(|_| "Kunne ikke overføre fanen")?;
         if !crate::security::valid_profile(&handoff.profile)
-            || crate::security::destination(&handoff.tab.url).is_err()
+            || !crate::security::stored_destination_allowed(&handoff.tab.url)
         {
             return Err("Ugyldig fane".into());
         }

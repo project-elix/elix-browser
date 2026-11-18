@@ -129,14 +129,30 @@ fn update_group(
     if !s.workspaces.iter().any(|w| w == workspace) {
         return Err("Ukjent arbeidsområde".into());
     }
-    let tab = s
+    let from = s
         .tabs
-        .iter_mut()
-        .find(|t| t.id == id)
+        .iter()
+        .position(|t| t.id == id)
         .ok_or("Ukjent fane")?;
+    let group = group.trim();
+    let tab = &mut s.tabs[from];
     let moved = tab.workspace != workspace;
-    tab.group = group.trim().into();
+    if !moved && tab.group == group {
+        return Ok(false);
+    }
+    tab.group = group.into();
     tab.workspace = workspace.into();
+    let pinned = tab.pinned;
+    // Commit group membership and its position together, including workspace moves.
+    if !group.is_empty() {
+        if let Some(last) = s.tabs.iter().rposition(|t| {
+            t.id != id && t.workspace == workspace && t.pinned == pinned && t.group == group
+        }) {
+            let tab = s.tabs.remove(from);
+            let insert = if from < last { last } else { last + 1 };
+            s.tabs.insert(insert, tab);
+        }
+    }
     if moved
         && s.split
             .as_ref()
@@ -262,7 +278,7 @@ pub fn recover(app: &AppHandle, id: &str) -> Result<(), String> {
         .unwrap()
         .tabs
         .iter()
-        .any(|t| t.id == id && security::destination(&t.url).is_ok())
+        .any(|t| t.id == id && security::stored_destination_allowed(&t.url))
     {
         return Err("Ukjent fane".into());
     }
@@ -328,6 +344,33 @@ mod tests {
             assert!(reorder_tabs(&mut tabs, id, target).is_err());
             assert_eq!(ids(&tabs), ["a", "p", "w"]);
         }
+    }
+
+    #[test]
+    fn joining_a_group_places_the_tab_with_its_members_in_one_update() {
+        let mut session = super::super::Session {
+            active: "first".into(),
+            workspaces: vec!["Home".into(), "Work".into()],
+            tabs: vec![
+                ordered_tab("moving", "Home", false),
+                ordered_tab("other", "Home", false),
+                ordered_tab("first", "Home", false),
+                ordered_tab("unrelated", "Home", false),
+                ordered_tab("pinned", "Home", true),
+                ordered_tab("work", "Work", false),
+            ],
+            ..Default::default()
+        };
+        for id in ["first", "pinned", "work"] {
+            session.tabs.iter_mut().find(|t| t.id == id).unwrap().group = "Lesing".into();
+        }
+        assert!(!update_group(&mut session, "moving", "Lesing", "Home").unwrap());
+        assert_eq!(ids(&session.tabs), ["other", "first", "moving", "unrelated", "pinned", "work"]);
+        assert_eq!(session.active, "first");
+        assert!(update_group(&mut session, "work", "Lesing", "Home").unwrap());
+        assert_eq!(ids(&session.tabs), ["other", "first", "moving", "work", "unrelated", "pinned"]);
+        assert_eq!(session.tabs[3].group, "Lesing");
+        assert_eq!(session.tabs[3].workspace, "Home");
     }
 
     #[test]

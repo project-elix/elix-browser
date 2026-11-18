@@ -9,7 +9,17 @@ const errors=[]; page.on('pageerror',error=>errors.push(error.message));
 const run=()=>page.evaluate(script);
 const restore=()=>page.evaluate(()=>window.__elixMediaPresentation.restore());
 const makeMedia=async(mode='video')=>page.evaluate(mode=>{
-  const root = mode==='frame' ? document.querySelector('iframe').contentDocument : mode==='shadow' ? document.querySelector('#host').attachShadow({mode:'open'}) : document;
+  const host = document.querySelector('#host');
+  let root = document;
+  if (mode === 'frame') root = document.querySelector('iframe').contentDocument;
+  if (mode === 'shadow') root = host.attachShadow({mode:'open'});
+  if (mode === 'slotted') {
+    const clip = document.createElement('div');
+    clip.style.cssText = 'transform:translate(16px);overflow:hidden;contain:paint;width:140px;height:95px';
+    clip.append(document.createElement('slot'));
+    host.attachShadow({mode:'open'}).append(clip);
+    root = host;
+  }
   const doc=root.ownerDocument||root;
   const wrap=doc.createElement('section');
   wrap.id='wrapper'; wrap.style.cssText='transform:translate(7px);contain:paint;overflow-x:hidden;margin-left:13px;border-left:2px solid red;background-color:rgb(3, 5, 8);position:sticky;width:130px;height:90px;';
@@ -49,19 +59,32 @@ try {
   assert.deepEqual(await page.evaluate(()=>{const f=window.__fixture;return {media:f.snapshot(f.media),wrapper:f.snapshot(f.wrap)}}),await page.evaluate(()=>({media:window.__fixture.mediaStyle,wrapper:window.__fixture.wrapStyle})),'Restoration preserves all original CSS longhands and normalized colors');
   assert.equal(await page.evaluate(()=>window.__fixture.media.srcObject===window.__fixture.stream&&!window.__fixture.media.controls&&!window.__fixture.media.paused&&!window.__elixMediaPresentation&&getComputedStyle(document.querySelector('#chrome')).visibility==='visible'),true);
 
-  for(const mode of ['audio','shadow','frame']) {
+  for(const mode of ['audio','shadow','slotted','frame']) {
     await page.setContent(`<title>${mode} fixture</title><div id="chrome">Site content</div><div id="host" style="transform:translate(9px);contain:paint"></div>${mode==='frame'?'<iframe style="width:180px;height:100px" srcdoc="<!doctype html><title>Embedded video</title><p>Frame chrome</p>"></iframe>':''}`);
     if(mode==='frame')await page.waitForFunction(()=>document.querySelector('iframe').contentDocument?.querySelector('p'));
     await makeMedia(mode);
+    const clipStyle = mode === 'slotted' ? await page.evaluate(() => window.__fixture.snapshot(document.querySelector('#host').shadowRoot.firstElementChild)) : null;
     assert.deepEqual(await run(),{ok:true,kind:mode==='audio'?'audio':'video'});
     assert.equal(await page.evaluate(mode=>{const v=window.__fixture.media,r=v.getBoundingClientRect(),w=v.ownerDocument.defaultView;return v.controls&&getComputedStyle(v).visibility==='visible'&&v.srcObject===window.__fixture.stream&&(mode==='audio'?r.width>innerWidth-60&&r.height===54:Math.abs(r.width-w.innerWidth)<1&&Math.abs(r.height-w.innerHeight)<1)},mode),true,`${mode} exposes only the original media player`);
     if(mode==='frame')assert.equal(await page.evaluate(()=>{const r=document.querySelector('iframe').getBoundingClientRect();return Math.abs(r.x)<1&&Math.abs(r.y)<1&&Math.abs(r.width-innerWidth)<1&&Math.abs(r.height-innerHeight)<1}),true,'Same-origin iframe fills the outer viewport');
+    if (mode === 'slotted') {
+      await page.setViewportSize({width:600,height:380});
+      assert.equal(await page.evaluate(() => {
+        const video = window.__fixture.media;
+        const {x,y,width,height} = video.getBoundingClientRect();
+        return x === 0 && y === 0 && width === innerWidth && height === innerHeight
+          && document.elementFromPoint(innerWidth - 10, 10) === video;
+      }), true, 'Slotted video stays visible and clickable up to the edge after resizing');
+    }
     if(mode==='frame') {
       await page.evaluate(()=>{document.querySelector('iframe').srcdoc='<h1>Destination must stay hidden</h1>'});
       await page.waitForFunction(()=>document.querySelector('iframe').contentDocument?.querySelector('h1'));
       await page.waitForFunction(()=>getComputedStyle(document.querySelector('iframe')).visibility==='hidden');
     }
     await restore();
+    if (mode === 'slotted') {
+      assert.deepEqual(await page.evaluate(() => window.__fixture.snapshot(document.querySelector('#host').shadowRoot.firstElementChild)), clipStyle, 'Original slot wrapper restored');
+    }
     assert.deepEqual(await page.evaluate(()=>{const f=window.__fixture;return {media:f.snapshot(f.media),wrapper:f.snapshot(f.wrap)}}),await page.evaluate(()=>({media:window.__fixture.mediaStyle,wrapper:window.__fixture.wrapStyle})),`${mode} original styles restored`);
     assert.equal(await page.evaluate(()=>window.__fixture.media.srcObject===window.__fixture.stream&&!window.__fixture.media.controls&&!document.querySelector('[data-elix-media-surface]')),true);
   }

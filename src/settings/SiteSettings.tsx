@@ -1,7 +1,7 @@
 import {useState} from 'react';
 import {rpc} from '../browser/bridge';
 type Permission={kind:string;decision:string};type Cookie={name:string;domain:string;path:string};
-const names:Record<string,string>={camera:'Kamera',microphone:'Mikrofon',location:'Posisjon',notifications:'Varsler'};
+const names:Record<string,string>={camera:'Kamera',microphone:'Mikrofon',location:'Posisjon',notifications:'Varsler',multiple_downloads:'Flere automatiske nedlastinger'};
 export default function SiteSettings({onError}:{onError:(e:unknown)=>void}){
  const[input,setInput]=useState(''),[origin,setOrigin]=useState(''),[cookies,setCookies]=useState<Cookie[]>([]),[permissions,setPermissions]=useState<Permission[]>([]),[busy,setBusy]=useState(false),[confirm,setConfirm]=useState(false),[message,setMessage]=useState('');
  const load=async(value:string)=>{setBusy(true);try{const u=new URL(value.includes('://')?value:`https://${value}`);if(!['https:','http:'].includes(u.protocol)||u.username||u.password)throw new Error('Skriv en gyldig nettadresse');const [c,p]=await Promise.all([rpc<Cookie[]>('cookies',{origin:u.origin}),rpc<Permission[]>('saved_permissions',{origin:u.origin})]);setOrigin(u.origin);setCookies(c);setPermissions(p);setConfirm(false);setMessage('')}finally{setBusy(false)}};

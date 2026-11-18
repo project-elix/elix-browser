@@ -86,7 +86,10 @@
       path.push(element);
       const doc = element.ownerDocument;
       documents.add(doc);
-      if (element.parentElement) element = element.parentElement;
+      // A slotted player's clipping and positioning come from the shadow
+      // wrapper around the slot, even though it lives in the host's light DOM.
+      if (element.assignedSlot) element = element.assignedSlot;
+      else if (element.parentElement) element = element.parentElement;
       else {
         const root = element.getRootNode();
         element = root.host || (doc.defaultView && doc.defaultView.frameElement);
