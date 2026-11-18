@@ -18,8 +18,7 @@ jobs:
     timeout-minutes: 40
     permissions:
       actions: read
-      # GitHub requires push access to discover drafts. No release or repository mutation is performed.
-      contents: write
+      contents: read
     env:
       QUALIFY_RELEASE_RUN: ${{ inputs.release_run_id }}
       QUALIFY_SOURCE_SHA: ${{ inputs.source_sha }}
@@ -44,18 +43,24 @@ jobs:
           path: ${{ runner.temp }}/original-review
           github-token: ${{ github.token }}
           run-id: ${{ inputs.release_run_id }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-stable1-installer
+          path: ${{ runner.temp }}/original-installer
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.release_run_id }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Fetch the existing installer pair and verify its contents and source
+      - name: Verify the installer pair against the original release run
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python scripts/installed-qa/package.py --review "$env:RUNNER_TEMP/original-review" --verifier verified-source --output "$env:RUNNER_TEMP/verified-stable1"
+          python scripts/installed-qa/package.py --review "$env:RUNNER_TEMP/original-review" --installer-artifact "$env:RUNNER_TEMP/original-installer" --verifier verified-source --output "$env:RUNNER_TEMP/verified-stable1"
       - name: Install desktop UI test dependencies
         shell: pwsh
         run: python -m pip install --disable-pip-version-check -r scripts/installed-qa/requirements.txt

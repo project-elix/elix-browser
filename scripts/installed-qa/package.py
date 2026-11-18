@@ -13,10 +13,6 @@ def require(condition, explanation):
         raise ValueError(explanation)
 
 
-def gh(*args):
-    return json.loads(subprocess.check_output(["gh", "api", *args], encoding="utf-8"))
-
-
 def sha256(path):
     with path.open("rb") as file:
         return hashlib.file_digest(file, "sha256").hexdigest()
@@ -39,6 +35,18 @@ def identity(run, evidence, source, run_id, repository):
     require(bool(evidence.get("signature")), "The production review does not contain a verified updater signature.")
 
 
+def installer_pair(directory, evidence):
+    files = list(directory.iterdir())
+    installers = [p for p in files if p.is_file() and p.name.endswith("_x64-setup.exe")]
+    require(len(files) == 2 and len(installers) == 1, "Expected the two original files from the signed Windows build")
+    exe = installers[0]
+    signature = exe.with_suffix(".exe.sig")
+    require(signature.is_file(), "The installer artifact has no matching detached signature")
+    require(sha256(exe) == evidence["installer_sha256"].lower(), "Installer SHA-256 differs from the original signed release job")
+    require(signature.read_text().strip() == evidence["signature"].strip(), "Signature differs from the signed release review")
+    return exe, signature
+
+
 def acquire(args):
     repository = os.environ["GITHUB_REPOSITORY"]
     run_id = os.environ["QUALIFY_RELEASE_RUN"]
@@ -47,36 +55,20 @@ def acquire(args):
     reviews = list(args.review.rglob("stable1-profile.json"))
     require(len(reviews) == 1, "Expected exactly one verified release review")
     evidence = json.loads(reviews[0].read_text(encoding="utf-8-sig"))
-    identity(gh(f"repos/{repository}/actions/runs/{run_id}"), evidence, source, run_id, repository)
-    # The release may still be awaiting publication. Published and draft assets use the same IDs.
-    pages = gh("--paginate", "--slurp", f"repos/{repository}/releases?per_page=100")
-    releases = [r for page in pages for r in page if r.get("tag_name") == "v0.1.4" and r.get("target_commitish") == source]
-    require(len(releases) == 1, "Expected one Stable 1 release or private draft targeting this exact commit")
-    release = releases[0]
-    assets = release.get("assets", [])
-    installers = [a for a in assets if a["name"].endswith("_x64-setup.exe")]
-    require(len(installers) == 1, "Expected one Windows x64 installer")
-    installer = installers[0]
-    signatures = [a for a in assets if a["name"] == installer["name"] + ".sig"]
-    require(len(signatures) == 1, "Missing the matching updater signature")
+    metadata = subprocess.check_output(["gh", "api", f"repos/{repository}/actions/runs/{run_id}"], encoding="utf-8")
+    identity(json.loads(metadata), evidence, source, run_id, repository)
+    installer, signature = installer_pair(args.installer_artifact, evidence)
     args.output.mkdir(parents=True, exist_ok=False)
-    for asset, name in [(installer, "candidate.exe"), (signatures[0], "candidate.exe.sig")]:
-        path = args.output / name
-        require(asset["state"] == "uploaded" and int(asset["id"]) > 0, "Incomplete release asset")
-        with path.open("xb") as out:
-            subprocess.run(["gh","api","-H","Accept: application/octet-stream",
-                            f"repos/{repository}/releases/assets/{int(asset['id'])}"], stdout=out, check=True)
-        require(path.stat().st_size == asset["size"], "Truncated release asset")
     exe = args.output / "candidate.exe"
-    require(sha256(exe) == evidence["installer_sha256"].lower(), "Installer SHA-256 differs from the original signed release job")
-    require((args.output / "candidate.exe.sig").read_text().strip() == evidence["signature"].strip(),
-            "Signature differs from the original signed release job")
+    original_name = installer.name
+    installer.rename(exe)
+    signature.rename(exe.with_suffix(".exe.sig"))
     verified_source = args.verifier.resolve()
     subprocess.run(["node", "scripts/verify-installer-signature.mjs", str(exe.resolve()), "0.1.4"], cwd=verified_source, check=True)
     record = {
         "version": "0.1.4", "source_sha": source, "release_run": run_id, "release_attempt": evidence["run_attempt"],
         "qa_run": os.environ["GITHUB_RUN_ID"], "qa_attempt": os.environ["GITHUB_RUN_ATTEMPT"], "qa_source": os.environ["GITHUB_SHA"],
-        "installer_asset": installer["id"], "signature_asset": signatures[0]["id"],
+        "installer_artifact": "signed-stable1-installer", "installer_filename": original_name,
         "installer_sha256": sha256(exe), "exe_sha256": evidence["exe_sha256"].lower(),
         "updater_signature": "verified", "ELIX-34": "passed on original signed install",
     }
@@ -86,6 +78,7 @@ def acquire(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--review", type=Path, required=True)
+    parser.add_argument("--installer-artifact", type=Path, required=True)
     parser.add_argument("--verifier", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     acquire(parser.parse_args())
