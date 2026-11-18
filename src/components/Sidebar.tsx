@@ -19,7 +19,8 @@ export default function Sidebar({mode,active,onGo,onMode,busy,bookmarks,bookmark
  useEffect(()=>{
   if(!desktop)return;
   let disposed=false,unlisten:UnlistenFn|undefined;
-  void listen('page-focused',()=>close()).then(stop=>{if(disposed)stop();else unlisten=stop}).catch(onError);
+  // Ignore stale native focus events delivered after the shell regained focus.
+  void listen('page-focused',()=>{if(!document.hasFocus())close()}).then(stop=>{if(disposed)stop();else unlisten=stop}).catch(onError);
   return()=>{disposed=true;unlisten?.()};
  },[close,onError]);
  useEffect(()=>{

@@ -1,4 +1,7 @@
-use crate::{browser, AppState};
+use crate::{browser, downloads::navigation::DownloadNavigation, AppState};
+use std::{cell::RefCell, rc::Rc, time::Instant};
+
+const ABORTED_MESSAGE: &str = "Siden kunne ikke lastes inn (nettverksfeil 9). Prøv igjen.";
 use tauri::{Emitter, Manager, Webview};
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, ContainsFullScreenElementChangedEventHandler, FocusChangedEventHandler,
@@ -35,7 +38,21 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                 })),&mut focus_token)?;
                 let settings = core.Settings()?;
                 settings.SetAreDefaultContextMenusEnabled(true)?;
-                crate::downloads::windows::attach(&core, app.clone(), id.clone())?;
+                let navigation = Rc::new(RefCell::new(DownloadNavigation::default()));
+                let downloads = navigation.clone();
+                let download_app = app.clone();
+                let download_view = id.clone();
+                crate::downloads::windows::attach(&core, app.clone(), id.clone(), move |uri| {
+                    if !downloads.borrow_mut().accepted(uri, Instant::now()) { return; }
+                    let state = download_app.state::<AppState>();
+                    let mut session = state.session.lock().unwrap();
+                    if let Some(tab) = session.tabs.iter_mut().find(|t| t.id == download_view
+                        && !t.crashed && t.navigation_error.as_deref() == Some(ABORTED_MESSAGE)) {
+                        tab.navigation_error = None;
+                        drop(session);
+                        browser::emit(&download_app);
+                    }
+                })?;
                 let fullscreen_app = app.clone();
                 let fullscreen_id = id.clone();
                 let mut fullscreen_token = 0;
@@ -55,8 +72,16 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                 let leaving_app = app.clone();
                 let leaving_id = id.clone();
                 let mut leaving_token = 0;
+                let starts = navigation.clone();
                 core.add_NavigationStarting(
-                    &NavigationStartingEventHandler::create(Box::new(move |_, _| {
+                    &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                        if let Some(args) = args {
+                            let mut navigation_id = 0;
+                            let mut uri = PWSTR::null();
+                            args.NavigationId(&mut navigation_id)?;
+                            args.Uri(&mut uri)?;
+                            starts.borrow_mut().started(navigation_id, &crate::downloads::windows::take_string(uri)?);
+                        }
                         browser::media::navigation_started(&leaving_app, &leaving_id);
                         Ok(())
                     })),
@@ -207,13 +232,20 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                                     status = Some(code);
                                 }
                             }
+                            let mut navigation_id = 0;
+                            args.NavigationId(&mut navigation_id)?;
+                            if navigation.borrow().is_stale(navigation_id) { return Ok(()); }
                             let mut success = windows::core::BOOL(0);
                             args.IsSuccess(&mut success)?;
-                            let error = if !success.as_bool() {
-                                let mut code = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
-                                args.WebErrorStatus(&mut code)?;
+                            let mut code = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                            if !success.as_bool() { args.WebErrorStatus(&mut code)?; }
+                            let aborted = !success.as_bool() && code == COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED
+                                && status.is_none_or(|s| s < 400);
+                            let is_download = navigation.borrow_mut().completed(navigation_id, aborted, Instant::now());
+                            let error = if !success.as_bool() && !is_download {
                                 match code {
                                     COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED => None,
+                                    COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED => Some(ABORTED_MESSAGE.into()),
                                     COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED => Some("Fant ikke nettstedet. Kontroller adressen og internettforbindelsen.".into()),
                                     COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT => Some("Nettstedet brukte for lang tid på å svare. Prøv igjen.".into()),
                                     COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT | COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE | COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED => Some("Kunne ikke koble til nettstedet. Kontroller internettforbindelsen og prøv igjen.".into()),

@@ -128,6 +128,16 @@ jobs:
         with:
           name: signed-release-screenshot
           path: signed-release.png
+      - name: Retain verified Stable 1 installer for installed-candidate QA
+        if: inputs.channel == 'stable' && inputs.version == '0.1.4'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-stable1-installer
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+          compression-level: 0
+          if-no-files-found: error
       - name: Create immutable draft with installer and signature
         shell: pwsh
         env:

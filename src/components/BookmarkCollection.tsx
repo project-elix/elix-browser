@@ -1,4 +1,4 @@
-import {useEffect,useRef,useState,type KeyboardEvent,type MouseEvent} from 'react';
+import {useEffect,useLayoutEffect,useRef,useState,type KeyboardEvent,type MouseEvent} from 'react';
 import {ChevronDown,ChevronRight,Folder,FolderPlus,MoreHorizontal,Star,X} from 'lucide-react';
 import type {Entry} from '../types';
 import {desktop,rpc} from '../browser/bridge';
@@ -24,7 +24,12 @@ export default function BookmarkCollection({items,groups,profile,variant,onGo,on
  const close=(restore=false)=>{setTarget(null);setEditor(null);if(restore)requestAnimationFrame(()=>opener.current?.focus())};
  useEffect(()=>{setTarget(null);setEditor(null);setExpandedGroups(new Map());setExpandedSearchGroups(new Map());setFilter('');setMessage('')},[profile]);
  useEffect(()=>{if(!desktop)return;let disposed=false;let unlisten:(()=>void)|undefined;void listen('page-focused',()=>{if(!running.current)close()}).then(stop=>{if(disposed)stop();else unlisten=stop}).catch(onError);return()=>{disposed=true;unlisten?.()}},[onError]);
- useEffect(()=>{if(!target&&!editor)return;const frame=requestAnimationFrame(()=>{actions.current?.scrollIntoView({block:'nearest'});actions.current?.querySelector<HTMLElement>(editor?'input,select':'[role="menuitem"]:not(:disabled)')?.focus()});const outside=(event:globalThis.PointerEvent)=>{if(!root.current?.contains(event.target as Node)&&!running.current)close()};const escape=(event:globalThis.KeyboardEvent)=>{if(event.key==='Escape'&&!running.current){event.preventDefault();event.stopPropagation();close(true)}};document.addEventListener('pointerdown',outside);document.addEventListener('keydown',escape,true);return()=>{cancelAnimationFrame(frame);document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape,true)}},[target,editor]);
+ useLayoutEffect(()=>{
+  if(!target&&!editor)return;
+  actions.current?.scrollIntoView({block:'nearest'});
+  actions.current?.querySelector<HTMLElement>(editor?'input,select':'[role="menuitem"]:not(:disabled)')?.focus();
+ },[target,editor]);
+ useEffect(()=>{if(!target&&!editor)return;const outside=(event:globalThis.PointerEvent)=>{if(!root.current?.contains(event.target as Node)&&!running.current)close()};const escape=(event:globalThis.KeyboardEvent)=>{if(event.key==='Escape'&&!running.current){event.preventDefault();event.stopPropagation();close(true)}};document.addEventListener('pointerdown',outside);document.addEventListener('keydown',escape,true);return()=>{document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape,true)}},[target,editor]);
  const context=(event:MouseEvent<HTMLElement>,value:Target)=>{event.preventDefault();event.stopPropagation();opener.current=event.currentTarget;onExpand?.();setEditor(null);setTarget(value);setMessage('')};
  const contextKey=(event:KeyboardEvent<HTMLElement>,value:Target)=>{if(event.key==='ContextMenu'||event.shiftKey&&event.key==='F10'){event.preventDefault();opener.current=event.currentTarget;onExpand?.();setEditor(null);setTarget(value)}};
  const run=async(action:()=>Promise<unknown>,success='')=>{if(running.current)return;running.current=true;setBusy(true);const actingProfile=profile;try{await action();if(currentProfile.current!==actingProfile)return;await onChange();if(currentProfile.current!==actingProfile)return;setMessage(success);close(true)}catch(error){if(currentProfile.current===actingProfile)onError(error)}finally{running.current=false;setBusy(false)}};
