@@ -4,11 +4,11 @@ Windows desktop browser with a Rust backend, Tauri 2, WebView2, React/TypeScript
 
 Product site: https://browser.projectelix.no
 
-**Current source: Alpha 8, version 0.1.2-dev.8.** See [Alpha 8 implementation and validation notes](docs/alpha8.md); published installers are available through [GitHub Releases](https://github.com/project-elix/elix-browser/releases). This repository contains real native browser integration, not an iframe browser. See [validation status](docs/VALIDATION.md) and the [current feature limitations](docs/alpha8.md#inherited-limitations) before distribution.
+**Current source: Alpha 9 (0.1.4-dev.9).** This Developer version includes the [Trello fixes from PR #5](https://github.com/project-elix/elix-browser/pull/5) for address-bar searches, downloads, tab and bookmark groups, and the media miniplayer. Beta 2 (0.1.3-beta.2) promotes the [Alpha 8 feature set](docs/alpha8.md).
 
 ## Beta test for Windows
 
-**[Download Beta 1 for Windows x64](https://github.com/project-elix/elix-browser/releases/download/v0.1.1-beta.1/ELIX.Browser_0.1.1-beta.1_x64-setup.exe)** — version 0.1.1-beta.1, promoting the Alpha 5 feature set. It needs no personal server. Alpha 3/4/5 users can choose **Innstillinger → Oppdateringer → Beta → Se etter oppdateringer**. Install manually over Alpha 1/2 without deleting application data, then select Beta for future signed beta updates. The updater signature is separate from Windows Authenticode; the installer has no Authenticode publisher certificate. See [Beta 1 release notes](docs/beta1.md), [feature limitations](docs/alpha5.md), [validation evidence](docs/VALIDATION.md) and the actual [published releases](https://github.com/project-elix/elix-browser/releases); do not use the source ZIP as an installer.
+The [Beta 2 release page](https://github.com/project-elix/elix-browser/releases/tag/v0.1.3-beta.2) and the [Alpha 9 release page](https://github.com/project-elix/elix-browser/releases/tag/v0.1.4-dev.9) list the Windows x64 installers when published. In ELIX, choose **Innstillinger → Oppdateringer**, select **Beta** or **Developer**, then check for updates. Alpha 1/2 require a manual install. The updater verifies release signatures. Windows may still show an unknown-publisher warning for the installer.
 
 ## Run on Windows
 
