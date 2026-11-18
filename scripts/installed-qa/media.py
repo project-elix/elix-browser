@@ -74,17 +74,25 @@ def fullscreen(ui):
     screen = monitor(hwnd)
     assert not close_rect(normal, screen), "Expected a windowed baseline"
 
+    def original_video(e):
+        return (e["token"] == token and e["sameStream"] and e["playing"] and e["liveVideo"]
+                and e["muted"] and e["mediaCount"] == 1 and e["frames"] > 0)
+
     def enter_and_escape(prefix):
+        before = event(ui, "/qa-fullscreen", original_video, "Original muted video did not present frames")
         ui.click("Vis testvideo i fullskjerm", "Button")
-        full = event(ui, "/qa-fullscreen", lambda e: original(e, token) and e["fullscreen"]
+        full = event(ui, "/qa-fullscreen", lambda e: original_video(e) and e["fullscreen"]
+                     and e["frames"] > before["frames"] and e["t"] > before["t"]
                      and fills(e, hwnd) and close_rect(client_rect(hwnd), screen),
                      "Video did not fill both the monitor and the native ELIX client")
         ui.screenshot(prefix)
         start_time = time.monotonic()
         ui.keys("{ESC}")
-        event(ui, "/qa-fullscreen", lambda e: original(e, token) and not e["fullscreen"] and e["t"] > full["t"],
-              "Escape did not restore the playing source video", start_time)
-        return full["viewport"]
+        restored = event(ui, "/qa-fullscreen", lambda e: original_video(e) and not e["fullscreen"]
+                         and e["frames"] > full["frames"] and e["t"] > full["t"],
+                         "Escape did not restore the playing source video", start_time)
+        return {"viewport_css":full["viewport"],"frames":[before["frames"],full["frames"],restored["frames"]],
+                "seconds":[before["t"],full["t"],restored["t"]]}
 
     size = enter_and_escape("ELIX-26-video-fullscreen")
     ui.wait(lambda: close_rect(client_rect(hwnd), normal), "Windowed geometry was not restored")
@@ -95,8 +103,8 @@ def fullscreen(ui):
     ui.keys("{F11}")
     ui.wait(lambda: close_rect(client_rect(hwnd), normal), "Leaving F11 did not restore original window")
     ui.screenshot("ELIX-26-returned")
-    return {"windowed_client":normal, "monitor":screen, "html_fullscreen_css":size,
-            "from_F11_css":f11_size, "surviving_document":token}
+    return {"windowed_client":normal, "monitor":screen, "html_fullscreen":size,
+            "from_F11":f11_size, "surviving_document":token}
 
 
 def pdf_marker(hwnd):
