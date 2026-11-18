@@ -2089,6 +2089,11 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
             || std::fs::read_to_string(&download.path).map_err(|e| e.to_string())? != "elix-native-download" {
             return Err("Direct or redirected attachment lost its filename or contents".into());
         }
+        let error = app.state::<AppState>().session.lock().unwrap().tabs.iter()
+            .find(|tab| tab.id == id).ok_or("Missing attachment source tab")?.navigation_error.clone();
+        if let Some(message) = error {
+            return Err(format!("Completed direct or redirected attachment still reports a page failure: {message}"));
+        }
         browser::close(app, &id)?;
     }
     browser::activate(app, &second)?;

@@ -101,6 +101,17 @@ public static class ElixAcceptanceKeys {
       [Windows.Forms.SendKeys]::SendWait('{ENTER}')
       python scripts/stable1-download.py verify $profileRoot $count
       if ($LASTEXITCODE -ne 0) { throw "Installed browser download $count failed" }
+      $failedAttachment = [Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::NameProperty,
+        ('Siden kunne ikke lastes inn (nettverksfeil 9). Pr'+[char]0x00f8+'v igjen.'))
+      $limit = [DateTime]::UtcNow.AddSeconds(4)
+      do {
+        $banner = $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $failedAttachment)
+        if (!$banner) { break }
+        Start-Sleep -Milliseconds 200
+      } while ([DateTime]::UtcNow -lt $limit)
+      if ($banner) { throw 'A completed attachment still shows a navigation failure in ELIX' }
+
     }
     if ($count -ne 2) { throw 'Both the release link and fresh CDN link must pass' }
     Write-Output 'PASS: ordinary address-bar navigation downloaded both the GitHub release and its fresh signed CDN URL; both file digests matched.'
