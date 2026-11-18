@@ -78,6 +78,9 @@ try {
  const beforeTabs=await page.evaluate(()=>window.__uiTest.state.session.tabs.length);
  await gear.click();
  await quick.waitFor();
+ // A queued notification from the old page can arrive after the user clicked the gear.
+ await page.evaluate(()=>window.__uiTest.emit('page-focused','original'));
+ await quick.getByRole('button',{name:'Delt visning',exact:true}).waitFor();
  assert.equal(await page.evaluate(()=>window.__uiTest.state.session.tabs.length),beforeTabs,'single gear click does not navigate');
  for(const name of ['Delt visning','Faner','Arbeidsområde'])assert.equal(await quick.getByRole('button',{name,exact:true}).getAttribute('aria-expanded'),'false');
  await quick.getByRole('button',{name:'Delt visning',exact:true}).click();
@@ -265,12 +268,29 @@ try {
  assert.equal(await page.evaluate(()=>window.__uiTest.libraries['test-profile'].items.find(i=>i.id===1).group),'');
  await bookmark.focus();await page.keyboard.press('Shift+F10');
  await library.getByRole('menu',{name:'Bokmerkevalg',exact:true}).waitFor();
+
+ // Focus the address as soon as the editor appears, before the next paint.
+ // Delayed initial autofocus must not redirect the user's next paste to the title.
+ await page.evaluate(()=>{
+  window.__bookmarkAddressFocus = new Promise(resolve=>{
+   const observer = new MutationObserver(()=>{
+    const input = document.querySelector('input[aria-label="Bokmerkeadresse"]');
+    if (!input) return;
+    observer.disconnect();
+    input.focus();
+    requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(document.activeElement===input)));
+   });
+   observer.observe(document.body,{childList:true,subtree:true});
+  });
+ });
  await library.getByRole('menuitem',{name:'Rediger bokmerke',exact:true}).click();
+ assert.equal(await page.evaluate(()=>window.__bookmarkAddressFocus),true,'opening the editor must preserve a newer focus choice');
  await library.getByRole('textbox',{name:'Bokmerketittel',exact:true}).fill('ELIX saved');
  await library.getByRole('textbox',{name:'Bokmerkeadresse',exact:true}).fill('https://projectelix.no/');
  await library.getByRole('button',{name:'Lagre',exact:true}).click();
  const edited=library.locator('.bookmark-open').filter({hasText:'ELIX saved'});
  await edited.waitFor();
+ assert.deepEqual(await page.evaluate(()=>{const {title,url}=window.__uiTest.libraries['test-profile'].items.find(item=>item.id===1);return {title,url};}),{title:'ELIX saved',url:'https://projectelix.no/'});
  await edited.click({button:'right'});
  const countBeforeOpen=await page.evaluate(()=>window.__uiTest.state.session.tabs.length);
  await library.getByRole('menuitem',{name:'Åpne i ny fane',exact:true}).click();
