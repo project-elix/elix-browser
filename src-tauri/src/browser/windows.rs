@@ -228,7 +228,7 @@ pub fn attach(view: &Webview) -> Result<(), String> {
                                 let mut session = state.session.lock().unwrap();
                                 if let Some(t) = session.tabs.iter_mut().find(|t| t.id == nav_id) {
                                     t.http_status = status;
-                                    t.navigation_error = error;
+                                    t.navigation_error = crate::downloads::link_error(&t.url, status).or(error);
                                     t.loading = false;
                                 }
                             }

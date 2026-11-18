@@ -156,9 +156,19 @@ mod native {
         }
     }
 
-    /// Alpha 4 denied every permission using WebView2's persistent default. Remove
-    /// only those media decisions so an upgraded profile can show the new prompt.
-    unsafe fn reset_saved_media_permissions(core: &ICoreWebView2) -> windows::core::Result<()> {
+    fn permission_name(kind: COREWEBVIEW2_PERMISSION_KIND) -> Option<&'static str> {
+        match kind {
+            COREWEBVIEW2_PERMISSION_KIND_CAMERA => Some("camera"),
+            COREWEBVIEW2_PERMISSION_KIND_MICROPHONE => Some("microphone"),
+            COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION => Some("location"),
+            COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS => Some("notifications"),
+            COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS => Some("multiple_downloads"),
+            _ => None,
+        }
+    }
+
+    // Older clients persisted native denials. ELIX now owns these decisions per profile.
+    unsafe fn reset_saved_permissions(core: &ICoreWebView2) -> windows::core::Result<()> {
         let profile = core
             .cast::<ICoreWebView2_13>()?
             .Profile()?
@@ -175,11 +185,7 @@ mod native {
                             let value = values.GetValueAtIndex(index)?;
                             let mut kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
                             value.PermissionKind(&mut kind)?;
-                            if kind != COREWEBVIEW2_PERMISSION_KIND_CAMERA
-                                && kind != COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
-                                && kind != COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION
-                                && kind != COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS
-                            {
+                            if permission_name(kind).is_none() {
                                 continue;
                             }
                             let mut origin = PWSTR::null();
@@ -210,7 +216,7 @@ mod native {
                 unsafe {
                     let core = platform.controller().CoreWebView2()?;
                     // A previous default deny must not silently block future prompts.
-                    let _ = reset_saved_media_permissions(&core);
+                    let _ = reset_saved_permissions(&core);
                     let request_app = app.clone();
                     let request_tab = tab_id.clone();
                     let mut token = 0;
@@ -227,13 +233,7 @@ mod native {
                             extended.SetSavesInProfile(false)?;
                             let mut kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
                             args.PermissionKind(&mut kind)?;
-                            let kind = match kind {
-                                COREWEBVIEW2_PERMISSION_KIND_CAMERA => "camera",
-                                COREWEBVIEW2_PERMISSION_KIND_MICROPHONE => "microphone",
-                                COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION => "location",
-                                COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS => "notifications",
-                                _ => return Ok(()),
-                            };
+                            let Some(kind) = permission_name(kind) else { return Ok(()) };
                             let mut raw = PWSTR::null();
                             args.Uri(&mut raw)?;
                             let uri = raw.to_string().ok();

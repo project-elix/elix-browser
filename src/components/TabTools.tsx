@@ -2,7 +2,7 @@ import {useEffect,useState,type ReactNode} from 'react';
 import {Search,Plus,X,Undo2,Columns2,Layers,Tags,ChevronDown} from 'lucide-react';
 import type {Session} from '../types';
 import {rpc,internalTitle} from '../browser/bridge';
-import {splitAction,splitCandidates,splitShortcut,reorderAction} from '../browser/tabTools';
+import {splitAction,splitCandidates,splitShortcut} from '../browser/tabTools';
 import TabIcon from './TabIcon';
 
 type ToolSection='split'|'tabs'|'workspace';
@@ -16,7 +16,12 @@ export default function TabTools({session,searchOpen,onSearch,onSplit,onError,pl
  const splitTitle=canSplit?`${splitLabel} · ${splitShortcut}`:active?.id===playerTabId?'Flytt minispilleren tilbake til fanen før du åpner delt visning':`Delt visning · ${splitShortcut} · Åpne to nettsider i samme arbeidsområde og privatmodus`;
  useEffect(()=>{if(searchOpen)setSection('tabs')},[searchOpen]);
  const toggle=(next:ToolSection)=>{if(next!=='tabs'||section==='tabs')onSearch(false);setSection(section===next?null:next)};
- const group=(value:string)=>{const name=value.trim();if(!active||name===(active.group||''))return;const last=name?session.tabs.filter(t=>t.id!==active.id&&t.group===name&&t.pinned===active.pinned&&(t.workspace||'Personlig')===(active.workspace||'Personlig')).at(-1):undefined;const move=last&&reorderAction(session,active.id,last.id,'after');void rpc('group_tab',{id:active.id,group:name,workspace:active.workspace||'Personlig'}).then(()=>{if(move)return rpc('reorder_tab',move)}).catch(onError)};
+ const group=(value:string)=>{
+  const name=value.trim();
+  if(active&&name!==(active.group||'')){
+   void rpc('group_tab',{id:active.id,group:name,workspace:active.workspace||'Personlig'}).catch(onError);
+  }
+ };
  return <section className="rail-tools gear-tools" aria-label="Hurtigvalg for nettleseren">
   <button className="gear-section-toggle" aria-expanded={section==='split'} aria-controls="gear-split" onClick={()=>toggle('split')}><Columns2 size={18}/><span>Delt visning</span><ChevronDown size={14}/></button>
   {section==='split'&&<div className="gear-section-content" id="gear-split">

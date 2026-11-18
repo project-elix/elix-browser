@@ -2,6 +2,10 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub const SITE_PERMISSIONS: &[&str] = &[
+    "camera", "microphone", "location", "notifications", "multiple_downloads",
+];
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
@@ -391,7 +395,7 @@ impl Store {
         let url = url::Url::parse(origin).map_err(|_| "Ugyldig nettsted")?;
         if !matches!(url.scheme(), "https" | "http")
             || url.origin().ascii_serialization() != origin
-            || !["camera", "microphone", "location", "notifications"].contains(&kind)
+            || !SITE_PERMISSIONS.contains(&kind)
             || !["ask", "allow", "deny"].contains(&decision)
         {
             return Err("Ugyldig nettstedstillatelse".into());
@@ -591,6 +595,9 @@ mod tests {
             "ask"
         );
         assert_eq!(s.permission(&p, "https://example.com", "camera"), "allow");
+        s.set_permission(&p, "https://example.com", "multiple_downloads", "allow").unwrap();
+        assert_eq!(s.permission(&other.id, "https://example.com", "multiple_downloads"), "ask");
+        assert_eq!(s.permission(&p, "https://elsewhere.example", "multiple_downloads"), "ask");
         assert!(s
             .set_permission(&p, "https://example.com/path", "camera", "allow")
             .is_err());

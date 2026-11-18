@@ -108,8 +108,18 @@ pub unsafe fn attach(
                 // A small response can finish before handlers are registered.
                 // Capture the stable record id: ResultFilePath can lag behind the
                 // DownloadStarting args until that event has returned.
-                if update(&app, &id, &operation, true)? {
-                    OPERATIONS.with(|items| items.borrow_mut().remove(&identity));
+                match update(&app, &id, &operation, true) {
+                    Ok(true) => { OPERATIONS.with(|items| items.borrow_mut().remove(&identity)); }
+                    Ok(false) => {}
+                    Err(_) => {
+                        // Progress getters can be unavailable at startup. The installed
+                        // handlers can read them again without canceling the transfer.
+                        super::persist(&app);
+                        let _ = app.emit_to("shell", "downloads-changed", ());
+                    }
+                }
+                if app.state::<AppState>().session.lock().unwrap().active == view_id {
+                    let _ = app.emit_to("shell", "notice", "Nedlastingen er startet. Åpne Nedlastinger med Ctrl+J for å følge den.");
                 }
                 Ok(())
             })();
@@ -217,7 +227,7 @@ unsafe fn update(
             download.total_bytes = (total >= 0).then_some(total as u64);
             download.can_resume = can_resume;
         }
-        if persist && super::history::save(&state.root, &downloads).is_err() {
+        if persist && super::history::save(&state.download_root, &downloads).is_err() {
             state.logs.add("error", "download_history_write_failed");
         }
     }

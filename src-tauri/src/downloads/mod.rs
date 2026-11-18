@@ -5,6 +5,25 @@ pub use history::Download;
 use std::path::PathBuf;
 use tauri::{Emitter, Manager};
 
+/// Attach a recovery hint only when an attachment endpoint actually rejected the request.
+pub fn link_error(address: &str, status: Option<i32>) -> Option<String> {
+    let status = status?;
+    if !matches!(status, 401 | 403 | 410 | 618) {
+        return None;
+    }
+    let url = url::Url::parse(address).ok()?;
+    let github_asset = url.host_str() == Some("release-assets.githubusercontent.com");
+    let google_asset = url.host_str() == Some("drive.usercontent.google.com") && url.path() == "/download";
+    let attachment = url.query_pairs().any(|(key, value)| {
+        matches!(key.as_ref(), "rscd" | "response-content-disposition")
+            && value.split(';').next().is_some_and(|v| v.trim().eq_ignore_ascii_case("attachment"))
+    });
+    if !(github_asset || google_asset || attachment) || (status == 618 && !github_asset) {
+        return None;
+    }
+    Some(format!("Nettstedet avviste nedlastingen (HTTP {status}). Åpne en ny lenke fra nettstedet, og kontroller at du er logget inn hvis filen krever tilgang."))
+}
+
 pub fn persist(app: &tauri::AppHandle) {
     let state = app.state::<crate::AppState>();
     let downloads = state.downloads.lock().unwrap();

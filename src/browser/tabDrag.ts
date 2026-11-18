@@ -1,5 +1,15 @@
+import type {Session} from '../types';
+
 export type Point={x:number;y:number};
 export type Rect={left:number;top:number;right:number;bottom:number};
+
+export function groupDropTarget(session:Session,sourceId:string,anchorId:string) {
+ const source=session.tabs.find(tab=>tab.id===sourceId);
+ const anchor=session.tabs.find(tab=>tab.id===anchorId);
+ if(!source||!anchor?.group||source.group===anchor.group||source.pinned!==anchor.pinned||
+   (source.workspace||'Personlig')!==(anchor.workspace||'Personlig'))return null;
+ return {id:anchorId,edge:'group' as const,group:anchor.group,workspace:anchor.workspace||'Personlig'};
+}
 
 /** Slow down near the edge instead of jumping a whole tab at a time. */
 export function edgeScroll(position:number,start:number,end:number,margin=28):number {
