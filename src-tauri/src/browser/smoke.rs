@@ -635,7 +635,7 @@ fn alpha6_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     if app.state::<AppState>().session.lock().unwrap().active != b {
         return Err("Renaming another tab's group changed the selected tab".into());
     }
-    browser::organization::reorder(app, &b, Some(&a))?;
+    browser::organization::reorder(app, &b, Some(&a), None)?;
     {
         let state = app.state::<AppState>();
         let s = state.session.lock().unwrap();
@@ -757,7 +757,7 @@ pub fn start(app: AppHandle) {
         let code = if result.is_ok() { 0 } else { 1 };
         #[cfg(windows)]
         if code != 0 { let _ = capture_native_screen("native-failure.png"); }
-        let message=match result{Ok(())=>"PASS: Alpha 7 reorder/reopen, native mute, native Ctrl+Alt+S split toggle/wake/controls/bounds, cookie deletion, real child-window handoff with shared profile cookies and saved recovery, failed handoff retains source; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history reuse and settings preserve original page state; Ctrl+T/button address autofocus; real multipage PDF native wheel scroll down/up; video HTML fullscreen fills native window and restores split; miniplayer reparent/resize/hide/show/return preserves live page and playback; native HTTP navigation, title/status/favicon and failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, same-origin per-tab dormancy isolation/repeated wake/lazy restoration, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
+        let message=match result{Ok(())=>"PASS: Alpha 7 reorder/reopen, native mute, native Ctrl+Alt+S split toggle/wake/controls/bounds, cookie deletion, real child-window handoff with shared profile cookies and saved recovery, failed handoff retains source; sidebar expand/hide/restore, configurable bookmark placement, native content bounds and settings categories; native minimize/maximize/restore/fullscreen; native Ctrl+H history reuse and settings preserve original page state; Ctrl+T/button address autofocus; 24-page PDF scrolled to the last page and back with the native wheel three times; video HTML fullscreen fills native window and restores split; miniplayer reparent/resize/hide/show/return preserves live page and playback; native HTTP navigation, title/status, decoded matching tab/bookmark favicons, failure/recovery loading state, tab switching, back/forward, DevTools, private cookie/history/session isolation, microphone prompt/denial, native extension lifecycle/password preferences, download pause/resume bytes and persistence, distinct concurrent same-URL downloads, active/paused cancellation stops actual HTTP transfers, accurate retry-attempt records with no active phantoms after cancellation, same-origin per-tab dormancy isolation/repeated wake/lazy restoration, profile storage isolation, pinned active-session restoration, remote IPC denied".to_owned(),Err(e)=>format!("FAIL: {e}\n{}", serde_json::json!({"tabs":app.state::<AppState>().session.lock().unwrap().clone(),"downloads":app.state::<AppState>().downloads.lock().unwrap().clone(),"logs":app.state::<AppState>().logs.list()}))};
         #[cfg(windows)]
         let message = format!(
             "{message}\nDownload native diagnostics: {}",
@@ -1024,11 +1024,22 @@ fn pdf_scroll_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<()
     unsafe { SetCursorPos(x, y) }.map_err(|e| e.to_string())?;
     mouse(MOUSEEVENTF_LEFTDOWN, 0)?;
     mouse(MOUSEEVENTF_LEFTUP, 0)?;
-    mouse(MOUSEEVENTF_WHEEL, -120 * 60)?;
-    wait(blue).map_err(|_| "Native PDF mouse wheel did not reach the last page".to_string())?;
-    capture_native_screen("native-pdf-last-page.png")?;
-    mouse(MOUSEEVENTF_WHEEL, 120 * 60)?;
-    wait(red).map_err(|_| "Native PDF mouse wheel did not return to the first page".to_string())?;
+    // Send multiple wheel gestures until the unique first/last page color is
+    // visible. The number of lines per wheel notch depends on Windows settings.
+    let scroll_to = |delta: i32, reached: &dyn Fn() -> bool| -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while Instant::now() < deadline {
+            mouse(MOUSEEVENTF_WHEEL, delta)?;
+            std::thread::sleep(Duration::from_millis(150));
+            if reached() { return Ok(()); }
+        }
+        Err(format!("PDF wheel input {delta} did not reach its destination"))
+    };
+    for round in 1..=3 {
+        scroll_to(-120 * 15, &blue).map_err(|e| format!("Round {round}, last page: {e}"))?;
+        if round == 1 { capture_native_screen("native-pdf-last-page.png")?; }
+        scroll_to(120 * 15, &red).map_err(|e| format!("Round {round}, first page: {e}"))?;
+    }
     browser::activate(app, return_tab)?;
     browser::close(app, &id)?;
     Ok(())
@@ -1088,6 +1099,33 @@ fn native_child_geometry(view: &tauri::Webview, window: &tauri::Window) -> Resul
         let _ = tx.send(result.map_err(|e| e.to_string()));
     }).map_err(|e| e.to_string())?;
     rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
+fn audible_views(app: &AppHandle) -> Result<Vec<String>, String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_8;
+    use windows::core::{Interface, BOOL};
+    let mut audible = Vec::new();
+    for (id, view) in app.webviews() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        view.with_webview(move |platform| {
+            let result = (|| -> windows::core::Result<bool> {
+                unsafe {
+                    let core = platform.controller().CoreWebView2()?.cast::<ICoreWebView2_8>()?;
+                    let mut playing = BOOL(0);
+                    let mut muted = BOOL(0);
+                    core.IsDocumentPlayingAudio(&mut playing)?;
+                    core.IsMuted(&mut muted)?;
+                    Ok(playing.as_bool() && !muted.as_bool())
+                }
+            })();
+            let _ = tx.send(result.map_err(|e| e.to_string()));
+        }).map_err(|e| e.to_string())?;
+        if rx.recv_timeout(Duration::from_secs(3)).map_err(|e| e.to_string())?? {
+            audible.push(id);
+        }
+    }
+    Ok(audible)
 }
 
 #[cfg(windows)]
@@ -1217,11 +1255,37 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     if !view_bool(&view, "window.__elixMediaToken==='original'")? { return Err("Reset lost the live player page before profile cleanup".into()); }
     // Audio-only sites use the actual audio element and native controls; the
     // page itself must remain hidden, and removing controls must be reversible.
-    if !view_bool(&view, "(()=>{document.querySelector('video').remove();const audio=document.createElement('audio');audio.muted=true;audio.style.width='123px';document.body.append(audio);window.__elixAudioElement=audio;window.__elixAudioContext=new AudioContext();const output=window.__elixAudioContext.createMediaStreamDestination();audio.srcObject=output.stream;return true})()")? { return Err("Cannot create audio-only fixture".into()); }
+    if !view_bool(&view, r#"(()=>{
+        document.querySelector('video').remove();
+        const audio = document.createElement('audio');
+        audio.style.width = '123px'; document.body.append(audio);
+        const context = new AudioContext(), tone = context.createOscillator(), output = context.createMediaStreamDestination();
+        const level = context.createGain(); level.gain.value = 0.12;
+        tone.connect(level).connect(output); tone.start();
+        audio.srcObject = output.stream;
+        window.__elixAudioFixture = {audio, context, tone, output};
+        context.resume().then(()=>audio.play());
+        return true;
+    })()"#)? { return Err("Cannot create audio-only fixture".into()); }
+    let only_original_audible = || {
+        view_bool(&view, r#"(()=>{
+            const {audio,output}=window.__elixAudioFixture, playing=[...document.querySelectorAll('audio,video')]
+                .filter(element=>!element.paused && !element.ended && !element.muted && element.volume>0);
+            return playing.length===1 && playing[0]===audio && audio.srcObject===output.stream;
+        })()"#).unwrap_or(false) && audible_views(app).is_ok_and(|views| views == [id.clone()])
+    };
+    wait(only_original_audible).map_err(|_| "Original audio did not play in its single native WebView".to_string())?;
     browser::media::perform(app, "open", Some(&id))?;
-    wait(|| view_bool(&view, "window.__elixMediaPresentation?.kind==='audio'&&document.querySelector('audio')===window.__elixAudioElement&&window.__elixAudioElement.controls&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='hidden'").unwrap_or(false))?;
+    wait(|| view_bool(&view, "window.__elixMediaPresentation?.kind==='audio'&&window.__elixAudioFixture.audio.controls&&getComputedStyle(document.querySelector('#page-chrome')).visibility==='hidden'").unwrap_or(false))?;
+    wait(only_original_audible).map_err(|_| "Popout lost or duplicated the original audible WebView or media element".to_string())?;
+    player.set_fullscreen(true).map_err(|e| e.to_string())?;
+    wait(|| player.is_fullscreen().unwrap_or(false) && native_child_geometry(&view,&player).is_ok_and(|r| r["fills_parent"]==true))?;
+    player.set_fullscreen(false).map_err(|e| e.to_string())?;
+    player.set_size(tauri::LogicalSize::new(540., 320.)).map_err(|e| e.to_string())?;
+    wait(|| !player.is_fullscreen().unwrap_or(true) && native_child_geometry(&view,&player).is_ok_and(|r| r["fills_parent"]==true))?;
     browser::media::perform(app, "return", None)?;
-    if !view_bool(&view, "!window.__elixMediaPresentation&&!window.__elixAudioElement.controls&&window.__elixAudioElement.style.width==='123px'&&!!window.__elixAudioElement.srcObject")? { return Err("Audio popout replaced its stream or failed to restore native controls".into()); }
+    if !view_bool(&view, "!window.__elixMediaPresentation&&!window.__elixAudioFixture.audio.controls&&window.__elixAudioFixture.audio.style.width==='123px'")? { return Err("Audio popout failed to restore native controls".into()); }
+    wait(only_original_audible).map_err(|_| "Returning the popout lost or duplicated the audible source".to_string())?;
     browser::media::perform(app, "open", Some(&id))?;
     // A destination document can never remain visible as a whole-page popout.
     view.navigate(format!("{origin}/first").parse().map_err(|_| "Invalid media navigation URL")?).map_err(|e| e.to_string())?;
@@ -1584,11 +1648,14 @@ fn record_cancel_fixture(index: Option<usize>, sent: usize, ended: bool, aborted
 }
 
 fn pdf_fixture() -> Vec<u8> {
+    const PAGES: usize = 24;
+    let kids = (0..PAGES).map(|i| format!("{} 0 R", 3 + 2 * i)).collect::<Vec<_>>().join(" ");
     let mut objects = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
-        "<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>".to_owned(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {PAGES} >>"),
     ];
-    for (index, color) in ["1 0 0", "0 1 0", "0 0 1"].iter().enumerate() {
+    for index in 0..PAGES {
+        let color = if index == 0 { "1 0 0" } else if index == PAGES - 1 { "0 0 1" } else { "0 1 0" };
         objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 900] /Resources << >> /Contents {} 0 R >>", 4 + index * 2));
         let commands = format!("{color} rg\n0 0 600 900 re f\n");
         objects.push(format!("<< /Length {} >>\nstream\n{commands}endstream", commands.len()));
@@ -1890,8 +1957,13 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     wait(|| title(app, &first, "ELIX native one"))?;
     progress("sidebar: before");
     sidebar_test(app, &first)?;
-    progress("sidebar: after");
-    progress("PDF scroll: before");
+    progress("sidebar: after; bookmark favicon: before");
+    let shell = app.get_webview("shell").ok_or("Missing shell for bookmarking")?;
+    wait(|| shell_bool(app, "document.querySelector('.tab.active img.tab-favicon')?.naturalWidth > 0 && !document.querySelector('button[aria-label=\"Legg til bokmerke\"]').disabled").unwrap_or(false))?;
+    shell.eval("document.querySelector('button[aria-label=\"Legg til bokmerke\"]').click()").map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "(()=>{const active=document.querySelector('.tab.active img.tab-favicon');return active?.naturalWidth>0 && [...document.querySelectorAll('.bookmark-bar .bookmark-open img')].some(img=>img.naturalWidth>0 && img.src===active.src)})()").unwrap_or(false))
+        .map_err(|_| "The bookmarked page did not display its native favicon in the bookmark bar".to_string())?;
+    progress("bookmark favicon: after; PDF scroll: before");
     #[cfg(windows)]
     pdf_scroll_test(app, &origin, &first)?;
     progress("PDF scroll: after");

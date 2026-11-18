@@ -42,6 +42,7 @@ enum Request {
     ReorderTab {
         id: String,
         before: Option<String>,
+        ungroup_at: Option<String>,
     },
     DetachTab {
         id: String,
@@ -289,8 +290,8 @@ async fn dispatch(
             browser::organization::reopen(&app)?;
             Ok(Value::Null)
         }
-        Request::ReorderTab { id, before } => {
-            browser::organization::reorder(&app, &id, before.as_deref())?;
+        Request::ReorderTab { id, before, ungroup_at } => {
+            browser::organization::reorder(&app, &id, before.as_deref(), ungroup_at.as_deref())?;
             Ok(Value::Null)
         }
         Request::DetachTab { id, outside_only } => Ok(json!(

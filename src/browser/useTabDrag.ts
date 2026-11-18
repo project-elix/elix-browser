@@ -6,7 +6,8 @@ import {edgeScroll,groupDropTarget,type Point} from './tabDrag';
 
 export type TabDropTarget=
  | {id:string;edge:'before'|'after'}
- | {id:string;edge:'group';group:string;workspace:string};
+ | {id:string;edge:'group';group:string;workspace:string}
+ | {id:string;edge:'ungroup';group:'';workspace:string};
 export type TabDragPreview={id:string;point:Point;target:TabDropTarget|null};
 type Drag={id:string;pointerId:number;start:Point;point:Point;active:boolean;capture:Element;workspace:string;pinned:boolean};
 type Callbacks={onError:(error:unknown)=>void;onNotice:(notice:string)=>void};
@@ -18,13 +19,17 @@ export function useTabDrag(session:Session,callbacks:Callbacks) {
  const [dropTarget,setDropTarget]=useState<TabDropTarget|null>(null),[preview,setPreview]=useState<TabDragPreview|null>(null);
  const targetAt=useCallback((point:Point,id:string):TabDropTarget|null=>{
   const hit=document.elementFromPoint(point.x,point.y);
+  if(hit?.closest('[data-tab-ungroup]')){
+   const source=current.current.session.tabs.find(tab=>tab.id===id);
+   return source?.group?{id,edge:'ungroup',group:'',workspace:source.workspace||'Personlig'}:null;
+  }
   const anchorId=hit?.closest<HTMLElement>('[data-tab-group-anchor]')?.dataset.tabGroupAnchor;
   if(anchorId)return groupDropTarget(current.current.session,id,anchorId);
   const element=hit?.closest<HTMLElement>('[data-tab-id]');
   if(!element)return null;
   const target=element.dataset.tabId!,rect=element.getBoundingClientRect();
   const edge=element.dataset.tabAxis==='vertical'?(point.y>rect.top+rect.height/2?'after':'before'):(point.x>rect.left+rect.width/2?'after':'before');
-  return reorderAction(current.current.session,id,target,edge)?{id:target,edge}:null;
+  return reorderAction(current.current.session,id,target,edge,true)?{id:target,edge}:null;
  },[]);
  const updateFeedback=useCallback((d:Drag)=>{
   const target=targetAt(d.point,d.id);
@@ -65,11 +70,11 @@ export function useTabDrag(session:Session,callbacks:Callbacks) {
   const d=stop();if(!d?.active)return;
   suppressClick.current=true;
   const point={x:event.clientX,y:event.clientY},target=targetAt(point,d.id);
-  if(target?.edge==='group'){
+  if(target?.edge==='group'||target?.edge==='ungroup'){
    void rpc('group_tab',{id:d.id,group:target.group,workspace:target.workspace}).catch(current.current.callbacks.onError);
    return;
   }
-  const action=target&&reorderAction(current.current.session,d.id,target.id,target.edge);
+  const action=target&&reorderAction(current.current.session,d.id,target.id,target.edge,true);
   if(action)void rpc('reorder_tab',action).catch(current.current.callbacks.onError);
   else if(point.x<0||point.y<0||point.x>=window.innerWidth||point.y>=window.innerHeight){
    current.current.callbacks.onNotice('Flytter fanen til et nytt vindu …');

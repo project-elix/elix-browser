@@ -42,9 +42,6 @@ jobs:
       ELIX_UPDATE_BASE: https://github.com/${{ github.repository }}/releases/download/channels
       ELIX_UPDATE_PUBLIC_KEY: ${{ vars.ELIX_UPDATE_PUBLIC_KEY }}
       ELIX_ACCOUNTS_URL: ${{ vars.ELIX_ACCOUNTS_URL || 'https://medlem.projectelix.no' }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      REQUIRE_RELEASE_SECRETS: 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -58,6 +55,9 @@ jobs:
       - run: npm ci
       - run: npm ci --prefix services/accounts --omit=dev --ignore-scripts
       - run: npm run check:release
+        env:
+          REQUIRE_RELEASE_SECRETS: 'true'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       - run: npm test
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - name: Enable signed updater artifacts
@@ -65,11 +65,39 @@ jobs:
         run: |
           @{bundle=@{createUpdaterArtifacts=$true};plugins=@{updater=@{pubkey=$env:ELIX_UPDATE_PUBLIC_KEY}}} | ConvertTo-Json -Depth 6 | Set-Content src-tauri/tauri.release.json
       - run: npm run tauri build -- --config src-tauri/tauri.release.json --bundles nsis -- --locked
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Test Stable 1 installer over an existing Alpha 9 profile
+        if: inputs.channel == 'stable' && inputs.version == '0.1.4'
+        env:
+          ELIX_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          ./scripts/verify-stable1-upgrade.ps1 -Installer $installer.FullName
+      - uses: actions/upload-artifact@v4
+        if: inputs.channel == 'stable' && inputs.version == '0.1.4' && always()
+        with:
+          name: signed-stable1-profile-review
+          path: |
+            ${{ runner.temp }}/stable1-profile-review/stable1-profile.json
+            ${{ runner.temp }}/stable1-profile-review/*/*.png
+            ${{ runner.temp }}/stable1-profile-review/*/ready-result.json
+          if-no-files-found: ignore
       - name: Verify the signed distributable installs and starts
         shell: pwsh
         run: |
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           $dest = Join-Path $env:RUNNER_TEMP 'ELIX-signed-install'
+          if ($env:RELEASE_CHANNEL -eq 'stable' -and $env:RELEASE_VERSION -eq '0.1.4') {
+            $review = Join-Path $env:RUNNER_TEMP 'ELIX-clean-stable1-review'
+            ./scripts/verify-installed-ui.ps1 -Installer $installer.FullName -InstallDirectory $dest -OutputDirectory $review
+            $upgraded = Get-Content "$env:RUNNER_TEMP/stable1-profile-review/stable1-profile.json" -Raw | ConvertFrom-Json
+            if ((Get-FileHash "$dest/elix-browser.exe").Hash -ne $upgraded.exe_sha256) { throw 'Clean and upgraded signed installations differ' }
+            Copy-Item "$review/signed-ready.png" 'signed-release.png'
+            return
+          }
           $p = Start-Process $installer.FullName -ArgumentList @('/S', "/D=$dest") -PassThru
           if (!$p.WaitForExit(120000) -or $p.ExitCode -ne 0) { throw 'Signed installer failed' }
           $app = Start-Process "$dest/elix-browser.exe" -PassThru
@@ -85,6 +113,17 @@ jobs:
             $image.Save((Join-Path $PWD 'signed-release.png'),[Drawing.Imaging.ImageFormat]::Png)
           } finally { $graphics.Dispose(); $image.Dispose() }
           Stop-Process -Id $app.Id
+      - name: Record Stable 1 clean install and upgrade evidence
+        if: inputs.channel == 'stable' && inputs.version == '0.1.4'
+        shell: pwsh
+        run: |
+          $review = Get-Content "$env:RUNNER_TEMP/stable1-profile-review/stable1-profile.json" -Raw | ConvertFrom-Json
+          @(
+            '### Stable 1 signed Windows candidate',
+            "Build $($review.run_id), attempt $($review.run_attempt), commit $($review.source_sha).",
+            "Clean install and Alpha 9 profile upgrade passed. Installer SHA-256 $($review.installer_sha256).",
+            'The signed-stable1-profile-review artifact contains the verified updater signature and screenshots.'
+          ) | Add-Content $env:GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         with:
           name: signed-release-screenshot
