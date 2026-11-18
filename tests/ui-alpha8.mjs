@@ -78,6 +78,9 @@ try {
  const beforeTabs=await page.evaluate(()=>window.__uiTest.state.session.tabs.length);
  await gear.click();
  await quick.waitFor();
+ // A queued notification from the old page can arrive after the user clicked the gear.
+ await page.evaluate(()=>window.__uiTest.emit('page-focused','original'));
+ await quick.getByRole('button',{name:'Delt visning',exact:true}).waitFor();
  assert.equal(await page.evaluate(()=>window.__uiTest.state.session.tabs.length),beforeTabs,'single gear click does not navigate');
  for(const name of ['Delt visning','Faner','Arbeidsområde'])assert.equal(await quick.getByRole('button',{name,exact:true}).getAttribute('aria-expanded'),'false');
  await quick.getByRole('button',{name:'Delt visning',exact:true}).click();

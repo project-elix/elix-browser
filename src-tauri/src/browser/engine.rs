@@ -46,6 +46,9 @@ pub fn create(app: &AppHandle, tab: &Tab) -> Result<(), String> {
         &tab.id,
         WebviewUrl::External("about:blank".parse().map_err(|_| "Ugyldig URL")?),
     )
+    // activate() focuses the selected page. A waking split peer must not
+    // take focus from that pane or the shell controls.
+    .focused(false)
     .data_directory(directory)
     .incognito(private)
     .browser_extensions_enabled(!private)
