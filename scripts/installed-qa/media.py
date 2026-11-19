@@ -1,15 +1,17 @@
 """Physical Windows UI checks against an unmodified, installed ELIX Browser."""
 
+import sys
 import time
 from itertools import groupby
 from statistics import median
 
-import win32api
-import win32con
-import win32gui
-import win32process
-from PIL import ImageGrab
-from pywinauto import keyboard, mouse
+if sys.platform == "win32":
+    import win32api
+    import win32con
+    import win32gui
+    import win32process
+    from PIL import ImageGrab
+    from pywinauto import keyboard, mouse
 
 
 def client_rect(hwnd):
@@ -74,17 +76,25 @@ def fullscreen(ui):
     screen = monitor(hwnd)
     assert not close_rect(normal, screen), "Expected a windowed baseline"
 
+    def original_video(e):
+        return (e["token"] == token and e["sameStream"] and e["playing"] and e["liveVideo"]
+                and e["muted"] and e["mediaCount"] == 1 and e["frames"] > 0)
+
     def enter_and_escape(prefix):
+        before = event(ui, "/qa-fullscreen", original_video, "Original muted video did not present frames")
         ui.click("Vis testvideo i fullskjerm", "Button")
-        full = event(ui, "/qa-fullscreen", lambda e: original(e, token) and e["fullscreen"]
+        full = event(ui, "/qa-fullscreen", lambda e: original_video(e) and e["fullscreen"]
+                     and e["frames"] > before["frames"] and e["t"] > before["t"]
                      and fills(e, hwnd) and close_rect(client_rect(hwnd), screen),
                      "Video did not fill both the monitor and the native ELIX client")
         ui.screenshot(prefix)
         start_time = time.monotonic()
         ui.keys("{ESC}")
-        event(ui, "/qa-fullscreen", lambda e: original(e, token) and not e["fullscreen"] and e["t"] > full["t"],
-              "Escape did not restore the playing source video", start_time)
-        return full["viewport"]
+        restored = event(ui, "/qa-fullscreen", lambda e: original_video(e) and not e["fullscreen"]
+                         and e["frames"] > full["frames"] and e["t"] > full["t"],
+                         "Escape did not restore the playing source video", start_time)
+        return {"viewport_css":full["viewport"],"frames":[before["frames"],full["frames"],restored["frames"]],
+                "seconds":[before["t"],full["t"],restored["t"]]}
 
     size = enter_and_escape("ELIX-26-video-fullscreen")
     ui.wait(lambda: close_rect(client_rect(hwnd), normal), "Windowed geometry was not restored")
@@ -95,8 +105,8 @@ def fullscreen(ui):
     ui.keys("{F11}")
     ui.wait(lambda: close_rect(client_rect(hwnd), normal), "Leaving F11 did not restore original window")
     ui.screenshot("ELIX-26-returned")
-    return {"windowed_client":normal, "monitor":screen, "html_fullscreen_css":size,
-            "from_F11_css":f11_size, "surviving_document":token}
+    return {"windowed_client":normal, "monitor":screen, "html_fullscreen":size,
+            "from_F11":f11_size, "surviving_document":token}
 
 
 def pdf_marker(hwnd):
@@ -186,33 +196,106 @@ def player_hwnd(main):
     return found[0] if len(found) == 1 else None
 
 
+def phase_samples(events, token, since, mode):
+    # The HTTP fixture is fresh for each card. Inspect all its reports from all
+    # documents: an extra document or media element is a failure even if the
+    # last few successful observations came from the original player.
+    all_rows = [e for e in events if e.get("kind") == "installed-media" and e.get("route") == "/qa-miniplayer"]
+    assert all(e["token"] == token and e["mediaCount"] == 1 for e in all_rows), "Extra document or media element during playback"
+    rows = [e for e in all_rows if e["time"] >= since][-3:]
+    if len(rows) < 3 or any(not e["sameStream"] or not e.get("pcm") or not e["liveAudio"] for e in rows):
+        return None
+    if any(b["pcm"]["clock"] <= a["pcm"]["clock"] for a, b in zip(rows,rows[1:])):
+        return None
+    if mode == "tone":
+        if not all(original(e,token) and .075 <= e["pcm"]["rms"] <= .102
+                   and e["pcm"]["toneFraction"] >= .93 for e in rows):
+            return None
+    elif mode in ("muted", "paused"):
+        if not all(e["audibleElements"] == 0 and e["muted"] == (mode == "muted")
+                   and e["playing"] == (mode == "muted") and e["pcm"]["rms"] < .0001 for e in rows):
+            return None
+    else:
+        raise ValueError(f"Unknown playback observation {mode}")
+    if mode == "paused":
+        if abs(rows[-1]["t"] - rows[0]["t"]) > .02:
+            return None
+    elif rows[-1]["t"] <= rows[0]["t"] + .05 or rows[-1]["frames"] <= rows[0]["frames"]:
+        return None
+    return {"rms":[round(e["pcm"]["rms"],6) for e in rows],
+            "fraction_at_440_hz":[round(e["pcm"]["toneFraction"],4) for e in rows],
+            "media_seconds":[rows[0]["t"],rows[-1]["t"]],
+            "presented_frames":[rows[0]["frames"],rows[-1]["frames"]],
+            "sample_rate":rows[-1]["pcm"]["sampleRate"],"samples_per_block":rows[-1]["pcm"]["samples"]}
+
+
+def digital_output(ui, token, popup=None):
+    # Physical keys operate the site's original media element. Check both
+    # directions of mute and pause so recorded/replayed telemetry cannot pass.
+    if popup:
+        left, top, right, bottom = client_rect(popup)
+        stamp = time.monotonic()
+        mouse.click(button="right",coords=(left+(right-left)//3,top+(bottom-top)//3))
+        event(ui,"/qa-miniplayer",lambda e: e["token"]==token and e["focusClicks"] and e["focused"],
+              "Click did not focus the original popup WebView",stamp)
+    else:
+        ui.click("Start testavspilling", "Button")
+    phases = {}
+    for step, key, mode in [("playing",None,"tone"),("mute","q","muted"),("unmute","q","tone"),
+                            ("pause","w","paused"),("resume","w","tone")]:
+        if key:
+            keyboard.send_keys(key, vk_packet=False)
+        since = time.monotonic()
+        phases[step] = ui.wait(lambda: phase_samples(ui.fixture.events,token,since,mode),
+                               f"Post-element PCM did not verify {step}",timeout=10)
+    return phases
+
+
 def output_meter(ui, phase):
+    import comtypes
     import psutil
-    from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
+    from pycaw.constants import CLSID_MMDeviceEnumerator, EDataFlow, DEVICE_STATE
+    from pycaw.pycaw import IMMDeviceEnumerator, IAudioSessionManager2, IAudioSessionControl2, IAudioMeterInformation
+    enum = comtypes.CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, comtypes.CLSCTX_INPROC_SERVER)
+    devices = enum.EnumAudioEndpoints(EDataFlow.eRender.value,DEVICE_STATE.ACTIVE.value)
+    count = devices.GetCount()
+    if count == 0:
+        # A positively enumerated empty device collection is different from a
+        # silent device, API failure, or inability to inspect an active session.
+        return {"status":"unavailable","active_render_endpoints":0,"reason":"No active Windows render endpoint"}
+    managers = []
+    for index in range(count):
+        device = devices.Item(index)
+        interface = device.Activate(IAudioSessionManager2._iid_,comtypes.CLSCTX_ALL,None)
+        managers.append(interface.QueryInterface(IAudioSessionManager2))
     pid = win32process.GetWindowThreadProcessId(ui.window.handle)[1]
-    tree = {p.pid for p in psutil.Process(pid).children(recursive=True)} | {pid}
     deadline = time.monotonic() + 8
     readings = []
     while time.monotonic() < deadline:
+        tree = {p.pid for p in psutil.Process(pid).children(recursive=True)} | {pid}
         active = []
-        for session in AudioUtilities.GetAllSessions():
-            if session.ProcessId not in tree or session.State != 1:
-                continue
-            peak = session._ctl.QueryInterface(IAudioMeterInformation).GetPeakValue()
-            if peak > .0005:
-                active.append((session.InstanceIdentifier, session.ProcessId, float(peak)))
+        for endpoint, manager in enumerate(managers):
+            sessions = manager.GetSessionEnumerator()
+            for index in range(sessions.GetCount()):
+                session = sessions.GetSession(index).QueryInterface(IAudioSessionControl2)
+                owner = session.GetProcessId()
+                if owner not in tree or session.GetState() != 1:
+                    continue
+                peak = session.QueryInterface(IAudioMeterInformation).GetPeakValue()
+                if peak > .0005:
+                    active.append(((endpoint,session.GetSessionInstanceIdentifier()),owner,float(peak)))
         if len(active)>1:
             raise AssertionError(f"{phase}: {len(active)} ELIX render sessions had simultaneous output")
         if active:
             readings.append(active[0])
             if len(readings) >= 4 and len({r[0] for r in readings[-4:]}) == 1:
                 rows=readings[-4:]
-                return {"render_sessions_with_output":1,"process":rows[0][1],
-                        "median_peak":round(median(r[2] for r in rows),5),"samples":len(rows)}
+                return {"status":"measured","active_render_endpoints":count,"render_sessions_with_output":1,
+                        "process":rows[0][1],"median_peak":round(median(r[2] for r in rows),5),"samples":len(rows)}
         else:
             readings.clear()
         time.sleep(.14)
-    raise RuntimeError(f"{phase}: no measurable ELIX Windows render session; physical output could not be verified")
+    raise RuntimeError(f"{phase}: active Windows render endpoint(s) but no measurable ELIX signal")
 
 
 def miniplayer(ui):
@@ -227,14 +310,16 @@ def miniplayer(ui):
             meters[phase] = output_meter(ui, phase)
         except Exception as error:
             # Preserve independent geometry and continuity evidence if the
-            # machine has no usable audio endpoint. This card still fails.
+            # OS has an active but silent device or the native API fails.
             audio_failures[phase] = str(error) or type(error).__name__
+    pcm = {"in_tab":digital_output(ui,token)}
     sample_output("in_tab")
     ui.click("Åpne video eller musikk i minispiller", "Button")
     hwnd = ui.wait(lambda: player_hwnd(ui.window.handle), "Installed browser did not show its miniplayer")
     assert win32gui.GetWindowLong(hwnd,win32con.GWL_EXSTYLE)&win32con.WS_EX_TOPMOST, "Miniplayer was not always on top"
     popup = event(ui,route,lambda e: original(e,token) and e["siteChrome"]=="hidden" and fills(e,hwnd),
                   "Popup did not isolate and fill the live video")
+    pcm["popup"] = digital_output(ui,token,hwnd)
     sample_output("popup")
     ui.screenshot("ELIX-23-isolated-player")
     left,top,right,bottom=win32gui.GetWindowRect(hwnd)
@@ -261,13 +346,14 @@ def miniplayer(ui):
     ui.wait(lambda: not player_hwnd(ui.window.handle),"Closing miniplayer did not return its original tab")
     restored = event(ui,route,lambda e: original(e,token) and e["siteChrome"]=="visible" and e["t"]>resized["t"],
                      "Returning the player lost its original document, stream, or site menu")
+    pcm["returned"] = digital_output(ui,token)
     sample_output("returned")
     tokens = {e["token"] for e in ui.fixture.events if e.get("kind")=="installed-media" and e.get("route")==route}
     assert tokens=={token}, f"An extra media document was instantiated: {len(tokens)} distinct documents"
     ui.screenshot("ELIX-23-returned-player")
     result = {"single_document":token,"media_elements":restored["mediaCount"],"audible_elements":restored["audibleElements"],
             "initial_popup_css":popup["viewport"],"resized_popup_css":resized["viewport"],
-            "playback_seconds":[initial["t"],popup["t"],resized["t"],restored["t"]],"windows_audio":meters}
+            "playback_seconds":[initial["t"],popup["t"],resized["t"],restored["t"]],"decoded_element_pcm":pcm,"windows_audio":meters}
     if audio_failures:
         raise AssertionError(f"Output verification incomplete: {audio_failures}. Measured player evidence: {result}")
     return result

@@ -205,20 +205,45 @@ def bookmarks(ui):
     ui.keys("{END}{ENTER}")
     ui.click("Lagre", "Button")
     ui.wait(lambda: membership() == expected, "Moving the bookmark did not persist its group")
+
+    def library_tab_order():
+        session = ui.session()
+        tabs = session["tabs"]
+        urls = [tab["url"] for tab in tabs]
+        if urls.count("elix://bookmarks") == 1 and tabs[urls.index("elix://bookmarks")]["id"] == session["active"]:
+            return urls
+        return None
+
+    saved_order = ui.wait(library_tab_order, "The bookmark library was not the active tab before restart")
     ui.screenshot("ELIX-28-before-restart")
     ui.restart()
-    ui.navigate("elix://bookmarks")
-    ui.find(more, "Button")
+    # Restoring a session generates new native WebView IDs for the same tabs.
+    ui.wait(lambda: library_tab_order() == saved_order, "The active bookmark library or tab order changed on restart")
     if membership() != expected:
         raise AssertionError("Saved bookmark identity, profile or group changed on restart")
-    # The page and toolbar can both expose a folder. The page button sits lower.
-    folder = ui.wait(lambda: max(visible_buttons(ui, lambda n: n == f"Bokmerkegruppe {name}"),
-                                 key=lambda b: b.rectangle().top, default=None),
-                     "Restored bookmark group is missing")
-    folder.click_input()
-    ui.wait(lambda: not visible_buttons(ui, lambda n: n == more),
+    ui.click("Bokmerker", "TabItem")
+    if ui.window.descendants(title="Adresseforslag", control_type="List"):
+        ui.keys("{ESC}")
+    # Keyboard navigation from the library filter scrolls the group's header,
+    # bookmark and options into view, even with a short Windows viewport.
+    search = ui.find("Søk i bokmerker", "Edit")
+    search.set_focus()
+    ui.wait(search.has_keyboard_focus, "Could not focus the restored bookmark library filter")
+    ui.keys("{TAB}{TAB}{TAB}")
+    restored_item = ui.find(more, "Button")
+    ui.wait(restored_item.has_keyboard_focus, "The restored group did not contain its bookmark options")
+    # The toolbar and page group have the same accessible name. Reach the page
+    # header from its bookmark's options so Enter tests the correct group.
+    ui.keys("+{TAB}+{TAB}")
+    def focused_page_folder():
+        headers = ui.window.descendants(title=f"Bokmerkegruppe {name}", control_type="Button")
+        return next((control for control in headers if control.has_keyboard_focus()), None)
+    folder = ui.wait(focused_page_folder, "The restored bookmark is not preceded by its own group header")
+    ui.keys("{ENTER}")
+    ui.wait(lambda: not ui.window.descendants(title=more, control_type="Button"),
             "The restored bookmark stayed outside its collapsed group")
-    folder.click_input()
+    ui.wait(folder.has_keyboard_focus, "Folding the page group lost the keyboard focus")
+    ui.keys("{ENTER}")
     ui.find(more, "Button")
     ui.screenshot("ELIX-28-restored")
     return {"url": url, "bookmark_id": bookmark_id, "profile": profile, "group": name,

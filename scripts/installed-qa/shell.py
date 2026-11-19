@@ -178,27 +178,145 @@ def search_query(url, text):
         return False
 
 
+def submit_in_new_tab(ui, text):
+    # Keep a late redirect on a preceding search page from replacing the address
+    # while the next input is being entered. Each submission gets its own tab.
+    previous = {tab["id"] for tab in ui.session()["tabs"]}
+    ui.click("Ny fane", "Button")
+
+    def new_start_id():
+        tab = current_tab(ui)
+        return tab.get("id") if tab.get("id") not in previous and tab.get("url") == "elix://start" else None
+
+    tab_id = ui.wait(new_start_id, f"Ingen ny startfane før {text!r}")
+    edit = ui.find("Adressefelt")
+    ui.wait(lambda: edit.element_info.element.CurrentHasKeyboardFocus and edit.iface_value.CurrentValue == "",
+            f"Den nye fanen fikk ikke tomt, fokusert adressefelt før {text!r}")
+    ui.paste(text)
+    ui.wait(lambda: edit.iface_value.CurrentValue == text and edit.element_info.element.CurrentHasKeyboardFocus,
+            f"Teksten {text!r} ble ikke satt uendret i adressefeltet før Enter")
+    print(f"ELIX-33 entering {text!r} in new tab {tab_id}", flush=True)
+    ui.keys("{ENTER}")
+    return tab_id
+
+
+def close_measured_tab(ui, tab_id):
+    # Keep the next tab header in view on the 1024-pixel Windows desktop. Only
+    # close the active synthetic tab whose navigation has already been measured.
+    before = ui.session()
+    others = {tab["id"] for tab in before["tabs"] if tab["id"] != tab_id}
+    assert before["active"] == tab_id and others, "Expected a measured tab and the original start tab"
+    ui.find("Adressefelt").click_input()
+    ui.keys("^w")
+
+    def closed():
+        session = ui.session()
+        return session["active"] in others and {tab["id"] for tab in session["tabs"]} == others
+
+    ui.wait(closed, "Ctrl+W did not close exactly the completed measurement tab")
+
+
+def redirect_while_editing(ui, mode):
+    source = ui.origin + "/address-redirect/start/" + mode
+    redirected = ui.page("redirect-arrived-" + mode)
+    destination = ui.page("redirect-submitted-" + mode)
+    tab_id = submit_in_new_tab(ui, source)
+    ui.find("ELIX redirect-" + mode, "TabItem", timeout=25)
+    ui.wait(lambda: current_tab(ui).get("id") == tab_id and address_value(ui) == source and
+            any(e.get("kind") == "redirect_waiting" and e.get("mode") == mode for e in ui.fixture.events),
+            "Fixture did not wait on the originating tab", timeout=20)
+
+    edit = ui.find("Adressefelt")
+    edit.click_input()
+    ui.keys("^a")
+    if mode == "draft":
+        ui.paste(destination)
+        expected = destination
+    else:
+        expected = source
+    ui.wait(lambda: edit.element_info.element.CurrentHasKeyboardFocus and edit.iface_value.CurrentValue == expected,
+            f"Missing focused {mode} input before the redirect")
+    ui.fixture.address_redirects[mode].set()
+
+    # Require the real web navigation on this same persistent tab, separately
+    # from its shell input. Seeing only the old draft before navigation is insufficient.
+    ui.wait(lambda: current_tab(ui).get("id") == tab_id and current_tab(ui).get("url") == redirected,
+            f"{mode}: native tab did not commit the controlled redirect", timeout=25)
+    ui.find("ELIX redirect-arrived-" + mode, "TabItem", timeout=25)
+    ui.wait(lambda: any(e.get("kind") == "load" and e.get("slug") == "redirect-arrived-" + mode
+                        for e in ui.fixture.events), "The redirected page never reached the fixture")
+    edit = ui.find("Adressefelt")
+    # Sample after the destination title has rendered, across several shell
+    # updates; a transient old UIA value is not proof the edit survived.
+    deadline = time.monotonic() + 0.5
+    while True:
+        shown = edit.iface_value.CurrentValue
+        focused = bool(edit.element_info.element.CurrentHasKeyboardFocus)
+        if shown != expected or not focused:
+            raise AssertionError(f"{mode}: redirect committed to {redirected!r}; "
+                                 f"expected focused input {expected!r}, observed {shown!r}, focused={focused}")
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(.08)
+    ui.screenshot("ELIX-33-redirect-" + mode)
+    if mode == "selected":
+        # A single paste must replace all originally selected text. Ctrl+A here
+        # would repair a lost selection and conceal the regression.
+        ui.paste(destination)
+        ui.wait(lambda: edit.iface_value.CurrentValue == destination,
+                "The selected source address was not fully replaced after the redirect")
+    ui.keys("{ENTER}")
+    ui.find("ELIX redirect-submitted-" + mode, "TabItem", timeout=25)
+    ui.wait(lambda: current_tab(ui).get("id") == tab_id and current_tab(ui).get("url") == destination and
+            any(e.get("kind") == "load" and e.get("slug") == "redirect-submitted-" + mode
+                for e in ui.fixture.events),
+            f"{mode}: pressing Enter did not submit the intended destination in the same tab", timeout=25)
+    return {"tab": tab_id, "source": source, "redirected": redirected, "focused_input": shown,
+            "submitted": destination}
+
+
 def colon_search(ui):
     evidence = {}
-    for text in ("ELIX: test av søk", "site:example.org ELIX test"):
-        ui.navigate(text)
+    # Keep the reporter's exact phrase, ordinary prose with a colon, and a search operator.
+    queries = ("EKMP setning: her", "setning: her", "site:github.com Feil: #1")
+    for index, text in enumerate(queries, start=1):
+        history_before = query_db(ui, "SELECT COALESCE(MAX(id),0) FROM history")[0][0]
+        tab_id = submit_in_new_tab(ui, text)
+
         def actual():
-            # Preserve the original destination if the external search provider
-            # subsequently navigates to consent or another result page.
+            # A provider redirect may replace the first URL. Accept an exact
+            # query from the active new tab's address or a visit after Enter.
+            tab = current_tab(ui)
+            if tab.get("id") != tab_id or tab.get("url") == "elix://start":
+                return False
             shown = address_value(ui)
             if search_query(shown, text):
-                return {"from": "address", "url": shown}
-            rows = query_db(ui, "SELECT url FROM history WHERE profile=(SELECT value FROM settings "
-                                "WHERE key='active_profile') ORDER BY id DESC LIMIT 12")
-            return next(({"from": "history", "url": url} for (url,) in rows if search_query(url, text)), False)
-        evidence[text] = ui.wait(actual, "Søketeksten med kolon mangler som søk i adressefelt og historikk", timeout=25)
-    url = visit(ui, "port-in-address")
-    ui.wait(lambda: address_value(ui) == url, "En adresse med eksplisitt port ble tolket som søk")
+                return {"from": "address", "url": shown, "tab": tab_id}
+            rows = query_db(ui, "SELECT url FROM history WHERE id>? AND profile=(SELECT value FROM settings "
+                                "WHERE key='active_profile') ORDER BY id DESC", (history_before,))
+            return next(({"from": "history", "url": url, "tab": tab_id}
+                         for (url,) in rows if search_query(url, text)), False)
+
+        evidence[text] = ui.wait(actual, f"Mangler søkemålet for {text!r} i adressefelt og historikk", timeout=25)
+        print(f"ELIX-33 confirmed {text!r} via {evidence[text]['from']}", flush=True)
+        ui.screenshot(f"ELIX-33-search-{index}")
+        close_measured_tab(ui, tab_id)
+
+    url = ui.page("port-in-address")
+    tab_id = submit_in_new_tab(ui, url)
+    ui.find("ELIX port-in-address", "TabItem", timeout=25)
+    ui.wait(lambda: current_tab(ui).get("id") == tab_id and address_value(ui) == url,
+            "En adresse med eksplisitt port ble tolket som søk")
     ui.wait(lambda: query_db(ui, "SELECT 1 FROM history WHERE url=? AND profile=(SELECT value "
                                   "FROM settings WHERE key='active_profile')", (url,)),
             "Den besøkte fixture-adressen mangler i historikken")
     ui.screenshot("ELIX-33-literal-url")
-    return {"searches": evidence, "literal_url": url}
+    close_measured_tab(ui, tab_id)
+    redirects = {}
+    for mode in ("draft", "selected"):
+        redirects[mode] = redirect_while_editing(ui, mode)
+        close_measured_tab(ui, redirects[mode]["tab"])
+    return {"searches": evidence, "literal_url": url, "literal_tab": tab_id, "redirects": redirects}
 
 
 def beats(ui, slug, since=0):
