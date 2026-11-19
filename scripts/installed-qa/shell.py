@@ -200,6 +200,65 @@ def submit_in_new_tab(ui, text):
     return tab_id
 
 
+def redirect_while_editing(ui, mode):
+    source = ui.origin + "/address-redirect/start/" + mode
+    redirected = ui.page("redirect-arrived-" + mode)
+    destination = ui.page("redirect-submitted-" + mode)
+    tab_id = submit_in_new_tab(ui, source)
+    ui.find("ELIX redirect-" + mode, "TabItem", timeout=25)
+    ui.wait(lambda: current_tab(ui).get("id") == tab_id and address_value(ui) == source and
+            any(e.get("kind") == "redirect_waiting" and e.get("mode") == mode for e in ui.fixture.events),
+            "Fixture did not wait on the originating tab", timeout=20)
+
+    edit = ui.find("Adressefelt")
+    edit.click_input()
+    ui.keys("^a")
+    if mode == "draft":
+        ui.paste(destination)
+        expected = destination
+    else:
+        expected = source
+    ui.wait(lambda: edit.element_info.element.CurrentHasKeyboardFocus and edit.iface_value.CurrentValue == expected,
+            f"Missing focused {mode} input before the redirect")
+    ui.fixture.address_redirects[mode].set()
+
+    # Require the real web navigation on this same persistent tab, separately
+    # from its shell input. Seeing only the old draft before navigation is insufficient.
+    ui.wait(lambda: current_tab(ui).get("id") == tab_id and current_tab(ui).get("url") == redirected,
+            f"{mode}: native tab did not commit the controlled redirect", timeout=25)
+    ui.find("ELIX redirect-arrived-" + mode, "TabItem", timeout=25)
+    ui.wait(lambda: any(e.get("kind") == "load" and e.get("slug") == "redirect-arrived-" + mode
+                        for e in ui.fixture.events), "The redirected page never reached the fixture")
+    edit = ui.find("Adressefelt")
+    # Sample after the destination title has rendered, across several shell
+    # updates; a transient old UIA value is not proof the edit survived.
+    deadline = time.monotonic() + 0.5
+    while True:
+        shown = edit.iface_value.CurrentValue
+        focused = bool(edit.element_info.element.CurrentHasKeyboardFocus)
+        if shown != expected or not focused:
+            raise AssertionError(f"{mode}: redirect committed to {redirected!r}; "
+                                 f"expected focused input {expected!r}, observed {shown!r}, focused={focused}")
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(.08)
+    ui.screenshot("ELIX-33-redirect-" + mode)
+    if mode == "selected":
+        # A single paste must replace all originally selected text. Ctrl+A here
+        # would repair a lost selection and conceal the regression.
+        ui.paste(destination)
+        ui.wait(lambda: edit.iface_value.CurrentValue == destination,
+                "The selected source address was not fully replaced after the redirect")
+    ui.keys("{ENTER}")
+    ui.find("ELIX redirect-submitted-" + mode, "TabItem", timeout=25)
+    ui.wait(lambda: current_tab(ui).get("id") == tab_id and current_tab(ui).get("url") == destination and
+            any(e.get("kind") == "load" and e.get("slug") == "redirect-submitted-" + mode
+                for e in ui.fixture.events),
+            f"{mode}: pressing Enter did not submit the intended destination in the same tab", timeout=25)
+    return {"tab": tab_id, "source": source, "redirected": redirected, "focused_input": shown,
+            "submitted": destination}
+
+
 def colon_search(ui):
     evidence = {}
     # Keep the reporter's exact phrase, ordinary prose with a colon, and a search operator.
@@ -235,7 +294,8 @@ def colon_search(ui):
                                   "FROM settings WHERE key='active_profile')", (url,)),
             "Den besøkte fixture-adressen mangler i historikken")
     ui.screenshot("ELIX-33-literal-url")
-    return {"searches": evidence, "literal_url": url, "literal_tab": tab_id}
+    redirects = {mode: redirect_while_editing(ui, mode) for mode in ("draft", "selected")}
+    return {"searches": evidence, "literal_url": url, "literal_tab": tab_id, "redirects": redirects}
 
 
 def beats(ui, slug, since=0):
