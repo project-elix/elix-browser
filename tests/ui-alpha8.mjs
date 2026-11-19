@@ -154,6 +154,8 @@ try {
   await page.waitForFunction(()=>window.__uiTest.calls.some(c=>
    c.action==='navigate'&&c.id==='original'&&c.url==='ferdig: send hele søket'));
   await publishUrl(originalUrl);
+  // The backend accepted the submission before React necessarily rendered the redirect.
+  await page.waitForFunction(url=>document.querySelector('[aria-label="Adressefelt"]')?.value===url,originalUrl);
   assert.equal(await field.inputValue(),originalUrl,'the submitted edit still blocked subsequent redirects');
   await field.press('Tab');
   console.log('PASS: redirects preserve drafts and select-all/paste, with Escape, blur, switching and submit');
