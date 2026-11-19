@@ -178,29 +178,64 @@ def search_query(url, text):
         return False
 
 
+def submit_in_new_tab(ui, text):
+    # Keep a late redirect on a preceding search page from replacing the address
+    # while the next input is being entered. Each submission gets its own tab.
+    previous = {tab["id"] for tab in ui.session()["tabs"]}
+    ui.click("Ny fane", "Button")
+
+    def new_start_id():
+        tab = current_tab(ui)
+        return tab.get("id") if tab.get("id") not in previous and tab.get("url") == "elix://start" else None
+
+    tab_id = ui.wait(new_start_id, f"Ingen ny startfane før {text!r}")
+    edit = ui.find("Adressefelt")
+    ui.wait(lambda: edit.element_info.element.CurrentHasKeyboardFocus and edit.iface_value.CurrentValue == "",
+            f"Den nye fanen fikk ikke tomt, fokusert adressefelt før {text!r}")
+    ui.paste(text)
+    ui.wait(lambda: edit.iface_value.CurrentValue == text and edit.element_info.element.CurrentHasKeyboardFocus,
+            f"Teksten {text!r} ble ikke satt uendret i adressefeltet før Enter")
+    print(f"ELIX-33 entering {text!r} in new tab {tab_id}", flush=True)
+    ui.keys("{ENTER}")
+    return tab_id
+
+
 def colon_search(ui):
     evidence = {}
-    # The browser reserves "elix:" for internal navigation. Exercise both prose
-    # and a search operator using queries from the production URL parser tests.
-    for text in ("EKMP setning: her", "setning: her", "site:github.com Feil: #1"):
-        ui.navigate(text)
+    # Keep the reporter's exact phrase, ordinary prose with a colon, and a search operator.
+    queries = ("EKMP setning: her", "setning: her", "site:github.com Feil: #1")
+    for index, text in enumerate(queries, start=1):
+        history_before = query_db(ui, "SELECT COALESCE(MAX(id),0) FROM history")[0][0]
+        tab_id = submit_in_new_tab(ui, text)
+
         def actual():
-            # Preserve the original destination if the external search provider
-            # subsequently navigates to consent or another result page.
+            # A provider redirect may replace the first URL. Accept an exact
+            # query from the active new tab's address or a visit after Enter.
+            tab = current_tab(ui)
+            if tab.get("id") != tab_id or tab.get("url") == "elix://start":
+                return False
             shown = address_value(ui)
             if search_query(shown, text):
-                return {"from": "address", "url": shown}
-            rows = query_db(ui, "SELECT url FROM history WHERE profile=(SELECT value FROM settings "
-                                "WHERE key='active_profile') ORDER BY id DESC LIMIT 12")
-            return next(({"from": "history", "url": url} for (url,) in rows if search_query(url, text)), False)
+                return {"from": "address", "url": shown, "tab": tab_id}
+            rows = query_db(ui, "SELECT url FROM history WHERE id>? AND profile=(SELECT value FROM settings "
+                                "WHERE key='active_profile') ORDER BY id DESC", (history_before,))
+            return next(({"from": "history", "url": url, "tab": tab_id}
+                         for (url,) in rows if search_query(url, text)), False)
+
         evidence[text] = ui.wait(actual, f"Mangler søkemålet for {text!r} i adressefelt og historikk", timeout=25)
-    url = visit(ui, "port-in-address")
-    ui.wait(lambda: address_value(ui) == url, "En adresse med eksplisitt port ble tolket som søk")
+        print(f"ELIX-33 confirmed {text!r} via {evidence[text]['from']}", flush=True)
+        ui.screenshot(f"ELIX-33-search-{index}")
+
+    url = ui.page("port-in-address")
+    tab_id = submit_in_new_tab(ui, url)
+    ui.find("ELIX port-in-address", "TabItem", timeout=25)
+    ui.wait(lambda: current_tab(ui).get("id") == tab_id and address_value(ui) == url,
+            "En adresse med eksplisitt port ble tolket som søk")
     ui.wait(lambda: query_db(ui, "SELECT 1 FROM history WHERE url=? AND profile=(SELECT value "
                                   "FROM settings WHERE key='active_profile')", (url,)),
             "Den besøkte fixture-adressen mangler i historikken")
     ui.screenshot("ELIX-33-literal-url")
-    return {"searches": evidence, "literal_url": url}
+    return {"searches": evidence, "literal_url": url, "literal_tab": tab_id}
 
 
 def beats(ui, slug, since=0):
