@@ -205,17 +205,35 @@ def bookmarks(ui):
     ui.keys("{END}{ENTER}")
     ui.click("Lagre", "Button")
     ui.wait(lambda: membership() == expected, "Moving the bookmark did not persist its group")
+
+    def library_tab_order():
+        session = ui.session()
+        tabs = session["tabs"]
+        urls = [tab["url"] for tab in tabs]
+        if urls.count("elix://bookmarks") == 1 and tabs[urls.index("elix://bookmarks")]["id"] == session["active"]:
+            return urls
+        return None
+
+    saved_order = ui.wait(library_tab_order, "The bookmark library was not the active tab before restart")
     ui.screenshot("ELIX-28-before-restart")
     ui.restart()
-    ui.navigate("elix://bookmarks")
-    restored_item = ui.find(more, "Button")
+    # Restoring a session generates new native WebView IDs for the same tabs.
+    ui.wait(lambda: library_tab_order() == saved_order, "The active bookmark library or tab order changed on restart")
     if membership() != expected:
         raise AssertionError("Saved bookmark identity, profile or group changed on restart")
-    # The page alone has a per-bookmark options button. In the group its tab
-    # order is header, bookmark, options. The toolbar has a separate group
-    # header with the same accessible name and independent expansion state.
-    restored_item.set_focus()
-    ui.wait(restored_item.has_keyboard_focus, "Could not focus the restored page bookmark")
+    ui.click("Bokmerker", "TabItem")
+    if ui.window.descendants(title="Adresseforslag", control_type="List"):
+        ui.keys("{ESC}")
+    # Keyboard navigation from the library filter scrolls the group's header,
+    # bookmark and options into view, even with a short Windows viewport.
+    search = ui.find("Søk i bokmerker", "Edit")
+    search.set_focus()
+    ui.wait(search.has_keyboard_focus, "Could not focus the restored bookmark library filter")
+    ui.keys("{TAB}{TAB}{TAB}")
+    restored_item = ui.find(more, "Button")
+    ui.wait(restored_item.has_keyboard_focus, "The restored group did not contain its bookmark options")
+    # The toolbar and page group have the same accessible name. Reach the page
+    # header from its bookmark's options so Enter tests the correct group.
     ui.keys("+{TAB}+{TAB}")
     def focused_page_folder():
         headers = ui.window.descendants(title=f"Bokmerkegruppe {name}", control_type="Button")

@@ -486,6 +486,34 @@ fn view_bool(view: &tauri::Webview, script: &str) -> Result<bool, String> {
         .map_err(|e| e.to_string())?;
     Ok(value == "true")
 }
+fn close_background_during_popup_creation(app: &AppHandle, origin: &str) -> Result<(), String> {
+    let background =
+        tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/one")))?;
+    wait_title_or_error(app, &background, "ELIX native one")?;
+
+    // Reproduce the point in activate() after the popup has been selected but
+    // before its creator registers the WebView. No timer or thread race is needed.
+    let mut popup = browser::Tab::new(format!("{origin}/two"));
+    popup.loading = true;
+    popup.started = Some(Instant::now());
+    {
+        let state = app.state::<AppState>();
+        let mut session = state.session.lock().unwrap();
+        session.tabs.push(popup.clone());
+        session.select_tab(&popup.id, chrono::Utc::now().timestamp())?;
+    }
+    browser::close(app, &background)?;
+    if app.get_webview(&popup.id).is_some() {
+        return Err("Closing a background tab registered the pending popup's WebView label".into());
+    }
+    if app.state::<AppState>().session.lock().unwrap().active != popup.id {
+        return Err("Closing a background tab deselected the pending popup".into());
+    }
+    browser::engine::create(app, &popup)?;
+    wait_title_or_error(app, &popup.id, "ELIX native two")?;
+    browser::close(app, &popup.id)
+}
+
 fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
     let shell = app.get_webview("shell").ok_or("Missing shell")?;
     let original = app.get_webview(remote).ok_or("Missing settings source page")?;
@@ -608,7 +636,15 @@ fn sidebar_test(app: &AppHandle, remote: &str) -> Result<(), String> {
         return Err("Internal page retained a stale loading indicator".into());
     }
     browser::activate(app, remote)?;
+    let address_focused = "document.hasFocus() && document.activeElement?.getAttribute('aria-label')==='Adressefelt'";
+    shell.set_focus().map_err(|e| e.to_string())?;
+    shell.eval("document.querySelector('input[aria-label=\"Adressefelt\"]').focus()")
+        .map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, address_focused).unwrap_or(false))?;
     browser::close(app, &settings_id)?;
+    if !shell_bool(app, address_focused)? {
+        return Err("Closing a background tab took focus from the address field".into());
+    }
     if !view_bool(&original, "window.__elixSettingsSource==='preserved'")? {
         return Err("Returning from settings reloaded the original webpage".into());
     }
@@ -1966,7 +2002,9 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     wait(|| title(app, &first, "ELIX native one"))?;
     progress("sidebar: before");
     sidebar_test(app, &first)?;
-    progress("sidebar: after; bookmark favicon: before");
+    progress("sidebar: after; close background during popup creation: before");
+    close_background_during_popup_creation(app, &origin)?;
+    progress("close background during popup creation: after; bookmark favicon: before");
     let shell = app.get_webview("shell").ok_or("Missing shell for bookmarking")?;
     wait(|| shell_bool(app, "document.querySelector('.tab.active img.tab-favicon')?.naturalWidth > 0 && !document.querySelector('button[aria-label=\"Legg til bokmerke\"]').disabled").unwrap_or(false))?;
     shell.eval("document.querySelector('button[aria-label=\"Legg til bokmerke\"]').click()").map_err(|e| e.to_string())?;
