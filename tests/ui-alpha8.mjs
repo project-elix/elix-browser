@@ -100,6 +100,65 @@ try {
  await page.goto('http://127.0.0.1:4188');
  await page.getByRole('tab',{name:'Original page',exact:true}).waitFor();
 
+ // WebView2 can report a redirect in the active tab after the user has started editing its address.
+ {
+  const field=page.getByRole('combobox',{name:'Adressefelt',exact:true});
+  const originalUrl='https://example.com/form';
+  const publishUrl=async url=>{
+   await page.evaluate(value=>{
+    const {state,emit}=window.__uiTest;
+    const active=state.session.tabs.find(tab=>tab.id===state.session.active);
+    active.url=value;
+    active.loading=false;
+    emit('browser-changed',state.session);
+   },url);
+   // Read the controlled input after React has committed the event and its effects.
+   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  };
+  const redirected='https://example.com/finished-loading';
+  await field.click();
+  await field.fill('søk: mitt utkast');
+  await publishUrl(redirected);
+  assert.equal(await field.inputValue(),'søk: mitt utkast','a same-tab navigation overwrote the typed draft');
+  assert.equal(await field.getAttribute('aria-expanded'),'true','the redirect closed active suggestions');
+
+  await field.press('Escape');
+  assert.equal(await field.getAttribute('aria-expanded'),'false');
+  assert.equal(await field.inputValue(),redirected,'Escape should restore the latest actual URL');
+  await field.press('Tab');
+  const passive='https://example.com/passive';
+  await publishUrl(passive);
+  assert.equal(await field.inputValue(),passive,'an unfocused address must track the active page');
+  await field.click();
+  await field.press('Control+a');
+  const range=()=>field.evaluate(el=>[el.selectionStart,el.selectionEnd]);
+  assert.deepEqual(await range(),[0,passive.length]);
+  await publishUrl('https://example.com/updated-before-paste');
+  assert.equal(await field.inputValue(),passive,'a redirect changed the address selected for replacement');
+  assert.deepEqual(await range(),[0,passive.length],'a redirect lost the pending replacement selection');
+  await page.context().grantPermissions(['clipboard-read','clipboard-write'],{origin:'http://127.0.0.1:4188'});
+  await page.evaluate(()=>navigator.clipboard.writeText('søk: lim inn'));
+  await field.press('Control+v');
+  assert.equal(await field.inputValue(),'søk: lim inn','paste should replace the entire selected address');
+  await field.press('Tab');
+  assert.equal(await field.inputValue(),'https://example.com/updated-before-paste','blur left a stale draft');
+
+  await field.click();
+  await field.fill('uferdig');
+  await page.getByRole('tab',{name:'Other page',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('[aria-label="Adressefelt"]')?.value==='https://example.com/video');
+  await page.getByRole('tab',{name:'Original page',exact:true}).click();
+  await field.click();
+  await field.fill('ferdig: send hele søket');
+  await field.press('Enter');
+  await page.waitForFunction(()=>window.__uiTest.calls.some(c=>
+   c.action==='navigate'&&c.id==='original'&&c.url==='ferdig: send hele søket'));
+  await publishUrl(originalUrl);
+  assert.equal(await field.inputValue(),originalUrl,'the submitted edit still blocked subsequent redirects');
+  await field.press('Tab');
+  console.log('PASS: redirects preserve drafts and select-all/paste, with Escape, blur, switching and submit');
+ }
+
  const gear=page.getByRole('button',{name:'Innstillinger og hurtigvalg',exact:true});
  const quick=page.getByRole('region',{name:'Hurtigvalg',exact:true});
  assert.equal(await quick.count(),0,'quick settings are hidden initially');
