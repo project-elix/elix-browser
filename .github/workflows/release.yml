@@ -27,6 +27,8 @@ jobs:
   upgrade-verification:
     if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/upgrade-test.yml
+    with:
+      channel: ${{ inputs.channel }}
   build:
     needs: [native-verification, upgrade-verification]
     if: github.ref == 'refs/heads/main'
@@ -68,61 +70,41 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - name: Test Stable 1 installer over an existing Alpha 9 profile
-        if: inputs.channel == 'stable' && inputs.version == '0.1.4'
+      - name: Upgrade a published Alpha 9 profile with the signed candidate
         env:
           ELIX_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         shell: pwsh
         run: |
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          ./scripts/verify-stable1-upgrade.ps1 -Installer $installer.FullName
+          ./scripts/verify-stable1-upgrade.ps1 -Installer $installer.FullName -RequireSignature
       - uses: actions/upload-artifact@v4
-        if: inputs.channel == 'stable' && inputs.version == '0.1.4' && always()
+        if: always()
         with:
-          name: signed-stable1-profile-review
+          name: signed-profile-upgrade-${{ inputs.version }}
           path: |
-            ${{ runner.temp }}/stable1-profile-review/stable1-profile.json
-            ${{ runner.temp }}/stable1-profile-review/*/*.png
-            ${{ runner.temp }}/stable1-profile-review/*/ready-result.json
+            ${{ runner.temp }}/profile-upgrade-review/profile-upgrade.json
+            ${{ runner.temp }}/profile-upgrade-review/*/*.png
+            ${{ runner.temp }}/profile-upgrade-review/*/ready-result.json
           if-no-files-found: ignore
       - name: Verify the signed distributable installs and starts
         shell: pwsh
         run: |
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           $dest = Join-Path $env:RUNNER_TEMP 'ELIX-signed-install'
-          if ($env:RELEASE_CHANNEL -eq 'stable' -and $env:RELEASE_VERSION -eq '0.1.4') {
-            $review = Join-Path $env:RUNNER_TEMP 'ELIX-clean-stable1-review'
-            ./scripts/verify-installed-ui.ps1 -Installer $installer.FullName -InstallDirectory $dest -OutputDirectory $review
-            $upgraded = Get-Content "$env:RUNNER_TEMP/stable1-profile-review/stable1-profile.json" -Raw | ConvertFrom-Json
-            if ((Get-FileHash "$dest/elix-browser.exe").Hash -ne $upgraded.exe_sha256) { throw 'Clean and upgraded signed installations differ' }
-            Copy-Item "$review/signed-ready.png" 'signed-release.png'
-            return
-          }
-          $p = Start-Process $installer.FullName -ArgumentList @('/S', "/D=$dest") -PassThru
-          if (!$p.WaitForExit(120000) -or $p.ExitCode -ne 0) { throw 'Signed installer failed' }
-          $app = Start-Process "$dest/elix-browser.exe" -PassThru
-          Start-Sleep -Seconds 12
-          $app.Refresh()
-          if ($app.HasExited) { throw 'Signed release exited at startup' }
-          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-          $screen = [Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $image = [Drawing.Bitmap]::new($screen.Width,$screen.Height)
-          $graphics = [Drawing.Graphics]::FromImage($image)
-          try {
-            $graphics.CopyFromScreen($screen.Location,[Drawing.Point]::Empty,$screen.Size)
-            $image.Save((Join-Path $PWD 'signed-release.png'),[Drawing.Imaging.ImageFormat]::Png)
-          } finally { $graphics.Dispose(); $image.Dispose() }
-          Stop-Process -Id $app.Id
-      - name: Record Stable 1 clean install and upgrade evidence
-        if: inputs.channel == 'stable' && inputs.version == '0.1.4'
+          $review = Join-Path $env:RUNNER_TEMP 'ELIX-clean-release-review'
+          ./scripts/verify-installed-ui.ps1 -Installer $installer.FullName -InstallDirectory $dest -OutputDirectory $review
+          $upgraded = Get-Content "$env:RUNNER_TEMP/profile-upgrade-review/profile-upgrade.json" -Raw | ConvertFrom-Json
+          if ((Get-FileHash "$dest/elix-browser.exe").Hash -ne $upgraded.exe_sha256) { throw 'Clean and upgraded signed installations differ' }
+          Copy-Item "$review/signed-ready.png" 'signed-release.png'
+      - name: Record signed clean install and upgrade evidence
         shell: pwsh
         run: |
-          $review = Get-Content "$env:RUNNER_TEMP/stable1-profile-review/stable1-profile.json" -Raw | ConvertFrom-Json
+          $review = Get-Content "$env:RUNNER_TEMP/profile-upgrade-review/profile-upgrade.json" -Raw | ConvertFrom-Json
           @(
-            '### Stable 1 signed Windows candidate',
+            "### Signed Windows candidate $env:RELEASE_VERSION ($env:RELEASE_CHANNEL)",
             "Build $($review.run_id), attempt $($review.run_attempt), commit $($review.source_sha).",
             "Clean install and Alpha 9 profile upgrade passed. Installer SHA-256 $($review.installer_sha256).",
-            'The signed-stable1-profile-review artifact contains the verified updater signature and screenshots.'
+            "The signed-profile-upgrade-$env:RELEASE_VERSION artifact contains the verified updater signature and screenshots."
           ) | Add-Content $env:GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         with:

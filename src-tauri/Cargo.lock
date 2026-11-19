@@ -782,7 +782,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "elix-browser"
-version = "0.1.4"
+version = "0.1.5-dev.10"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -797,6 +797,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-updater",
  "tempfile",
+ "tokio",
  "url",
  "uuid",
  "webview2-com",

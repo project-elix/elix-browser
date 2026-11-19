@@ -66,6 +66,7 @@ pub fn reopen(app: &AppHandle) -> Result<(), String> {
         tab.loading = false;
         let id = tab.id.clone();
         s.tabs.push(tab);
+        super::group_rules::apply(&mut s,&id);
         id
     };
     super::activate(app, &id)?;
@@ -117,7 +118,7 @@ pub fn group(app: &AppHandle, id: &str, group: &str, workspace: &str) -> Result<
     super::persist(app)
 }
 
-fn update_group(
+pub(super) fn update_group(
     s: &mut super::Session,
     id: &str,
     group: &str,
@@ -137,6 +138,8 @@ fn update_group(
     let group = group.trim();
     let tab = &mut s.tabs[from];
     let moved = tab.workspace != workspace;
+    let preserve_auto=moved && tab.group==group && !super::group_rules::manual(tab);
+    tab.group_manual=Some(!preserve_auto);
     if !moved && tab.group == group {
         return Ok(false);
     }
@@ -162,6 +165,7 @@ fn update_group(
     {
         s.clear_split(chrono::Utc::now().timestamp());
     }
+    if preserve_auto{super::group_rules::apply(s,id);}
     Ok(moved)
 }
 
@@ -185,7 +189,10 @@ fn reorder_tabs(tabs: &mut Vec<Tab>, id: &str, before: Option<&str>, ungroup_at:
     let workspace = source.workspace.clone();
     let pinned = source.pinned;
     let mut tab = tabs.remove(from);
-    if ungroup_at.is_some() { tab.group.clear(); }
+    if ungroup_at.is_some() && !tab.group.is_empty() {
+        tab.group.clear();
+        tab.group_manual = Some(true);
+    }
     // Resolve the insertion point after removal: earlier -> later must still
     // insert before the target. A null target appends to this partition only.
     let to = match before {
@@ -251,7 +258,7 @@ pub fn split(app: &AppHandle, other: Option<String>) -> Result<(), String> {
     }
     layout(app)?;
     super::emit(app);
-    Ok(())
+    super::persist(app)
 }
 
 pub async fn mute(app: &AppHandle, id: &str, muted: bool) -> Result<(), String> {
@@ -332,6 +339,21 @@ mod tests {
         assert_eq!(ids(&tabs), ["c", "b", "a"]);
         reorder_tabs(&mut tabs, "b", Some("b"), None).unwrap();
         assert_eq!(ids(&tabs), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn reordering_keeps_auto_membership_until_the_user_leaves_the_group() {
+        let mut tab = ordered_tab("auto", "Home", false);
+        tab.group = "Lesing".into();
+        tab.group_manual = Some(false);
+        let other = ordered_tab("other", "Home", false);
+        let mut tabs = vec![tab, other];
+        reorder_tabs(&mut tabs, "auto", None, None).unwrap();
+        assert_eq!(tabs[1].group, "Lesing");
+        assert_eq!(tabs[1].group_manual, Some(false));
+        reorder_tabs(&mut tabs, "auto", Some("other"), Some("other")).unwrap();
+        assert!(tabs[0].group.is_empty());
+        assert_eq!(tabs[0].group_manual, Some(true));
     }
 
     #[test]

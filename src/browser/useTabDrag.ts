@@ -2,15 +2,16 @@ import {useCallback,useEffect,useRef,useState,type MouseEvent as ReactMouseEvent
 import type {Session} from '../types';
 import {rpc} from './bridge';
 import {reorderAction} from './tabTools';
-import {edgeScroll,groupDropTarget,type Point} from './tabDrag';
+import {edgeScroll,groupDropTarget,splitDropTarget,type Point} from './tabDrag';
 
 export type TabDropTarget=
  | {id:string;edge:'before'|'after'}
+ | {id:string;edge:'split'}
  | {id:string;edge:'group';group:string;workspace:string}
  | {id:string;edge:'ungroup';group:'';workspace:string};
 export type TabDragPreview={id:string;point:Point;target:TabDropTarget|null};
 type Drag={id:string;pointerId:number;start:Point;point:Point;active:boolean;capture:Element;workspace:string;pinned:boolean};
-type Callbacks={onError:(error:unknown)=>void;onNotice:(notice:string)=>void};
+type Callbacks={playerTabId?:string|null;onError:(error:unknown)=>void;onNotice:(notice:string)=>void};
 
 export function useTabDrag(session:Session,callbacks:Callbacks) {
  const current=useRef({session,callbacks});current.current={session,callbacks};
@@ -23,8 +24,13 @@ export function useTabDrag(session:Session,callbacks:Callbacks) {
    const source=current.current.session.tabs.find(tab=>tab.id===id);
    return source?.group?{id,edge:'ungroup',group:'',workspace:source.workspace||'Personlig'}:null;
   }
-  const anchorId=hit?.closest<HTMLElement>('[data-tab-group-anchor]')?.dataset.tabGroupAnchor;
-  if(anchorId)return groupDropTarget(current.current.session,id,anchorId);
+  if(hit?.closest('[data-split-drop]'))return splitDropTarget(current.current.session,id,current.current.callbacks.playerTabId);
+  const anchor=hit?.closest<HTMLElement>('[data-tab-group-anchor],[data-tab-group-chip]');
+  const anchorId=anchor?.dataset.tabGroupAnchor??anchor?.dataset.tabGroupChip;
+  if(anchorId){
+   const group=groupDropTarget(current.current.session,id,anchorId);
+   if(group||anchor?.dataset.tabGroupAnchor)return group;
+  }
   const element=hit?.closest<HTMLElement>('[data-tab-id]');
   if(!element)return null;
   const target=element.dataset.tabId!,rect=element.getBoundingClientRect();
@@ -70,6 +76,10 @@ export function useTabDrag(session:Session,callbacks:Callbacks) {
   const d=stop();if(!d?.active)return;
   suppressClick.current=true;
   const point={x:event.clientX,y:event.clientY},target=targetAt(point,d.id);
+  if(target?.edge==='split'){
+   void rpc('split',{other:target.id}).catch(current.current.callbacks.onError);
+   return;
+  }
   if(target?.edge==='group'||target?.edge==='ungroup'){
    void rpc('group_tab',{id:d.id,group:target.group,workspace:target.workspace}).catch(current.current.callbacks.onError);
    return;
@@ -77,8 +87,12 @@ export function useTabDrag(session:Session,callbacks:Callbacks) {
   const action=target&&reorderAction(current.current.session,d.id,target.id,target.edge,true);
   if(action)void rpc('reorder_tab',action).catch(current.current.callbacks.onError);
   else if(point.x<0||point.y<0||point.x>=window.innerWidth||point.y>=window.innerHeight){
-   current.current.callbacks.onNotice('Flytter fanen til et nytt vindu …');
-   void rpc<boolean>('detach_tab',{id:d.id,outside_only:true}).then(moved=>current.current.callbacks.onNotice(moved?'Fanen er flyttet til et nytt vindu.':'')).catch(current.current.callbacks.onError);
+   if(current.current.session.tabs.find(tab=>tab.id===d.id)?.private){
+    current.current.callbacks.onNotice('Private faner blir i vinduet de ble åpnet i.');
+    return;
+   }
+   current.current.callbacks.onNotice('Siden lastes inn på nytt i målvinduet …');
+   void rpc<boolean>('detach_tab',{id:d.id,outside_only:true,drop_point:point}).then(moved=>current.current.callbacks.onNotice(moved?'Fanen er flyttet og siden er lastet inn på nytt.':'')).catch(current.current.callbacks.onError);
   }
  },[stop,targetAt]);
  const tabPointerDown=useCallback((event:ReactPointerEvent<HTMLElement>,id:string)=>{

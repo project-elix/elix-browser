@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory=$true)][string]$Installer,
   [Parameter(Mandatory=$true)][string]$OutputDirectory,
   [string]$InstallDirectory = (Join-Path $env:RUNNER_TEMP 'ELIX-signed-ui-review'),
-  [switch]$VerifyStable1Downloads
+  [Alias('VerifyStable1Downloads')][switch]$VerifyReleaseDownloads
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Windows.Forms,System.Drawing
@@ -46,7 +46,7 @@ try {
   if (!$ready) { throw 'Address bar and start-page search were not usable within 120 seconds' }
   @{ready=$ready;seconds=$clock.Elapsed.TotalSeconds;product_version=(Get-Item "$dest/elix-browser.exe").VersionInfo.ProductVersion} | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'ready-result.json')
   Write-Output "PASS: installed production browser address bar and start-page search are usable after $([Math]::Round($clock.Elapsed.TotalSeconds,1)) seconds"
-  if ($VerifyStable1Downloads) {
+  if ($VerifyReleaseDownloads) {
     $links = python scripts/stable1-download.py links
     if ($LASTEXITCODE -ne 0) { throw 'Could not obtain a valid fresh GitHub release asset' }
     # Send each chord in one Win32 input packet. WinForms SendKeys can deliver

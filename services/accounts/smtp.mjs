@@ -49,8 +49,8 @@ async function run(config, action, createTransport) {
   }
 }
 
-export async function sendSmtpLoginEmail(config, email, code, createTransport) {
-  const message = loginMessage(config, email, code);
+export async function sendSmtpLoginEmail(config, email, code, createTransport, purpose) {
+  const message = loginMessage(config, email, code, purpose);
   const recipient = canonicalRecipient(email);
   if (!recipient) throw new BrevoError('invalid-message');
   await run(config, async transport => {

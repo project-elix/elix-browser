@@ -23,7 +23,7 @@ pub fn start(app: AppHandle) {
         std::thread::sleep(std::time::Duration::from_secs(12));
         let result = tauri::async_runtime::block_on(exercise(&app));
         let (code, message) = match result {
-            Ok(()) => (0, "PASS: signed 0.1.0 -> 0.1.1 install; profiles, bookmarks, history, settings, cookies and profile files preserved; tampered/replayed artifacts rejected".to_string()),
+            Ok(()) => (0, format!("PASS: signed upgrade to {} preserved profiles, bookmarks, history, cookies, localStorage, permissions and channel; tampered/replayed artifacts rejected", app.package_info().version)),
             Err(e) => (1, format!("FAIL: {e}")),
         };
         let root = &app.state::<AppState>().root;
@@ -36,14 +36,25 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     stage(app, "Beginning version/data verification");
     let version = app.package_info().version.to_string();
-    if version == "0.1.1" {
+    let old = option_env!("ELIX_QA_OLD_VERSION").unwrap_or("0.1.0");
+    let new = option_env!("ELIX_QA_NEW_VERSION").unwrap_or("0.1.1");
+    let channel = option_env!("ELIX_QA_CHANNEL").unwrap_or("stable");
+    if version == new {
         {
             let store = state.store.lock().unwrap();
             let profiles = store.profiles()?;
-            if profiles.len() != 2 || !store.settings().gaming || !store.settings().developer {
+            let settings = store.settings();
+            if profiles.len() != 5 || !settings.gaming || !settings.developer || settings.channel != channel {
                 return Err("Profiles/preferences did not survive upgrade".into());
             }
+            if profiles.iter().filter(|p| p.workspace.is_some()).count() != 3 ||
+                profiles.last().map(|p| p.id.as_str()) != Some(state.profile.lock().unwrap().as_str()) {
+                return Err("Workspace profile identities or active profile did not survive restart".into());
+            }
             for p in &profiles {
+                if store.permission(&p.id, "https://127.0.0.1:44335", "camera") != workspace_permission(p) {
+                    return Err(format!("Camera permission changed for {}", p.name));
+                }
                 if store
                     .entries(&p.id, "bookmarks")?
                     .iter()
@@ -63,7 +74,7 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
                     return Err("Profile data missing after upgrade".into());
                 }
             }
-            if store.get("upgrade_seed_version").as_deref() != Some("0.1.0") {
+            if store.get("upgrade_seed_version").as_deref() != Some(old) {
                 return Err("Missing original version marker".into());
             }
         }
@@ -71,16 +82,20 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
         check_cookies(app, false).await?;
         return Ok(());
     }
-    if version != "0.1.0" {
+    if version != old {
         return Err(format!("Unexpected test version {version}"));
     }
     {
-        let store = state.store.lock().unwrap();
+        let mut store = state.store.lock().unwrap();
         if store.get("upgrade_seed_version").is_some() {
             return Err("Old executable restarted instead of upgraded executable".into());
         }
         store.create_profile("Upgrade secondary")?;
+        for preset in ["work", "personal", "gaming"] {
+            store.workspace_profile(preset)?;
+        }
         for p in store.profiles()? {
+            store.set_permission(&p.id, "https://127.0.0.1:44335", "camera", workspace_permission(&p))?;
             store.bookmark(&p.id, "https://example.com/upgrade", &p.name)?;
             store.visit(&p.id, "https://example.com/upgrade", &p.name)?;
             let dir = crate::profiles::directory(&state.root, &p.id)?;
@@ -91,13 +106,14 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
         store.set(
             "preferences",
             &serde_json::to_string(&Settings {
+                channel: channel.into(),
                 developer: true,
                 gaming: true,
                 ..Default::default()
             })
             .unwrap(),
         )?;
-        store.set("upgrade_seed_version", "0.1.0")?;
+        store.set("upgrade_seed_version", old)?;
     }
     stage(app, "Seeding real profile cookies");
     check_cookies(app, true).await?;
@@ -129,8 +145,8 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     }
     stage(app, "Checking real signed update");
     let offered = crate::updater::check(app).await?;
-    if offered["version"] != "0.1.1" {
-        return Err("0.1.1 not detected".into());
+    if offered["version"].as_str() != Some(new) {
+        return Err(format!("{channel} update to {new} was not detected"));
     }
     stage(app, "Downloading and verifying signed update");
     let ready = crate::updater::download(app).await?;
@@ -139,13 +155,21 @@ async fn exercise(app: &AppHandle) -> Result<(), String> {
     }
     std::fs::write(
         state.root.join("verified.txt"),
-        "0.1.1 signature verified; corrupt/replay rejected",
+        format!("{channel} {new} signature verified; corrupt/replay rejected"),
     )
     .map_err(|e| e.to_string())?;
     // The real NSIS updater exits this process and restarts with the original argument.
     stage(app, "Starting signed NSIS installation");
     crate::updater::install(app)?;
     Err("Installer unexpectedly returned without restarting".into())
+}
+
+fn workspace_permission(profile: &crate::storage::Profile) -> &'static str {
+    match profile.workspace.as_deref() {
+        Some("work") => "allow",
+        Some("personal") => "deny",
+        _ => "ask",
+    }
 }
 
 async fn check_cookies(app: &AppHandle, seed: bool) -> Result<(), String> {
@@ -173,13 +197,13 @@ async fn check_cookies(app: &AppHandle, seed: bool) -> Result<(), String> {
                 .unwrap()
                 .tabs
                 .iter()
-                .any(|t| t.id == id && t.title == format!("cookie:{}", p.id) && !t.loading);
+                .any(|t| t.id == id && t.title == format!("cookie:{}:storage:{}", p.id, p.id) && !t.loading);
             if found {
                 break;
             }
             if std::time::Instant::now() > until {
                 return Err(format!(
-                    "Cookie persistence/isolation failed for profile {}",
+                    "Cookie/localStorage persistence or isolation failed for profile {}",
                     p.name
                 ));
             }

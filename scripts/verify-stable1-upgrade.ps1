@@ -1,12 +1,25 @@
 # The two normal installers use their real Windows paths on a clean hosted runner.
-param([Parameter(Mandatory=$true)][string]$Installer)
+param(
+  [Parameter(Mandatory=$true)][string]$Installer,
+  [switch]$RequireSignature
+)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:ELIX_RUNNER_ENVIRONMENT -ne 'github-hosted') {
   throw 'Use a disposable GitHub-hosted Windows runner.'
 }
+$version = (Get-Content 'package.json' -Raw | ConvertFrom-Json).version
+if ($env:RELEASE_VERSION -and $env:RELEASE_VERSION -ne $version) { throw 'Candidate version differs from release request.' }
+if (Test-Path "$Installer.sig") {
+  node scripts/verify-installer-signature.mjs $Installer $version
+  if ($LASTEXITCODE -ne 0) { throw 'Candidate installer signature verification failed.' }
+} elseif ($RequireSignature) {
+  throw 'Missing updater signature for the candidate installer.'
+}
+# Verify that upgrading across channels preserves the user's existing choice.
+$existingChannel = if ($version -match '-dev\.') { 'stable' } else { 'developer' }
 $root = Join-Path $env:LOCALAPPDATA 'no.projectelix.browser'
-$out = Join-Path $env:RUNNER_TEMP 'stable1-profile-review'
-$installDir = Join-Path $env:RUNNER_TEMP 'ELIX-Stable1-profile-install'
+$out = Join-Path $env:RUNNER_TEMP 'profile-upgrade-review'
+$installDir = Join-Path $env:RUNNER_TEMP 'ELIX-profile-upgrade-install'
 if ((Test-Path $root) -or (Test-Path $out) -or (Test-Path $installDir)) {
   throw 'The runner already contains an ELIX profile or qualification directory.'
 }
@@ -20,13 +33,13 @@ if ((Get-FileHash $old -Algorithm SHA256).Hash -ne 'bc03406019e6eb767aee5c571165
 ./scripts/verify-installed-ui.ps1 -Installer $old -OutputDirectory "$out/alpha9" -InstallDirectory $installDir
 $oldInfo = Get-Content "$out/alpha9/ready-result.json" -Raw | ConvertFrom-Json
 if ($oldInfo.product_version -ne '0.1.4-dev.9') { throw 'Unexpected installed baseline executable.' }
-python scripts/stable1-profile.py seed $root
+python scripts/stable1-profile.py seed $root --channel $existingChannel
 if ($LASTEXITCODE -ne 0) { throw 'Unable to seed the Alpha 9 profile.' }
-./scripts/verify-installed-ui.ps1 -Installer $Installer -OutputDirectory "$out/stable1" -InstallDirectory $installDir -VerifyStable1Downloads
+./scripts/verify-installed-ui.ps1 -Installer $Installer -OutputDirectory "$out/candidate" -InstallDirectory $installDir -VerifyReleaseDownloads
 $installed = (Get-FileHash "$installDir/elix-browser.exe").Hash
-$upgradedInfo = Get-Content "$out/stable1/ready-result.json" -Raw | ConvertFrom-Json
-if ($upgradedInfo.product_version -ne '0.1.4') { throw 'Upgrade did not replace the Alpha 9 executable.' }
-python scripts/stable1-profile.py verify $root
+$upgradedInfo = Get-Content "$out/candidate/ready-result.json" -Raw | ConvertFrom-Json
+if ($upgradedInfo.product_version -ne $version) { throw 'Upgraded executable has the wrong candidate version.' }
+python scripts/stable1-profile.py verify $root --channel $existingChannel
 if ($LASTEXITCODE -ne 0) { throw 'Upgrading the existing Alpha 9 profile failed.' }
 $evidence = [ordered]@{
   source_sha = $env:GITHUB_SHA
@@ -35,18 +48,15 @@ $evidence = [ordered]@{
   installer_sha256 = (Get-FileHash $Installer -Algorithm SHA256).Hash
   exe_sha256 = $installed
   baseline = '0.1.4-dev.9'
-  version = '0.1.4'
+  version = $version
+  preserved_channel = $existingChannel
   profile_upgrade = 'passed'
   elix_34_github_release_and_fresh_cdn = 'passed'
 }
 if (Test-Path "$Installer.sig") {
-  node scripts/verify-installer-signature.mjs $Installer '0.1.4'
-  if ($LASTEXITCODE -ne 0) { throw 'Candidate installer signature verification failed.' }
   $evidence.signature = (Get-Content "$Installer.sig" -Raw).Trim()
-} elseif ($env:RELEASE_CHANNEL -eq 'stable') {
-  throw 'Missing updater signature for the candidate installer.'
 }
-$evidence | ConvertTo-Json | Set-Content -Encoding UTF8 "$out/stable1-profile.json"
+$evidence | ConvertTo-Json | Set-Content -Encoding UTF8 "$out/profile-upgrade.json"
 # Leave the following clean-install check an empty machine. Keep the synthetic
 # upgraded profile with its screenshots in the isolated temp directory.
 $remove = Start-Process "$installDir/uninstall.exe" -ArgumentList @('/S', "_?=$installDir") -PassThru

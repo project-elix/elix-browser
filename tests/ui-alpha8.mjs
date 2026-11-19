@@ -23,7 +23,11 @@ try {
   const tab=(id,url,title)=>({id,url,title,private:false,pinned:false,workspace:'Personlig',group:'',muted:false,loading:false,suspended:false,last_active:0,load_ms:null,http_status:null,navigation_error:null,favicon:null});
   const state={session:{tabs:[tab('original','https://example.com/form','Original page'),tab('peer','https://example.com/video','Other page'),tab('third','https://example.com/third','Third page')],active:'original',workspace:'Personlig',workspaces:['Personlig','Jobb'],closed:[],split:null},profiles:[{id:'test-profile',name:'Andreas'},{id:'other-profile',name:'Andre'}],profile:'test-profile',settings:{appearance:{accent:'#43d3e8',background:'#080b12',density:'comfortable',radius:12,reduce_motion:false,gradient:true,sidebar:'expanded',bookmark_bar:'toolbar'},developer:false,gaming:false,channel:'developer',suspend_minutes:0,password_autosave:false,autofill:false},version:'0.1.2-dev.8',updater_configured:true};
   const entry=(id,title,group='')=>({id,title,url:'https://example.com/'+id,group,favicon:null,time:'2026-11-17T12:00:00Z'});
+  const restored=sessionStorage.getItem('fixture-restart');
+  if(restored)Object.assign(state,JSON.parse(restored));
   const libraries={'test-profile':{items:[entry(1,'ELIX bookmark'),entry(2,'Work bookmark','Arbeid')],groups:['Arbeid','Tom gruppe']},'other-profile':{items:[entry(9,'Other profile bookmark')],groups:['Andre ting']}};
+  if(restored)Object.assign(libraries,JSON.parse(sessionStorage.getItem('fixture-libraries')||'{}'));
+  const savedSessions=new Map();
   let serial=0;const callbacks=new Map(),listeners=new Map(),calls=[];
   const emit=(event,payload)=>{for(const [id,v]of listeners)if(v.event===event)callbacks.get(v.handler)?.({event,id,payload:structuredClone(payload)})};
   window.__uiTest={state,libraries,calls,emit};window.isTauri=true;
@@ -36,7 +40,18 @@ try {
    const lib=libraries[state.profile];
    if(['bookmark_groups','create_bookmark_group','rename_bookmark_group','remove_bookmark_group','move_bookmark','edit_bookmark'].includes(r.action)&&r.profile!==state.profile)throw Error('Stale or missing profile');
    switch(r.action){
-    case 'snapshot':return structuredClone(state);
+    case 'snapshot':return {...structuredClone(state),tab_layout:JSON.parse(sessionStorage.getItem('layout-'+state.profile)||'null')};
+    case 'save_tab_layout':{
+     if(r.profile!==state.profile)throw Error('Stale layout profile');
+     sessionStorage.setItem('layout-'+r.profile,JSON.stringify(r.layout));return;
+    }
+    case 'saved_sessions':if(r.profile!==state.profile)throw Error('Wrong saved-session profile');return structuredClone(savedSessions.get(r.profile)||[]);
+    case 'save_session':{
+     if(r.profile!==state.profile)throw Error('Wrong save profile');
+     const rows=savedSessions.get(r.profile)||[],previous=rows.find(x=>x.name===r.name);
+     savedSessions.set(r.profile,[{name:r.name,revision:(previous?.revision||0)+1,updated:'2026-11-18'},...rows.filter(x=>x.name!==r.name)]);return;
+    }
+    case 'open_session':if(r.profile!==state.profile||!savedSessions.get(r.profile)?.some(s=>s.name===r.name))throw Error('Unknown session');return;
     case 'list_entries':return r.kind==='bookmarks'?structuredClone(lib.items):[];
     case 'bookmark_groups':return structuredClone(lib.groups);
     case 'downloads':case 'site_permissions':return [];
@@ -46,10 +61,25 @@ try {
     case 'media':return {supported:true,player:null,fullscreen:null};
     case 'extensions':return {supported:true,extensions:[]};
     case 'window_ready':case 'bounds':return;
-    case 'activate':state.session.active=r.id;break;
+    case 'tab_preview':return 'data:image/jpeg;base64,/9j/2Q==';
+    case 'activate':state.session.active=r.id;state.session.workspace=state.session.tabs.find(t=>t.id===r.id)?.workspace||'Personlig';break;
     case 'navigate':{const t=state.session.tabs.find(t=>t.id===r.id);t.url=r.url;break;}
     case 'settings':state.settings=r.settings;return;
+    case 'clear_passwords':
+      if (!r.consent || r.profile !== state.profile) throw Error('Stale or unconfirmed password deletion');
+      return;
     case 'switch_profile':state.profile=r.id;return;
+    case 'workspace_profile':{
+      const names = {work:'Jobb',personal:'Privat',gaming:'Gaming'};
+      if (!names[r.preset]) throw Error('Unknown workspace profile');
+      let profile = state.profiles.find(p=>p.workspace===r.preset);
+      if (!profile) {
+        profile = {id:'fixture-'+r.preset,name:names[r.preset],workspace:r.preset};
+        state.profiles.push(profile);
+        libraries[profile.id] = {items:[],groups:[]};
+      }
+      return structuredClone(profile);
+    }
     case 'new_tab':{const id='new-'+(++serial),t=tab(id,r.url,'ELIX');t.private=!!r.private;state.session.tabs.push(t);state.session.active=id;emit('browser-changed',state.session);return id;}
     case 'split':state.session.split=r.other?[state.session.active,r.other]:null;break;
     case 'close_tab':state.session.tabs=state.session.tabs.filter(t=>t.id!==r.id);state.session.active=state.session.tabs.at(-1).id;break;
@@ -144,6 +174,17 @@ try {
  await quick.getByRole('button',{name:'Delt visning',exact:true}).waitFor();
  assert.equal(await page.evaluate(()=>window.__uiTest.state.session.tabs.length),beforeTabs,'single gear click does not navigate');
  for(const name of ['Delt visning','Faner','Arbeidsområde'])assert.equal(await quick.getByRole('button',{name,exact:true}).getAttribute('aria-expanded'),'false');
+ await quick.getByRole('button',{name:'Lagrede økter'}).click();
+ const sourceSession=await page.evaluate(()=>structuredClone(window.__uiTest.state.session));
+ for(const revision of [1,2]){
+  await quick.getByLabel('Øktnavn').fill('Dagvakt');
+  await quick.getByRole('button',{name:'Lagre økt',exact:true}).click();
+  await quick.getByText(`Dagvakt · v${revision}`,{exact:true}).waitFor();
+ }
+ await quick.getByRole('button',{name:'Åpne økten Dagvakt'}).click();
+ await quick.getByText('Åpnet «Dagvakt» i et nytt vindu.').waitFor();
+ assert.deepEqual(await page.evaluate(()=>window.__uiTest.state.session),sourceSession);
+ console.log('PASS: saving two named session revisions and opening a profile-scoped separate window through the shell');
  await quick.getByRole('button',{name:'Delt visning',exact:true}).click();
  await quick.getByRole('button',{name:'Åpne delt visning',exact:true}).click();
  await page.waitForFunction(()=>window.__uiTest.state.session.split?.length===2);
@@ -239,6 +280,25 @@ try {
  await groupHeading.click();
  await row('peer').waitFor();
  console.log('PASS: drag into collapsed tab group with visible target and membership update');
+ const moveTo=async locator=>{const r=await locator.boundingBox();assert.ok(r,'drop target is visible');await page.mouse.move(r.x+r.width/2,r.y+r.height/2,{steps:6})};
+ await grab(strip('third'));
+ await moveTo(strip('original').locator('[data-tab-group-chip]'));
+ await page.mouse.up();
+ await page.waitForFunction(()=>window.__uiTest.state.session.tabs.find(t=>t.id==='third').group==='Lesing');
+ for(const cancel of [true,false]){
+  const source=await grab(strip('third'));
+  await page.mouse.move(source.x+source.width/2,source.y+source.height+12,{steps:3});
+  await page.locator('.split-drop-zone').waitFor();
+  await moveTo(page.locator('.split-drop-zone'));
+  await page.locator('.split-drop-active').waitFor();
+  if(cancel)await page.keyboard.press('Escape');
+  await page.mouse.up();
+  if(cancel)assert.equal(await page.evaluate(()=>window.__uiTest.state.session.split),null);
+ }
+ await page.waitForFunction(()=>window.__uiTest.state.session.split?.join(',')==='original,third');
+ await page.keyboard.press('Control+Alt+s');
+ await page.waitForFunction(()=>!window.__uiTest.state.session.split);
+ console.log('PASS: tab strip group target, split drop and Escape cancellation');
  // Extract each possible member, including the last member dropped in place beside an ungrouped tab.
  const originalSession=await page.evaluate(()=>structuredClone(window.__uiTest.state.session));
  for(const source of ['original','peer','third']){
@@ -307,6 +367,21 @@ try {
  await library.getByRole('button',{name:'Bokmerkegruppe Gaming',exact:true}).waitFor();
  assert.ok(await page.evaluate(()=>window.__uiTest.libraries['test-profile'].groups.includes('Gaming')),'empty groups persist through list refresh');
  const bookmark=library.locator('.bookmark-open').filter({hasText:'ELIX bookmark'});
+ const folder=library.getByRole('button',{name:'Bokmerkegruppe Tom gruppe',exact:true});
+ await folder.click();
+ for(const cancel of [true,false]){
+  await grab(bookmark);
+  await moveTo(folder);
+  await library.locator('[data-bookmark-hover]').waitFor();
+  if(cancel)await page.keyboard.press('Escape');
+  await page.mouse.up();
+  if(cancel)assert.equal(await page.evaluate(()=>window.__uiTest.libraries['test-profile'].items.find(i=>i.id===1).group),'');
+ }
+ await page.waitForFunction(()=>window.__uiTest.libraries['test-profile'].items.find(i=>i.id===1).group==='Tom gruppe');
+ assert.equal(await folder.getAttribute('aria-expanded'),'false');
+ await folder.click();
+ await bookmark.waitFor();
+ console.log('PASS: bookmark drag into collapsed empty group and Escape cancellation');
  await bookmark.click({button:'right'});
  await library.getByRole('menuitem',{name:'Flytt til gruppe …',exact:true}).click();
  await library.getByRole('combobox',{name:'Flytt til bokmerkegruppe',exact:true}).selectOption('Gaming');
@@ -379,9 +454,115 @@ try {
  assert.equal(await library.getByRole('button',{name:'Bokmerkegruppe Arbeid',exact:true}).count(),0);
  await library.getByRole('button',{name:'Bokmerkegruppe Andre ting',exact:true}).waitFor();
  assert.equal(await library.getByRole('menu',{name:'Bokmerkevalg',exact:true}).count(),0);
- assert.deepEqual(await page.evaluate(()=>window.__uiTest.calls.filter(c=>['create_bookmark_group','rename_bookmark_group','remove_bookmark_group','move_bookmark','edit_bookmark'].includes(c.action)).map(c=>c.profile)),Array(5).fill('test-profile'));
+ assert.deepEqual(await page.evaluate(()=>window.__uiTest.calls.filter(c=>['create_bookmark_group','rename_bookmark_group','remove_bookmark_group','move_bookmark','edit_bookmark'].includes(c.action)).map(c=>c.profile)),Array(6).fill('test-profile'));
 
+ await gear.dblclick();
+ await page.getByRole('button',{name:'Passord og autofyll',exact:true}).click();
+ await page.getByRole('heading',{name:'Lagrede passord i «Andre»'}).waitFor();
+ const clearPasswords = page.getByRole('button',{name:'Slett alle lagrede passord i denne profilen'});
+ const confirmDeletion = page.getByRole('button',{name:'Ja, slett passordene'});
+ await clearPasswords.click();
+ await page.getByRole('alert').filter({hasText:'«Andre»'}).waitFor();
+ await page.getByRole('button',{name:'Avbryt',exact:true}).click();
+ assert.equal(await confirmDeletion.count(),0);
+ await clearPasswords.click();
+ // A new snapshot can select another profile while its predecessor's confirmation is open.
+ await page.evaluate(()=>{window.__uiTest.state.profile='test-profile'});
+ await page.getByRole('checkbox',{name:/Autofyll navn og adresser/}).click();
+ await page.getByRole('button',{name:'Passord og autofyll',exact:true}).click();
+ await page.getByRole('heading',{name:'Lagrede passord i «Andreas»'}).waitFor();
+ assert.equal(await confirmDeletion.count(),0,'a profile switch discards the previous confirmation');
+ assert.equal(await page.evaluate(()=>window.__uiTest.calls.filter(c=>c.action==='clear_passwords').length),0);
+ await clearPasswords.click();
+ await confirmDeletion.click();
+ await page.getByRole('status').filter({hasText:'Lagrede passord er slettet i «Andreas».'}).waitFor();
+ assert.deepEqual(await page.evaluate(()=>window.__uiTest.calls.filter(c=>c.action==='clear_passwords')),
+   [{action:'clear_passwords',profile:'test-profile',consent:true}]);
+ console.log('PASS: named password profile, cancel, stale confirmation and scoped deletion request');
+ await page.getByRole('button',{name:'Profiler',exact:true}).filter({hasText:'Profiler'}).click();
+ const profileSelector = page.locator('.settings-content').getByRole('combobox',{name:'Arbeidsområdeprofil'});
+ await profileSelector.selectOption('work');
+ await page.waitForFunction(()=>window.__uiTest.state.profile==='fixture-work');
+ await gear.click();
+ await quick.getByRole('button',{name:'Arbeidsområde',exact:true}).click();
+ const quickProfile = quick.getByRole('combobox',{name:'Arbeidsområdeprofil'});
+ assert.equal(await quickProfile.inputValue(),'work');
+ await quickProfile.selectOption('gaming');
+ await page.waitForFunction(()=>window.__uiTest.state.profile==='fixture-gaming');
+ assert.equal(await page.evaluate(()=>window.__uiTest.state.session.workspace),'Personlig');
+ console.log('PASS: switch isolated workspace profiles from settings and quick menu without renaming tab workspaces');
 
+ // Both orientations display the same tab model, including the order produced by pointer drag.
+ await page.getByRole('button',{name:'Farger og utseende',exact:true}).click();
+ await page.getByRole('switch',{name:'Vertikale faner',exact:true}).check();
+ await page.getByRole('button',{name:'Lagre faneoppsett',exact:true}).click();
+ const rails=page.getByRole('complementary',{name:'Vertikale faner',exact:true});
+ await rails.waitFor();
+ assert.equal(await page.locator('.tab-scroll').count(),0);
+ const currentRows=()=>rails.locator('[data-tab-id]').evaluateAll(items=>items.map(item=>item.dataset.tabId));
+ const assertModel=async()=>{
+  const session=await page.evaluate(()=>window.__uiTest.state.session);
+  assert.deepEqual(await currentRows(),session.tabs.filter(t=>(t.workspace||'Personlig')===(session.workspace||'Personlig')).map(t=>t.id));
+  assert.equal(await rails.locator('.selected[data-tab-id]').getAttribute('data-tab-id'),session.active);
+ };
+ await assertModel();
+ assert.equal(await rails.evaluate(el=>el.getBoundingClientRect().right<=document.querySelector('.viewport').getBoundingClientRect().left+1),true);
+ const order=await currentRows();
+ const moving=rails.locator('[data-tab-id]').last();
+ await moving.scrollIntoViewIfNeeded();
+ await grab(moving);
+ const firstBox=await rails.locator('[data-tab-id]').first().boundingBox();
+ await page.mouse.move(firstBox.x+45,firstBox.y+1,{steps:12});
+ await page.mouse.up();
+ await page.waitForFunction(last=>window.__uiTest.state.session.tabs[0].id===last,order.at(-1));
+ await assertModel();
+ await page.getByLabel('Plassering av faner').selectOption('right');
+ await page.getByRole('button',{name:'Lagre faneoppsett',exact:true}).click();
+ await page.locator('.vertical-tab-rail.rail-right').waitFor();
+ assert.equal(await rails.evaluate(el=>el.getBoundingClientRect().left>=document.querySelector('.viewport').getBoundingClientRect().right-1),true);
+ await assertModel();
+ const separator=rails.getByRole('separator');
+ const originalWidth=await separator.getAttribute('aria-valuenow');
+ await separator.focus();
+ await page.keyboard.press('ArrowLeft');
+ await page.waitForFunction(w=>document.querySelector('[role=separator]')?.getAttribute('aria-valuenow')===String(Number(w)+10),originalWidth);
+ const leftBtn=rails.getByRole('button',{name:'Skjul vertikale faner'});
+ await leftBtn.click();
+ await page.locator('.tab-scroll').waitFor();
+ await page.getByRole('button',{name:'Vis vertikale faner',exact:true}).click();
+ await rails.waitFor();
+ await page.evaluate(()=>{
+  const {profile,profiles,session}=window.__uiTest.state;
+  sessionStorage.setItem('fixture-restart',JSON.stringify({profile,profiles,session}));
+  sessionStorage.setItem('fixture-libraries',JSON.stringify(window.__uiTest.libraries));
+ });
+ await page.reload();
+ await page.locator('.vertical-tab-rail.rail-right').waitFor();
+ assert.equal(await rails.getByRole('separator').getAttribute('aria-valuenow'),String(Number(originalWidth)+10));
+ await assertModel();
+ console.log('PASS: left/right vertical tabs, shared reorder, active tab, profile layout, hide/show and restored width');
+ const countBeforeSearch = await page.evaluate(()=>{
+   const {state,emit} = window.__uiTest;
+   const twin = {...state.session.tabs.find(t=>t.url.startsWith('https:')), id:'duplicate-title-in-work', workspace:'Research', title:'Delt tittel', url:'https://example.org/reference'};
+   state.session.tabs.push({...twin,id:'duplicate-title-here',workspace:'Personlig',url:'https://example.com/reference'},twin);
+   state.session.workspaces.push('Research');
+   emit('browser-changed',state.session);
+   return state.session.tabs.length;
+ });
+ await page.keyboard.press('Control+Shift+A');
+ const findTab = page.getByRole('textbox',{name:'Søk blant alle åpne faner'});
+ await findTab.fill('Delt tittel');
+ const tabResults = page.locator('#sidebar-tab-search li button');
+ assert.equal(await tabResults.count(),2);
+ await findTab.fill('example.org/reference');
+ assert.equal(await tabResults.count(),1);
+ await findTab.fill('Research');
+ await page.locator('.tab-search-preview img[alt^="Forhåndsvisning"]').waitFor();
+ await findTab.press('Enter');
+ await page.waitForFunction(()=>window.__uiTest.state.session.active==='duplicate-title-in-work');
+ assert.equal(await page.evaluate(()=>window.__uiTest.state.session.workspace),'Research');
+ assert.equal(await page.evaluate(()=>window.__uiTest.state.session.tabs.length),countBeforeSearch);
+ console.log('PASS: tab search across workspaces with duplicate titles, URL, favicon fallback, preview and keyboard activation');
  assert.deepEqual(errors,[]);
  console.log('PASS: bookmark CRUD/group/move, keyboard context, native content bounds and profile isolation');
  console.log('PASS Alpha 8 shell UI; native behavior is mocked.');

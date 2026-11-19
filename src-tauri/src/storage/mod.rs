@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -10,6 +10,8 @@ pub const SITE_PERMISSIONS: &[&str] = &[
 pub struct Profile {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -89,6 +91,25 @@ impl Settings {
             && ["hidden", "sidebar", "toolbar"].contains(&self.appearance.bookmark_bar.as_str())
     }
 }
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum TabSide { Left, Right }
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug)]
+pub struct TabLayout {
+    pub vertical: bool,
+    pub side: TabSide,
+    pub width: u16,
+}
+
+impl Default for TabLayout {
+    fn default() -> Self {
+        Self { vertical: false, side: TabSide::Left, width: 240 }
+    }
+}
+
+mod saved_sessions;
+
 pub struct Store {
     pub conn: Connection,
 }
@@ -176,8 +197,12 @@ impl Store {
                 FOREIGN KEY(bookmark,profile) REFERENCES bookmarks(id,profile) ON DELETE CASCADE,
                 FOREIGN KEY(profile,name) REFERENCES bookmark_groups(profile,name) ON UPDATE CASCADE ON DELETE CASCADE);")
             .map_err(|e| e.to_string())?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS workspace_profiles(
+            preset TEXT PRIMARY KEY, profile TEXT NOT NULL UNIQUE REFERENCES profiles(id) ON DELETE CASCADE);")
+            .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         let store = Self { conn };
+        store.init_named_sessions()?;
         if store.profiles()?.is_empty() {
             let p = store.create_profile("Personlig")?;
             store.set("active_profile", &p.id)?;
@@ -197,13 +222,15 @@ impl Store {
     pub fn profiles(&self) -> Result<Vec<Profile>, String> {
         let mut q = self
             .conn
-            .prepare("SELECT id,name FROM profiles ORDER BY rowid")
+            .prepare("SELECT p.id,p.name,w.preset FROM profiles p
+                LEFT JOIN workspace_profiles w ON w.profile=p.id ORDER BY p.rowid")
             .map_err(|e| e.to_string())?;
         let items = q
             .query_map([], |r| {
                 Ok(Profile {
                     id: r.get(0)?,
                     name: r.get(1)?,
+                    workspace: r.get(2)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -212,6 +239,10 @@ impl Store {
         Ok(items)
     }
     pub fn create_profile(&self, name: &str) -> Result<Profile, String> {
+        Self::insert_profile(&self.conn, name)
+    }
+
+    fn insert_profile(conn: &Connection, name: &str) -> Result<Profile, String> {
         let name = name.trim();
         if name.is_empty() || name.len() > 60 {
             return Err("Profilnavnet må være mellom 1 og 60 tegn".into());
@@ -219,12 +250,51 @@ impl Store {
         let p = Profile {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.into(),
+            workspace: None,
         };
-        self.conn
+        conn
             .execute("INSERT INTO profiles VALUES(?1,?2)", params![p.id, p.name])
             .map_err(|e| e.to_string())?;
         Ok(p)
     }
+
+    pub fn workspace_profile(&mut self, preset: &str) -> Result<Profile, String> {
+        let name = match preset {
+            "work" => "Jobb",
+            "personal" => "Privat",
+            "gaming" => "Gaming",
+            _ => return Err("Ukjent arbeidsområdeprofil".into()),
+        };
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let existing = tx.query_row("SELECT p.id,p.name FROM workspace_profiles w
+            JOIN profiles p ON p.id=w.profile WHERE w.preset=?1", [preset], |row| {
+            Ok(Profile { id: row.get(0)?, name: row.get(1)?, workspace: Some(preset.into()) })
+        }).optional().map_err(|e| e.to_string())?;
+        if let Some(profile) = existing {
+            return Ok(profile);
+        }
+        let mut profile = Self::insert_profile(&tx, name)?;
+        tx.execute("INSERT INTO workspace_profiles(preset,profile) VALUES(?1,?2)", params![preset,profile.id])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        profile.workspace = Some(preset.into());
+        Ok(profile)
+    }
+    pub fn tab_layout(&self, profile: &str) -> TabLayout {
+        self.get(&format!("tab_layout:{profile}"))
+            .and_then(|json| serde_json::from_str::<TabLayout>(&json).ok())
+            .filter(|layout| (160..=420).contains(&layout.width))
+            .unwrap_or_default()
+    }
+
+    pub fn save_tab_layout(&self, profile: &str, layout: TabLayout) -> Result<(), String> {
+        if !(160..=420).contains(&layout.width) {
+            return Err("Fanebredden må være mellom 160 og 420 piksler.".into());
+        }
+        self.set(&format!("tab_layout:{profile}"), &serde_json::to_string(&layout).map_err(|e| e.to_string())?)
+    }
+
     pub fn settings(&self) -> Settings {
         self.get("preferences")
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -436,6 +506,59 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertical_layout_survives_reopen_and_is_scoped_to_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("browser.sqlite");
+        let db = Store::open(&path).unwrap();
+        let right = TabLayout { vertical: true, side: TabSide::Right, width: 320 };
+        let hidden = TabLayout { vertical: false, side: TabSide::Left, width: 185 };
+        db.save_tab_layout("personal", right).unwrap();
+        db.save_tab_layout("work", hidden).unwrap();
+        assert!(db.save_tab_layout("personal", TabLayout { width: 0, ..right }).is_err());
+        drop(db);
+        let db = Store::open(&path).unwrap();
+        assert_eq!(db.tab_layout("personal"), right);
+        assert_eq!(db.tab_layout("work"), hidden);
+        assert_eq!(db.tab_layout("legacy"), TabLayout::default());
+    }
+
+    #[test]
+    fn workspace_identities_and_site_permissions_survive_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("profiles.db");
+        let origin = "https://example.com";
+        let mut store = Store::open(&db).unwrap();
+        let previous = store.create_profile("Jobb").unwrap();
+        let presets = [("work","allow"), ("personal","deny"), ("gaming","ask")];
+        let mut ids = Vec::new();
+        for (preset, decision) in presets {
+            let p = store.workspace_profile(preset).unwrap();
+            assert!(uuid::Uuid::parse_str(&p.id).is_ok());
+            assert_ne!(p.id, previous.id);
+            assert!(!ids.contains(&p.id));
+            assert_eq!(store.permission(&p.id, origin, "camera"), "ask");
+            store.set_permission(&p.id, origin, "camera", decision).unwrap();
+            store.save_session(&p.id, preset).unwrap();
+            ids.push(p.id);
+        }
+        assert!(store.workspace_profile("unknown").is_err());
+        store.set("active_profile", &ids[2]).unwrap();
+        drop(store);
+        let mut reopened = Store::open(&db).unwrap();
+        assert_eq!(reopened.get("active_profile").as_ref(), Some(&ids[2]));
+        let profiles = reopened.profiles().unwrap();
+        assert_eq!(profiles.len(), 5);
+        for ((preset, decision), id) in presets.into_iter().zip(ids) {
+            assert_eq!(reopened.workspace_profile(preset).unwrap().id, id);
+            assert_eq!(profiles.iter().find(|p| p.id == id).unwrap().workspace.as_deref(), Some(preset));
+            assert_eq!(reopened.permission(&id, origin, "camera"), decision);
+            assert_eq!(reopened.load_session(&id).as_deref(), Some(preset));
+        }
+        assert_eq!(reopened.permission(&previous.id, origin, "camera"), "ask");
+        assert_eq!(reopened.load_session(&previous.id), None);
+    }
     #[test]
     fn upgrade_preserves_and_isolates_data() {
         let dir = tempfile::tempdir().unwrap();

@@ -58,6 +58,33 @@ pub fn detached_root() -> Result<std::path::PathBuf, String> {
 pub fn start_detached(app: AppHandle) {
     boot_stage(&app, "detached_test_started");
     std::thread::spawn(move || {
+        if std::env::var_os("ELIX_SMOKE_SAVED_SESSION").is_some() {
+            let state = app.state::<AppState>();
+            let result = (|| -> Result<(),String> {
+                let (active, peer) = {
+                    let s = state.session.lock().unwrap();
+                    let pair = s.split.clone().ok_or("Missing restored split")?;
+                    if s.tabs.len()!=3 || s.tabs[0].workspace!="Personlig" || s.tabs[1].group!="Reading"
+                        || s.active!=s.tabs[2].id || pair!=[s.tabs[2].id.clone(),s.tabs[1].id.clone()] {
+                        return Err("Saved session changed order, workspace, group, selection or split".into());
+                    }
+                    (pair[0].clone(),pair[1].clone())
+                };
+                wait_title_or_error(&app,&active,"ELIX native two")?;
+                wait_title_or_error(&app,&peer,"ELIX native one")?;
+                wait(|| shell_bool(&app,"document.querySelectorAll('.tab-scroll .tab').length===2").unwrap_or(false))?;
+                #[cfg(windows)]
+                wait(|| [&active,&peer].iter().all(|id| app.get_webview(id).is_some_and(|view| native_view_visible(&view).unwrap_or(false))))?;
+                Ok(())
+            })();
+            let answer = result.map(|_| "PASS".to_string()).unwrap_or_else(|err|format!("FAIL: {err}"));
+            let _ = state.store.lock().unwrap().set("smoke_named_window_id", &state.window_id);
+            let _ = state.store.lock().unwrap().set("smoke_named_window_result",&answer);
+            // The launcher receives the browser-ready acknowledgement before the child closes.
+            wait(|| state.store.lock().unwrap().get("smoke_named_window_done").as_deref()==Some("true")).ok();
+            let _ = crate::window::perform(&app, crate::window::Action::Close);
+            return;
+        }
         let result = (|| -> Result<(), String> {
             let state = app.state::<AppState>();
             let id = state.session.lock().unwrap().active.clone();
@@ -79,6 +106,24 @@ pub fn start_detached(app: AppHandle) {
                 return Err("Transferred window lost tab metadata".into());
             }
             drop(session);
+            #[cfg(windows)]
+            {
+                // Leave an exposed strip beyond the drag source's right edge.
+                app.get_window("main").ok_or("Missing existing target window")?
+                    .set_position(tauri::PhysicalPosition::new(900, 0)).map_err(|e| e.to_string())?;
+                state.store.lock().unwrap().set("smoke_transfer_target", &std::process::id().to_string())?;
+                wait(|| state.store.lock().unwrap().get("smoke_transfer_confirm").as_deref() == Some("yes"))?;
+                let incoming = {
+                    let session = state.session.lock().unwrap();
+                    if session.tabs.len() != 2 || !session.tabs.iter().any(|tab| tab.id == id) {
+                        return Err("Drag into existing window replaced its session or opened a third window".into());
+                    }
+                    session.tabs.iter().find(|tab| tab.id == session.active && tab.group == "Existing window")
+                        .ok_or("Dragged tab is missing from the destination")?.id.clone()
+                };
+                wait_title_or_error(&app, &incoming, "ELIX native one")?;
+                browser::close_transferred(&app, &incoming)?;
+            }
             browser::persist(&app)?;
             Ok(())
         })();
@@ -93,6 +138,63 @@ pub fn start_detached(app: AppHandle) {
             .set(&format!("smoke_window:{}", state.window_id), &message);
         let _ = crate::window::perform(&app, crate::window::Action::Close);
     });
+}
+
+#[cfg(windows)]
+fn saved_window_test(app: &AppHandle, origin: &str) -> Result<(),String> {
+    let state=app.state::<AppState>();
+    let profile=state.profile.lock().unwrap().clone();
+    let original=state.session.lock().unwrap().active.clone();
+    let mut left=browser::Tab::new(format!("{origin}/one")); left.workspace="Jobb".into(); left.group="Reading".into();
+    let mut right=browser::Tab::new(format!("{origin}/two")); right.workspace="Jobb".into();
+    let mut private=browser::Tab::new(format!("{origin}/private-secret")); private.private=true;
+    let layout=browser::Session {
+        active:right.id.clone(), workspace:"Jobb".into(), workspaces:vec!["Personlig".into(),"Jobb".into()],
+        split:Some([right.id.clone(),left.id.clone()]),
+        tabs:vec![browser::Tab::new("elix://start".into()),private,left,right], ..Default::default()
+    };
+    let name="ELIX saved-window test";
+    let data=browser::saved_sessions::encode(&layout,true)?;
+    {
+        let store=state.store.lock().unwrap();
+        store.save_named_session(&profile,name,&data)?;
+        store.set("smoke_named_window_result","")?;
+        store.set("smoke_named_window_done","false")?;
+    }
+    tauri::async_runtime::block_on(browser::saved_sessions::open(app.clone(), profile, name.into()))?;
+    let completed=wait(|| state.store.lock().unwrap().get("smoke_named_window_result").is_some_and(|s| !s.is_empty()));
+    let store=state.store.lock().unwrap();
+    store.set("smoke_named_window_done","true")?;
+    completed?;
+    let result=store.get("smoke_named_window_result").unwrap_or_default();
+    let child = store.get("smoke_named_window_id").ok_or("Named session child did not report its window ID")?;
+    drop(store);
+    if result!="PASS" { return Err(format!("Named session child failed: {result}")); }
+    if state.session.lock().unwrap().active != original || app.get_webview(&original).is_none() {
+        return Err("Opening a saved session replaced the source page".into());
+    }
+    // Recover this fixture while its closed window is the only eligible window.
+    // A later test detaches and recovers a different tab in the same profile.
+    let owner_key = format!("window_pid:{child}");
+    wait(|| state.store.lock().unwrap().get(&owner_key).as_deref() == Some("0"))?;
+    let existing = state.session.lock().unwrap().tabs.iter()
+        .map(|tab| tab.id.clone()).collect::<std::collections::HashSet<_>>();
+    let expected: Vec<_> = layout.tabs.iter().filter(|tab| !tab.private).collect();
+    let count = browser::detach::recover_windows(app)?;
+    let recovered: Vec<_> = state.session.lock().unwrap().tabs.iter()
+        .filter(|tab| !existing.contains(&tab.id)).cloned().collect();
+    if count != expected.len() || recovered.len() != expected.len()
+        || recovered.iter().zip(expected).any(|(actual, saved)| actual.url != saved.url
+            || actual.workspace != saved.workspace || actual.group != saved.group || actual.private) {
+        return Err(format!("Named window recovery changed its regular tabs: recovered {count}"));
+    }
+    if browser::detach::recover_windows(app)? != 0 {
+        return Err("Named window recovery duplicated tabs".into());
+    }
+    for tab in recovered {
+        browser::close_transferred(app, &tab.id)?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -143,6 +245,23 @@ fn detached_window_test(app: &AppHandle, origin: &str) -> Result<(), String> {
             return Err("Transferred tab remained in source or reopen stack".into());
         }
     }
+    let mut child_pid = None;
+    wait(|| {
+        child_pid = state.store.lock().unwrap().get("smoke_transfer_target").and_then(|s| s.parse::<u32>().ok());
+        child_pid.is_some()
+    })?;
+    let second = tauri::async_runtime::block_on(browser::create(app.clone(), format!("{origin}/first")))?;
+    wait_title_or_error(app, &second, "ELIX native one")?;
+    browser::organization::group(app, &second, "Existing window", &workspace)?;
+    let rejected = browser::detach::Handoff {
+        tab: state.session.lock().unwrap().tabs.iter().find(|t| t.id == second).ok_or("Missing source")?.clone(),
+        profile: uuid::Uuid::new_v4().to_string(), saved_session: None, x: 0, y: 0
+    };
+    if tauri::async_runtime::block_on(browser::window_transfer::send(child_pid.unwrap(), &rejected)).is_ok() {
+        return Err("Existing window accepted a transfer from another profile".into());
+    }
+    drag_tab_outside(app, &second)?;
+    state.store.lock().unwrap().set("smoke_transfer_confirm", "yes")?;
     let mut report = None;
     wait(|| {
         let store = state.store.lock().unwrap();
@@ -187,8 +306,9 @@ fn detached_window_test(app: &AppHandle, origin: &str) -> Result<(), String> {
     {
         return Err("Saved transferred session lost tab metadata".into());
     }
-    if browser::detach::recover_windows(app)? != 1 {
-        return Err("Detached session recovery failed".into());
+    let recovered_count = browser::detach::recover_windows(app)?;
+    if recovered_count != 1 {
+        return Err(format!("Expected one tab from the closed transfer window, recovered {recovered_count}"));
     }
     let recovered = state
         .session
@@ -1279,9 +1399,23 @@ fn media_test(app: &AppHandle, origin: &str, return_tab: &str) -> Result<(), Str
     browser::media::perform(app, "show", None)?;
     wait(|| player.is_visible().unwrap_or(false))?;
     capture_native_screen("native-video-miniplayer.png")?;
+    browser::activate(app, &id)?;
+    wait(|| shell_bool(app, "!!document.querySelector('.media-source[role=dialog]')").unwrap_or(false))?;
+    if view.window().label() != "media-player" || !player.is_visible().unwrap_or(false)
+        || !player.is_always_on_top().unwrap_or(false)
+        || !view_bool(&view, "window.__elixMediaToken==='original'&&!document.querySelector('video').paused")? {
+        return Err("Selecting the source tab interrupted or returned the miniplayer".into());
+    }
+    shell.eval("document.querySelector('.media-source .primary').click()").map_err(|e| e.to_string())?;
+    wait(|| shell_bool(app, "!!document.querySelector('.media-source[role=region]')").unwrap_or(false))?;
+    if !browser::media::is_player(app, &id) { return Err("Keep closed the miniplayer".into()); }
+    browser::activate(app, return_tab)?;
+    wait(|| shell_bool(app, "!document.querySelector('.media-source')").unwrap_or(false))?;
+    browser::activate(app, &id)?;
+    wait(|| shell_bool(app, "!!document.querySelector('.media-source[role=dialog]')").unwrap_or(false))?;
     focus_before_move("return")?;
     progress("media: before return");
-    browser::media::perform(app, "return", None)?;
+    shell.eval("Array.from(document.querySelectorAll('.media-source button')).find(b=>b.textContent==='Avslutt minispilleren').click()").map_err(|e| e.to_string())?;
     progress("media: return completed; before ownership wait");
     wait(|| view.window().label() == "main" && !browser::media::is_player(app, &id))?;
     progress("media: return ownership verified; before page state check");
@@ -1902,9 +2036,31 @@ fn dormancy_isolation_test(app: &AppHandle, origin: &str) -> Result<(), String> 
         return Err("Dormancy accepted a pinned sibling".into());
     }
     browser::pin(app, sibling, false)?;
-    for _ in 0..2 {
+    let target_view = app.get_webview(target).ok_or("Missing dormancy target")?;
+    if !view_bool(&target_view, "(window.__elixCall=new RTCPeerConnection(),window.__elixCall.createDataChannel('meeting'),true)")?
+        || browser::suspend(app, target).is_ok() || app.get_webview(target).is_none() {
+        return Err("Dormancy accepted a silent WebRTC call".into());
+    }
+    if !view_bool(&target_view, "(window.__elixCall.close(),window.__elixCall.signalingState==='closed')")? {
+        return Err("Could not close dormancy meeting fixture".into());
+    }
+    for round in 0..2 {
         view_bool(&active_view, "(()=>{window.__elixDormancyBefore=window.__elixDormancyTicks;return true})()")?;
+        // Measure the application plus its WebView2 processes with the same
+        // tab IDs and page data on both sides. Renderer process reuse can
+        // retain resident pages, so record actual bytes without a fixed target.
+        let before = if round == 0 {
+            if !view_bool(&target_view, "(window.__elixDormancyBuffer=new Uint8Array(32*1024*1024),window.__elixDormancyBuffer.fill(7),true)")? {
+                return Err("Could not allocate dormancy memory fixture".into());
+            }
+            Some(app.state::<AppState>().metrics.lock().unwrap().sample().memory_bytes)
+        } else { None };
         browser::suspend(app, target)?;
+        if let Some(before) = before {
+            std::thread::sleep(Duration::from_millis(750));
+            let after = app.state::<AppState>().metrics.lock().unwrap().sample().memory_bytes;
+            progress(&format!("dormancy RAM: same 3 fixture tabs, 1 parked, 32 MiB fixture; before={before} bytes after={after} bytes"));
+        }
         {
             let state = app.state::<AppState>();
             let session = state.session.lock().unwrap();
@@ -1990,6 +2146,18 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
                         .is_some_and(|icon| icon.starts_with("data:image/png;base64,"))
             })
     })?;
+    #[cfg(windows)]
+    {
+        let url = format!("{origin}/one");
+        wait(|| app.state::<AppState>().session.lock().unwrap().tabs.iter()
+            .any(|tab| tab.id == first && tab.url == url && !tab.loading))?;
+        let preview = tauri::async_runtime::block_on(browser::tab_preview::capture(app, &first, &url));
+        if !preview.is_some_and(|value| value.starts_with("data:image/jpeg;base64,/9j/") && value.len() > 128) {
+            return Err("The trusted shell did not receive a native WebView2 JPEG preview".into());
+        }
+        let stale = tauri::async_runtime::block_on(browser::tab_preview::capture(app, &first, &format!("{origin}/old")));
+        if stale.is_some() { return Err("A stale URL returned a preview".into()); }
+    }
     progress("history shortcut: before");
     #[cfg(windows)]
     history_shortcut_test(app, &first)?;
@@ -1997,7 +2165,10 @@ fn exercise(app: &AppHandle) -> Result<(), String> {
     progress("new-tab focus: before");
     #[cfg(windows)]
     new_tab_focus_test(app, &first)?;
-    progress("new-tab focus: after");
+    progress("new-tab focus: after; saved session window: before");
+    #[cfg(windows)]
+    saved_window_test(app, &origin)?;
+    progress("saved session window: after");
     browser::navigate(app, &first, &format!("{origin}/one"))?;
     wait(|| title(app, &first, "ELIX native one"))?;
     progress("sidebar: before");

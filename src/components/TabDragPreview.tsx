@@ -14,7 +14,8 @@ export default function TabDragPreview({drag,tabs}:{drag:DragPreview|null;tabs:T
  const position=dragPreviewPosition(drag.point,window.innerWidth,window.innerHeight,native);
  const target=tabs.find(tab=>tab.id===drag.target?.id);
  const targetTitle=target?.url.startsWith('elix:')?internalTitle(target.url):target?.title;
- const dropHint=drag.target?.edge==='group'
+ const dropHint=drag.target?.edge==='split'?'Slipp for å åpne delt visning'
+  :drag.target?.edge==='group'
   ?`Slipp i gruppen ${target?.group??drag.target.group}`
   :drag.target?.edge==='ungroup'?'Ta fanen ut av gruppen'
   :target&&tab.group&&!target.group?`Ta ut av gruppen · ${drag.target?.edge==='before'?'før':'etter'} ${targetTitle}`

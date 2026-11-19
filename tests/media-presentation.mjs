@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {chromium} from 'playwright';
 const script = await readFile(new URL('../src-tauri/src/browser/media-presentation.js', import.meta.url), 'utf8');
+const mediaSessionScript = await readFile(new URL('../src-tauri/src/browser/media-session.js', import.meta.url), 'utf8');
 const browser = await chromium.launch({headless:true, ...(process.env.CHROMIUM_PATH ? {executablePath:process.env.CHROMIUM_PATH}: {}), args:['--no-sandbox']});
 const page = await browser.newPage({viewport:{width:720,height:440}});
 const errors=[]; page.on('pageerror',error=>errors.push(error.message));
@@ -88,6 +89,44 @@ try {
     assert.deepEqual(await page.evaluate(()=>{const f=window.__fixture;return {media:f.snapshot(f.media),wrapper:f.snapshot(f.wrap)}}),await page.evaluate(()=>({media:window.__fixture.mediaStyle,wrapper:window.__fixture.wrapStyle})),`${mode} original styles restored`);
     assert.equal(await page.evaluate(()=>window.__fixture.media.srcObject===window.__fixture.stream&&!window.__fixture.media.controls&&!document.querySelector('[data-elix-media-surface]')),true);
   }
+  // A real secure-context Media Session, registered before ELIX opens the player.
+  await page.addInitScript({content: mediaSessionScript});
+  await page.route('https://playlist.test/', route => route.fulfill({contentType:'text/html', body:'<title>Playlist</title>'}));
+  await page.goto('https://playlist.test/');
+  await makeMedia();
+  await page.waitForFunction(()=>!window.__fixture.media.paused);
+  await page.evaluate(()=>{
+    window.trackLog = [];
+    navigator.mediaSession.setActionHandler('nexttrack', details => window.trackLog.push(details.action));
+  });
+  await run();
+  const next = page.getByRole('button',{name:'Neste spor'});
+  const prev = page.getByRole('button',{name:'Forrige spor'});
+  assert.equal(await prev.isVisible(),false);
+  await next.click();
+  assert.deepEqual(await page.evaluate(()=>window.trackLog),['nexttrack']);
+  await page.evaluate(()=>{
+    navigator.mediaSession.setActionHandler('nexttrack',null);
+    navigator.mediaSession.setActionHandler('previoustrack', details=>window.trackLog.push(details.action));
+  });
+  await next.waitFor({state:'hidden'});
+  await prev.click();
+  assert.deepEqual(await page.evaluate(()=>window.trackLog),['nexttrack','previoustrack']);
+  assert.equal(await page.evaluate(()=>document.querySelectorAll('video').length===1&&!window.__fixture.media.paused),true);
+  // A site may swap the DOM node between songs. It owns the new play state.
+  await page.evaluate(()=>{
+    const fixture = window.__fixture;
+    fixture.media.pause();
+    const replacement = document.createElement('video');
+    replacement.muted=true;
+    replacement.srcObject=fixture.stream;
+    fixture.media.replaceWith(replacement);
+    window.nextMedia=replacement;
+  });
+  await page.waitForFunction(()=>window.nextMedia.controls);
+  assert.equal(await page.evaluate(()=>window.nextMedia.paused && !window.__fixture.media.controls),true);
+  await restore();
+  assert.equal(await page.evaluate(()=>!window.nextMedia.controls && !document.querySelector('[data-elix-track-controls]')),true);
   assert.deepEqual(errors,[]);
-  console.log('PASS: media-only video/audio, native Chromium play/pause controls, resize, same-origin iframe and shadow DOM, stream identity, no-media rejection and CSS restoration. Native hosting remains covered by Windows smoke tests.');
+  console.log('PASS: media-only video/audio, native Chromium play/pause controls, resize, same-origin iframe and shadow DOM, stream identity, playlist actions, media replacement, no-media rejection and CSS restoration. Native hosting remains covered by Windows smoke tests.');
 } finally {await browser.close();}

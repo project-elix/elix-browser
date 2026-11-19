@@ -1,4 +1,5 @@
 //! Provider secrets live on the account service. Desktop bearer tokens use Windows DPAPI.
+mod discord;
 use crate::AppState;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
@@ -163,6 +164,27 @@ fn remove_token(app: &AppHandle, profile: &str) -> Result<(), String> {
     }
 }
 
+async fn read_response(mut response:reqwest::Response)->Result<(reqwest::StatusCode,Value),String>{
+    let status = response.status();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Ufullstendig svar fra kontotjenesten")?
+    {
+        if bytes.len() + chunk.len() > 5_500_000 {
+            return Err("For stort svar fra kontotjenesten".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let result: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Ugyldig svar fra kontotjenesten")?;
+    Ok((status,result))
+}
+fn error_message(result:&Value)->String{
+    result["error"].as_str().unwrap_or("Kontohandlingen mislyktes").chars().take(200).collect()
+}
+
 pub async fn request(
     app: AppHandle,
     profile: String,
@@ -177,10 +199,16 @@ pub async fn request(
         return Ok(json!({"configured":false,"account":null}));
     }
     let base = base()?;
+    if operation=="discord_cancel" {discord::cancel();return Ok(json!({"ok":true}));}
     let saved = token(&app, &profile, &base)?;
     let (method, endpoint) = match operation.as_str() {
         "status" if saved.is_none() => return Ok(json!({"configured":true,"account":null})),
         "status" => (reqwest::Method::GET, "v1/account"),
+        "providers" => (reqwest::Method::GET, "v1/config"),
+        "password_login" => (reqwest::Method::POST, "v1/auth/password/login"),
+        "password_start" => (reqwest::Method::POST, "v1/auth/password/start"),
+        "password_verify" => (reqwest::Method::POST, "v1/auth/password/verify"),
+        "discord_login" => (reqwest::Method::POST, "v1/auth/discord/complete"),
         "email_start" => (reqwest::Method::POST, "v1/auth/email/start"),
         "email_verify" => (reqwest::Method::POST, "v1/auth/email/verify"),
         "logout" => (reqwest::Method::POST, "v1/auth/logout"),
@@ -197,29 +225,21 @@ pub async fn request(
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|_| "Kunne ikke kontakte kontotjenesten")?;
+    let (generation,payload)=if operation=="discord_login"{
+        let (generation,exchange)=discord::begin(&client,&base).await?;
+        (Some(generation),exchange)
+    }else{(None,payload)};
     let mut request = client.request(method, base.join(endpoint).unwrap());
     if let Some(token) = saved {
         request = request.bearer_auth(token);
     }
-    let mut response = request
+    let response = request
         .json(&payload)
         .send()
         .await
         .map_err(|_| "Kontotjenesten svarte ikke. Prøv igjen.")?;
-    let status = response.status();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "Ufullstendig svar fra kontotjenesten")?
-    {
-        if bytes.len() + chunk.len() > 5_500_000 {
-            return Err("For stort svar fra kontotjenesten".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let mut result: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "Ugyldig svar fra kontotjenesten")?;
+    let (status,mut result)=read_response(response).await?;
+    if let Some(generation)=generation { discord::active(generation)?; }
     // Keep profile selection stable while replacing/removing this profile's credential.
     // No network await occurs while this lock is held.
     let current_profile = state.profile.lock().unwrap();
@@ -243,9 +263,20 @@ pub async fn request(
             .take(200)
             .collect());
     }
-    if operation == "email_verify" {
+    if matches!(operation.as_str(),"email_verify"|"password_verify"|"password_login"|"discord_login") {
         let token = take_login_token(&mut result)?;
         save_token(&app, &profile, &base, &token)?;
+        if generation.is_some() {
+            drop(current_profile);
+            // Only the trusted shell can dispatch an account operation.
+            if let Some(shell)=app.get_webview("shell") {
+                let window=shell.window();
+                let _=window.unminimize();
+                let _=window.show();
+                let _=window.set_focus();
+                let _=shell.set_focus();
+            }
+        }
     }
     if operation == "logout" {
         remove_token(&app, &profile)?;

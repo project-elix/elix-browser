@@ -8,6 +8,8 @@ from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 p = argparse.ArgumentParser()
 p.add_argument('mode', choices=['prepare', 'serve'])
 p.add_argument('root', type=pathlib.Path)
+p.add_argument('--channel', choices=['stable', 'beta', 'developer'], default='stable')
+p.add_argument('--version', default='0.1.1')
 args = p.parse_args()
 root = args.root
 root.mkdir(parents=True, exist_ok=True)
@@ -25,15 +27,23 @@ if args.mode == 'prepare':
     (root/'tls.pem').write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     (root/'tls.cer').write_bytes(cert.public_bytes(serialization.Encoding.DER))
     (root/'tls.key').write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
-    for case, artifact, signature in [('stable','new.exe','new.exe.sig'), ('corrupt','corrupt.exe','new.exe.sig'), ('replay','old.exe','old.exe.sig')]:
-        data = {'version':'0.1.1', 'notes':'Disposable CI upgrade', 'pub_date':now.isoformat().replace('+00:00','Z'),
+    for case, artifact, signature in [(args.channel,'new.exe','new.exe.sig'), ('corrupt','corrupt.exe','new.exe.sig'), ('replay','old.exe','old.exe.sig')]:
+        data = {'version':args.version, 'notes':'Disposable CI upgrade', 'pub_date':now.isoformat().replace('+00:00','Z'),
                 'platforms':{'windows-x86_64':{'url':f'https://127.0.0.1:44335/{artifact}', 'signature':(root/signature).read_text().strip()}}}
         (root/f'{case}.json').write_text(json.dumps(data))
     (root/'cookie.html').write_text("""<!doctype html><title>cookie pending</title><script>
 const seed = new URL(location.href).searchParams.get('seed');
-if(seed) document.cookie = 'elix_upgrade_cookie='+encodeURIComponent(seed)+'; Max-Age=3600; Path=/; Secure; SameSite=Lax';
-const match = document.cookie.split('; ').find(c=>c.startsWith('elix_upgrade_cookie='));
-document.title = 'cookie:'+(match ? decodeURIComponent(match.split('=')[1]) : 'missing');
+const readCookie = () => document.cookie.split('; ').find(c=>c.startsWith('elix_upgrade_cookie='));
+if(seed && (readCookie() || localStorage.getItem('elix_upgrade'))) {
+  document.title = 'Unexpected data from another profile';
+} else {
+  if(seed) {
+    document.cookie = 'elix_upgrade_cookie='+encodeURIComponent(seed)+'; Max-Age=3600; Path=/; Secure; SameSite=Lax';
+    localStorage.setItem('elix_upgrade',seed);
+  }
+  const match = readCookie();
+  document.title = 'cookie:'+(match ? decodeURIComponent(match.split('=')[1]) : 'missing')+':storage:'+localStorage.getItem('elix_upgrade');
+}
 </script>ELIX cookie persistence fixture""")
     raw = bytearray((root/'new.exe').read_bytes())
     raw[-1] ^= 1

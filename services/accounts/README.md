@@ -2,8 +2,7 @@
 
 Node 24, built-in HTTP/SQLite/crypto and a separately pinned Nodemailer dependency
 for SMTP. This service supports Brevo SMTP or its HTTPS API. Local tests inject
-the mail provider or use a loopback SMTP server and verify that Discord routes
-stay disabled; they never send real mail or contact a real Discord account.
+local mail and Discord providers or use a loopback SMTP server.
 
 As of 2026-11-17, the service is deployed at **https://medlem.projectelix.no** on the existing ELIX
 server. The systemd service is active, loopback `/health` returns HTTP 200, and the
@@ -27,17 +26,35 @@ server-only environment file; set a real HTTPS origin, a cryptographically rando
 AUTH_PEPPER (at least 32 characters), the existing Brevo credentials and verified sender.
 Do not paste secrets into commits, logs or the frontend.
 
-Discord login is disabled in both the desktop and service, even if old Discord
-environment variables are present. Its public polling flow has been removed because
-an attacker could forward their authorization link to another browser, then collect
-that user's completed login with the attacker-known polling secret.
+Stable 1 and Alpha 9 use the email-code client. Once a user sets a password,
+those clients cannot start another session for that account. Roll out password
+enrollment to devices with a password-capable client. Returning to a server
+which predates password enrollment would re-enable code-only login for accounts
+that require passwords. Use a compatible service build when rolling back.
 
-TODO before enabling Discord: bind an ephemeral native loopback callback and local
-state before authorization; deliver a new one-use completion secret only through
-that callback; require both that secret and the initiating desktop's proof to finish
-login. Test forwarded links, callback/state mismatch, cancellation, timeout and
-replay on Windows before activating the provider. A cookie created on visiting a
-forwarded authorization link is not sufficient binding.
+Alpha 10 adds password sign-in and recovery. Deploy the matching service release
+with the existing SQLite database, AUTH_PEPPER and mail configuration. The service
+adds its password table at startup. Registration, migration from an email-code
+account and password resets require a new eight-digit code delivered to the
+account address. The service preserves the existing account ID and encrypted sync
+copy. Setting a password revokes previous sessions and codes. Passwords use
+scrypt with a distinct 16-byte random salt, N=131072, r=8 and p=1. A password
+reset does not recover the separate sync passphrase. Older services still offer
+code sign-in in the Alpha 10 client.
+
+To enable Discord, the application owner registers the exact redirect URI
+`https://medlem.projectelix.no/v1/auth/discord/callback` in the Discord Developer
+Portal and sets `DISCORD_CLIENT_ID` and `DISCORD_CLIENT_SECRET` in the protected
+server environment. Restart the updated service and verify that `/v1/config`
+advertises `discord:true`. For a different PUBLIC_URL, use that origin with the
+same callback path. An installation without both values leaves Discord disabled.
+The existing proxy must forward `/v1/auth/` and omit callback query strings from
+logs. The desktop requests the `identify` scope and opens the system browser.
+The service delivers a short-lived ticket to the initiating instance's ephemeral
+127.0.0.1 listener. Redemption also requires that instance's independent random
+proof. Test the return to the initiating ELIX window, account selection, denial,
+timeout, cancellation and replay on Windows before rollout. Discord accounts use
+their provider ID and remain separate from email accounts.
 
 ```sh
 node --env-file=services/accounts/.env services/accounts/server.mjs

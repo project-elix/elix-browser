@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {dragPreviewPosition,edgeScroll,groupDropTarget} from '../src/browser/tabDrag';
+import {dragPreviewPosition,edgeScroll,groupDropTarget,splitDropTarget} from '../src/browser/tabDrag';
 import type {Session,Tab} from '../src/types';
 
 describe('Dragging to a sidebar group heading',()=>{
@@ -17,6 +17,23 @@ describe('Dragging to a sidebar group heading',()=>{
   for(const [source,anchor] of [['source','missing'],['target','source'],['target','target'],['source','pinned'],['source','foreign']]){
    expect(groupDropTarget(session,source,anchor)).toBeNull();
   }
+ });
+});
+
+describe('Dropping a tab into split view',()=>{
+ const tab:Tab={id:'a',url:'https://example.com/a',title:'A',pinned:false,private:false,loading:false,suspended:false,last_active:0,load_ms:null,http_status:null,navigation_error:null};
+ const session:Session={active:'a',tabs:[tab,{...tab,id:'b'},{...tab,id:'c'},
+  {...tab,id:'foreign',workspace:'Jobb'},{...tab,id:'private',private:true},{...tab,id:'internal',url:'elix://start'}]};
+ it('uses the dragged peer, or offers the active tab a compatible peer',()=>{
+  expect(splitDropTarget(session,'c')).toEqual({id:'c',edge:'split'});
+  expect(splitDropTarget(session,'a','b')).toEqual({id:'c',edge:'split'});
+ });
+ it('only offers compatible tabs and excludes open split peers and the mini player',()=>{
+  for(const id of ['foreign','private','internal','unknown'])expect(splitDropTarget(session,id)).toBeNull();
+  expect(splitDropTarget(session,'b','a')).toBeNull();
+  expect(splitDropTarget(session,'b','b')).toBeNull();
+  expect(splitDropTarget({...session,split:['a','b']},'b')).toBeNull();
+  expect(splitDropTarget({...session,split:['a','b']},'c')).toEqual({id:'c',edge:'split'});
  });
 });
 

@@ -1,7 +1,17 @@
 name: Signed Windows upgrade round trip
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Update channel to exercise
+        type: choice
+        options: [stable, beta, developer]
+        default: stable
   workflow_call:
+    inputs:
+      channel:
+        type: string
+        default: stable
   push:
     branches: [main]
     paths:
@@ -14,6 +24,8 @@ jobs:
   upgrade:
     runs-on: windows-latest
     timeout-minutes: 50
+    env:
+      ELIX_QA_CHANNEL: ${{ inputs.channel || 'stable' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,6 +39,17 @@ jobs:
           cache-on-failure: true
       - run: npm ci
       - run: python -m pip install cryptography
+      - name: Select disposable versions for the requested channel
+        shell: pwsh
+        run: |
+          switch ($env:ELIX_QA_CHANNEL) {
+            stable { $suffix = '' }
+            beta { $suffix = '-beta.1' }
+            developer { $suffix = '-dev.1' }
+            default { throw 'Unknown upgrade-test channel' }
+          }
+          "ELIX_QA_OLD_VERSION=0.1.0$suffix" >> $env:GITHUB_ENV
+          "ELIX_QA_NEW_VERSION=0.1.1$suffix" >> $env:GITHUB_ENV
       - name: Build two versions with disposable signing key
         shell: pwsh
         run: |
@@ -41,26 +64,27 @@ jobs:
           $env:ELIX_UPDATE_PUBLIC_KEY = (Get-Content "$root/test.key.pub" -Raw).Trim()
           $env:ELIX_UPDATE_BASE = 'https://127.0.0.1:44335'
           @{bundle=@{createUpdaterArtifacts=$true};plugins=@{updater=@{pubkey=$env:ELIX_UPDATE_PUBLIC_KEY;windows=@{installMode="quiet"}}}} | ConvertTo-Json -Depth 6 | Set-Content src-tauri/tauri.release.json
-          foreach ($version in @('0.1.0','0.1.1')) {
-            node scripts/set-version.mjs $version stable
+          foreach ($version in @($env:ELIX_QA_OLD_VERSION,$env:ELIX_QA_NEW_VERSION)) {
+            node scripts/set-version.mjs $version $env:ELIX_QA_CHANNEL
+            if ($LASTEXITCODE -ne 0) { throw "Invalid test version: $version" }
             npm install --package-lock-only --ignore-scripts
             cargo update --manifest-path src-tauri/Cargo.toml --workspace
             npm run tauri build -- --features smoke-tests --config src-tauri/tauri.release.json --bundles nsis -- --locked
             if ($LASTEXITCODE -ne 0) { throw "Build failed: $version" }
             $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis/*_${version}_*-setup.exe" | Select-Object -First 1
             if (!$installer) { throw "Installer not found: $version" }
-            $name = if ($version -eq '0.1.0') { 'old' } else { 'new' }
+            $name = if ($version -eq $env:ELIX_QA_OLD_VERSION) { 'old' } else { 'new' }
             Copy-Item $installer.FullName "$root/$name.exe"
             Copy-Item "$($installer.FullName).sig" "$root/$name.exe.sig"
           }
           Remove-Item "$root/test.key", "$root/key-generation.log"
-      - name: Install 0.1.0 and verify real signed upgrade to 0.1.1
+      - name: Install the previous build and verify the signed channel upgrade
         timeout-minutes: 10
         shell: pwsh
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'elix-upgrade-origin'
           Write-Output 'Preparing disposable HTTPS fixture'
-          python scripts/upgrade-fixture.py prepare $root
+          python scripts/upgrade-fixture.py prepare $root --channel $env:ELIX_QA_CHANNEL --version $env:ELIX_QA_NEW_VERSION
           if ($LASTEXITCODE -ne 0) { throw 'HTTPS preparation failed' }
           Write-Output 'Trusting disposable CI certificate'
           # Disposable hosted runner only: CurrentUser Root invokes an interactive trust dialog.
@@ -76,12 +100,12 @@ jobs:
             $server.Refresh()
             if ($server.HasExited) { Get-Content server-error.txt; throw 'HTTPS server exited' }
             Write-Output 'Probing trusted HTTPS endpoint (15 second timeout)'
-            Invoke-WebRequest 'https://127.0.0.1:44335/stable.json' -NoProxy -TimeoutSec 15 | Out-Null
-            Write-Output 'Installing 0.1.0 (120 second timeout)'
+            Invoke-WebRequest "https://127.0.0.1:44335/$env:ELIX_QA_CHANNEL.json" -NoProxy -TimeoutSec 15 | Out-Null
+            Write-Output "Installing $env:ELIX_QA_OLD_VERSION (120 second timeout)"
             $dest = Join-Path $env:RUNNER_TEMP 'ELIX-upgrade-install'
             $installer = Start-Process "$root/public/old.exe" -ArgumentList @('/S', "/D=$dest") -PassThru
-            if (!$installer.WaitForExit(120000)) { throw '0.1.0 installation timed out' }
-            if ($installer.ExitCode -ne 0) { throw '0.1.0 install failed' }
+            if (!$installer.WaitForExit(120000)) { throw 'Previous build installation timed out' }
+            if ($installer.ExitCode -ne 0) { throw 'Previous build install failed' }
             $resultRoot = Join-Path ([IO.Path]::GetTempPath()) 'elix-upgrade-self-test'
             if (Test-Path $resultRoot) { Remove-Item -Recurse -Force $resultRoot }
             Write-Output 'Starting real application upgrade test'
@@ -94,7 +118,7 @@ jobs:
             Write-Output $result
             if (!$result.StartsWith('PASS:')) { throw 'Upgrade acceptance failed' }
             $installedVersion = (Get-Item "$dest/elix-browser.exe").VersionInfo.ProductVersion
-            if (!$installedVersion.StartsWith('0.1.1')) { throw "Unexpected installed version: $installedVersion" }
+            if ($installedVersion -ne $env:ELIX_QA_NEW_VERSION) { throw "Unexpected installed version: $installedVersion" }
             Copy-Item "$resultRoot/result.txt" upgrade-result.txt
           } finally {
             if ($resultRoot -and (Test-Path "$resultRoot/progress.log")) { Copy-Item "$resultRoot/progress.log" upgrade-progress.txt; Get-Content upgrade-progress.txt }

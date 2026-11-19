@@ -20,6 +20,8 @@ export function readConfig(env = process.env) {
   if (env.TRUST_PROXY && !['0','1'].includes(env.TRUST_PROXY)) throw new Error('TRUST_PROXY must be 0 or 1');
   const config = {
     publicUrl: base.origin, pepper, development, port,
+    discordId: env.DISCORD_CLIENT_ID?.trim(),
+    discordSecret: env.DISCORD_CLIENT_SECRET?.trim(),
     database: env.DATABASE_PATH || './data/accounts.sqlite',
     brevoKey: env.BREVO_API_KEY?.trim(),
     mailTransport: env.MAIL_TRANSPORT || 'brevo-api',

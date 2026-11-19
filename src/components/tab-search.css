@@ -1,0 +1,15 @@
+.tab-search .tab-search-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 88px;
+  overflow: hidden;
+  margin: 8px 0;
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+.tab-search-preview > img:not(.tab-favicon) { width: 100%; height: 100%; object-fit: contain; }
+.tab-search-preview strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.tab-search .tab-result-selected { background: var(--accent-soft); }

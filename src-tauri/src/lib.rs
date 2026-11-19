@@ -20,6 +20,7 @@ pub struct AppState {
     download_root: PathBuf,
     window_id: String,
     recovered: bool,
+    session_transition: Mutex<()>,
     permissions_visible: std::sync::atomic::AtomicBool,
     store: Mutex<storage::Store>,
     profile: Mutex<String>,
@@ -36,9 +37,13 @@ pub struct AppState {
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Request {
     Snapshot,
+    SaveTabLayout { profile: String, layout: storage::TabLayout },
     WindowReady,
     ReopenTab,
     RecoverWindows,
+    SavedSessions { profile: String },
+    SaveSession { profile: String, name: String },
+    OpenSession { profile: String, name: String },
     ReorderTab {
         id: String,
         before: Option<String>,
@@ -48,10 +53,13 @@ enum Request {
         id: String,
         #[serde(default)]
         outside_only: bool,
+        #[serde(default)]
+        drop_point: Option<browser::detach::DropPoint>,
     },
     Workspace {
         name: String,
     },
+    GroupRules {profile:String,workspace:String,operation:String,#[serde(default)] domain:String,#[serde(default)] group:String,#[serde(default)] color:String,#[serde(default)] tab_id:String},
     GroupTab {
         id: String,
         group: String,
@@ -116,6 +124,7 @@ enum Request {
         id: String,
         pinned: bool,
     },
+    TabPreview { id: String, url: String },
     Activate {
         id: String,
     },
@@ -160,6 +169,9 @@ enum Request {
     CreateProfile {
         name: String,
     },
+    WorkspaceProfile {
+        preset: String,
+    },
     SwitchProfile {
         id: String,
     },
@@ -176,6 +188,7 @@ enum Request {
         id: String,
     },
     ClearPasswords {
+        profile: String,
         consent: bool,
     },
     SitePermissions,
@@ -285,6 +298,19 @@ async fn dispatch(
             browser::detach::ready(&app);
             Ok(Value::Null)
         }
+        Request::SavedSessions { profile } => {
+            let _transition = state.session_transition.lock().unwrap();
+            if *state.profile.lock().unwrap() != profile { return Err("Profilen ble endret".into()); }
+            Ok(json!(state.store.lock().unwrap().list_named_sessions(&profile)?))
+        }
+        Request::SaveSession { profile, name } => {
+            browser::saved_sessions::save(&app, &profile, &name)?;
+            Ok(Value::Null)
+        }
+        Request::OpenSession { profile, name } => {
+            browser::saved_sessions::open(app.clone(), profile, name).await?;
+            Ok(Value::Null)
+        }
         Request::RecoverWindows => Ok(json!(browser::detach::recover_windows(&app)?)),
         Request::ReopenTab => {
             browser::organization::reopen(&app)?;
@@ -294,13 +320,14 @@ async fn dispatch(
             browser::organization::reorder(&app, &id, before.as_deref(), ungroup_at.as_deref())?;
             Ok(Value::Null)
         }
-        Request::DetachTab { id, outside_only } => Ok(json!(
-            browser::detach::detach(app.clone(), id, outside_only).await?
+        Request::DetachTab { id, outside_only, drop_point } => Ok(json!(
+            browser::detach::detach(app.clone(), id, outside_only, drop_point).await?
         )),
         Request::Workspace { name } => {
             browser::organization::workspace(&app, &name)?;
             Ok(Value::Null)
         }
+        Request::GroupRules{profile,workspace,operation,domain,group,color,tab_id}=>{browser::group_rules::configure(&app,&profile,&workspace,&operation,&domain,&group,&color,&tab_id)?;Ok(Value::Null)},
         Request::GroupTab {
             id,
             group,
@@ -361,12 +388,20 @@ async fn dispatch(
             let count = state.store.lock().unwrap().import_bookmarks(&p, items)?;
             Ok(json!(count))
         }
+        Request::SaveTabLayout { profile, layout } => {
+            if *state.profile.lock().unwrap() != profile {
+                return Err("Profilen er endret. Åpne faneoppsettet på nytt.".into());
+            }
+            state.store.lock().unwrap().save_tab_layout(&profile, layout)?;
+            Ok(Value::Null)
+        }
         Request::Snapshot => {
             #[cfg(feature = "smoke-tests")]
             browser::smoke::boot_stage(&app, "snapshot");
+            let profile = state.profile.lock().unwrap().clone();
             let store = state.store.lock().unwrap();
             Ok(
-                json!({"session":state.session.lock().unwrap().clone(),"profiles":store.profiles()?,"profile":state.profile.lock().unwrap().clone(),"settings":store.settings(),"version":env!("CARGO_PKG_VERSION"),"updater_configured":updater::configured(),"recovered":state.recovered}),
+                json!({"session":state.session.lock().unwrap().clone(),"profiles":store.profiles()?,"profile":profile,"tab_layout":store.tab_layout(&profile),"settings":store.settings(),"version":env!("CARGO_PKG_VERSION"),"updater_configured":updater::configured(),"recovered":state.recovered}),
             )
         }
         Request::NewTab { url, private } => Ok(json!(
@@ -375,6 +410,12 @@ async fn dispatch(
         Request::PinTab { id, pinned } => {
             browser::pin(&app, &id, pinned)?;
             Ok(Value::Null)
+        }
+        Request::TabPreview { id, url } => {
+            #[cfg(windows)]
+            return Ok(json!(browser::tab_preview::capture(&app, &id, &url).await));
+            #[cfg(not(windows))]
+            { let _ = (id, url); Ok(Value::Null) }
         }
         Request::Activate { id } => {
             #[cfg(feature = "smoke-tests")]
@@ -556,7 +597,12 @@ async fn dispatch(
             let p = state.store.lock().unwrap().create_profile(&name)?;
             Ok(json!(p))
         }
+        Request::WorkspaceProfile { preset } => {
+            let profile = state.store.lock().unwrap().workspace_profile(&preset)?;
+            Ok(json!(profile))
+        }
         Request::SwitchProfile { id } => {
+            let _transition = state.session_transition.lock().unwrap();
             if !security::valid_profile(&id)
                 || !state
                     .store
@@ -580,9 +626,7 @@ async fn dispatch(
                 }
             }
             browser::private::cleanup();
-            state.store.lock().unwrap().set("active_profile", &id)?;
-            *state.profile.lock().unwrap() = id;
-            browser::restore(&app);
+            browser::restore_profile(&app, &id, true)?;
             let id = state.session.lock().unwrap().active.clone();
             browser::activate(&app, &id)?;
             Ok(Value::Null)
@@ -602,13 +646,16 @@ async fn dispatch(
             browser::extensions::execute(app.clone(), browser::extensions::Operation::Remove { id })
                 .await
         }
-        Request::ClearPasswords { consent } => {
+        Request::ClearPasswords { profile, consent } => {
             if !consent {
                 return Err("Sletting av passord krever bekreftelse".into());
             }
+            if *state.profile.lock().unwrap() != profile {
+                return Err("Profilen ble endret. Bekreft slettingen i riktig profil.".into());
+            }
             browser::extensions::execute(
                 app.clone(),
-                browser::extensions::Operation::ClearPasswords,
+                browser::extensions::Operation::ClearPasswords { profile },
             )
             .await
         }
@@ -773,6 +820,7 @@ pub fn run() {
                 download_root,
                 window_id,
                 recovered,
+                session_transition: Mutex::new(()),
                 permissions_visible: std::sync::atomic::AtomicBool::new(false),
                 store: Mutex::new(store),
                 profile: Mutex::new(profile),
@@ -802,13 +850,22 @@ pub fn run() {
                 handoff.tab.suspended = false;
                 let workspace = handoff.tab.workspace.clone();
                 let active = handoff.tab.id.clone();
-                *app.state::<AppState>().session.lock().unwrap() = browser::Session {
-                    tabs: vec![handoff.tab],
-                    active,
-                    workspace: workspace.clone(),
-                    workspaces: vec![workspace],
-                    ..Default::default()
+                let restored = if let Some(name) = handoff.saved_session {
+                    let state = app.state::<AppState>();
+                    if *state.profile.lock().unwrap() != handoff.profile {
+                        return Err(std::io::Error::other("Øktens profil finnes ikke").into());
+                    }
+                    let saved = browser::saved_sessions::load_named(&state.store.lock().unwrap(), &handoff.profile, &name)
+                        .map_err(std::io::Error::other)?;
+                    saved
+                } else {
+                    browser::Session {
+                        tabs: vec![handoff.tab], active, workspace: workspace.clone(),
+                        workspaces: vec![workspace], ..Default::default()
+                    }
                 };
+                *app.state::<AppState>().session.lock().unwrap() = restored;
+                browser::group_rules::refresh(app.handle());
                 window.unmaximize()?;
                 window.set_position(tauri::PhysicalPosition::new(handoff.x, handoff.y))?;
             }
@@ -835,6 +892,8 @@ pub fn run() {
                 window.inner_size()?,
             )?;
             shell.set_auto_resize(true)?;
+            #[cfg(windows)]
+            browser::window_transfer::listen(app.handle().clone());
             #[cfg(feature = "smoke-tests")]
             browser::smoke::boot_stage(app.handle(), "shell_created");
             #[cfg(feature = "smoke-tests")]
@@ -880,7 +939,7 @@ pub fn run() {
                         &transfers,
                     );
                     for id in ids {
-                        let _ = browser::suspend(&handle, &id);
+                        let _ = browser::park_background(&handle, &id, Some(minutes));
                     }
                 }
             });
