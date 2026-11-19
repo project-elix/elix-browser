@@ -180,7 +180,9 @@ def search_query(url, text):
 
 def colon_search(ui):
     evidence = {}
-    for text in ("ELIX: test av søk", "site:example.org ELIX test"):
+    # The browser reserves "elix:" for internal navigation. Exercise both prose
+    # and a search operator using queries from the production URL parser tests.
+    for text in ("EKMP setning: her", "setning: her", "site:github.com Feil: #1"):
         ui.navigate(text)
         def actual():
             # Preserve the original destination if the external search provider
@@ -191,7 +193,7 @@ def colon_search(ui):
             rows = query_db(ui, "SELECT url FROM history WHERE profile=(SELECT value FROM settings "
                                 "WHERE key='active_profile') ORDER BY id DESC LIMIT 12")
             return next(({"from": "history", "url": url} for (url,) in rows if search_query(url, text)), False)
-        evidence[text] = ui.wait(actual, "Søketeksten med kolon mangler som søk i adressefelt og historikk", timeout=25)
+        evidence[text] = ui.wait(actual, f"Mangler søkemålet for {text!r} i adressefelt og historikk", timeout=25)
     url = visit(ui, "port-in-address")
     ui.wait(lambda: address_value(ui) == url, "En adresse med eksplisitt port ble tolket som søk")
     ui.wait(lambda: query_db(ui, "SELECT 1 FROM history WHERE url=? AND profile=(SELECT value "
