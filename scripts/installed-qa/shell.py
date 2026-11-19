@@ -200,6 +200,22 @@ def submit_in_new_tab(ui, text):
     return tab_id
 
 
+def close_measured_tab(ui, tab_id):
+    # Keep the next tab header in view on the 1024-pixel Windows desktop. Only
+    # close the active synthetic tab whose navigation has already been measured.
+    before = ui.session()
+    others = {tab["id"] for tab in before["tabs"] if tab["id"] != tab_id}
+    assert before["active"] == tab_id and others, "Expected a measured tab and the original start tab"
+    ui.find("Adressefelt").click_input()
+    ui.keys("^w")
+
+    def closed():
+        session = ui.session()
+        return session["active"] in others and {tab["id"] for tab in session["tabs"]} == others
+
+    ui.wait(closed, "Ctrl+W did not close exactly the completed measurement tab")
+
+
 def redirect_while_editing(ui, mode):
     source = ui.origin + "/address-redirect/start/" + mode
     redirected = ui.page("redirect-arrived-" + mode)
@@ -284,6 +300,7 @@ def colon_search(ui):
         evidence[text] = ui.wait(actual, f"Mangler søkemålet for {text!r} i adressefelt og historikk", timeout=25)
         print(f"ELIX-33 confirmed {text!r} via {evidence[text]['from']}", flush=True)
         ui.screenshot(f"ELIX-33-search-{index}")
+        close_measured_tab(ui, tab_id)
 
     url = ui.page("port-in-address")
     tab_id = submit_in_new_tab(ui, url)
@@ -294,7 +311,11 @@ def colon_search(ui):
                                   "FROM settings WHERE key='active_profile')", (url,)),
             "Den besøkte fixture-adressen mangler i historikken")
     ui.screenshot("ELIX-33-literal-url")
-    redirects = {mode: redirect_while_editing(ui, mode) for mode in ("draft", "selected")}
+    close_measured_tab(ui, tab_id)
+    redirects = {}
+    for mode in ("draft", "selected"):
+        redirects[mode] = redirect_while_editing(ui, mode)
+        close_measured_tab(ui, redirects[mode]["tab"])
     return {"searches": evidence, "literal_url": url, "literal_tab": tab_id, "redirects": redirects}
 
 
