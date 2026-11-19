@@ -27,6 +27,7 @@ class Fixture:
         from media_fixture import response as media_response
         self.log = []
         self.lock = threading.Lock()
+        self.address_redirects = {name: threading.Event() for name in ("draft", "selected")}
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -46,6 +47,19 @@ class Fixture:
 
             def do_GET(self):
                 url = urlsplit(self.path)
+                redirect = re.fullmatch(r"/address-redirect/(start|wait)/(draft|selected)", url.path)
+                if redirect:
+                    action, mode = redirect.groups()
+                    if action == "start":
+                        page = f"""<!doctype html><meta charset=utf-8><title>ELIX redirect-{mode}</title>
+                          <h1>Waiting for the address edit</h1>
+                          <script>fetch('/address-redirect/wait/{mode}').then(response => {{
+                            if(response.ok) location.replace('/page/redirect-arrived-{mode}');
+                          }});</script>"""
+                        return self.send(200, "text/html; charset=utf-8", page.encode())
+                    fixture.record({"kind": "redirect_waiting", "mode": mode})
+                    released = fixture.address_redirects[mode].wait(timeout=60)
+                    return self.send(204 if released else 408, "text/plain", b"")
                 if url.path.startswith("/page/"):
                     slug = unquote(url.path[6:])
                     if not re.fullmatch(r"[a-zA-Z0-9 _-]{1,100}", slug):
