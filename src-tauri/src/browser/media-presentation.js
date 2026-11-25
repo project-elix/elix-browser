@@ -1,6 +1,6 @@
 // Executed only after the shell requests a popout. This never receives native IPC,
 // URLs or credentials. The original media element, source and listeners stay put.
-(function present(preferred) {
+(function present(preferred, volumeChoice = {value: null}) {
   const key = '__elixMediaPresentation';
   const previous = window[key];
   const roots = [], seen = new Set(), candidates = [];
@@ -29,12 +29,12 @@
   if (previous && typeof previous.restore === 'function') previous.restore();
 
   const changes = new Map(), emptyStyles = new Set(), styles = [], surfaces = [], scroll = [];
-  let timer = 0, stopped = false, frameExited = false;
+  let timer = 0, volumeTimer = 0, stopped = false, frameExited = false;
   const frameExits = [];
   const followPlaying = event => {
     const target = event.target;
     if (stopped || frameExited || target === media || !['audio', 'video'].includes(target.localName)) return;
-    if (media.ended || media.paused || !media.isConnected) present(target);
+    if (media.ended || media.paused || !media.isConnected) present(target, volumeChoice);
   };
   const declarations = element => new Map(Array.from(element.style, name => [name, {
     value: element.style.getPropertyValue(name), priority: element.style.getPropertyPriority(name)
@@ -62,9 +62,17 @@
     for (const [property, value] of Object.entries(properties)) remember(element, property, value);
   };
   const controls = media.getAttribute('controls');
+  const volumeMarker = 'data-elix-volume-control';
+  const originalVolumeMarker = media.getAttribute(volumeMarker);
+  let onVolumeChange = () => {};
+
   const restore = () => {
     if (stopped) return true;
-    stopped = true; clearInterval(timer);
+    stopped = true; clearInterval(timer); clearTimeout(volumeTimer);
+    media.removeEventListener('volumechange', onVolumeChange);
+    if (originalVolumeMarker === null) media.removeAttribute(volumeMarker);
+    else media.setAttribute(volumeMarker, originalVolumeMarker);
+
     for (const root of roots) root.removeEventListener('playing', followPlaying, true);
     for (const [win, handler] of frameExits) { try { win.removeEventListener('pagehide', handler); } catch (_) {} }
     for (const element of styles) element.remove();
@@ -105,7 +113,9 @@
     // selected element stays in its original DOM position with the same stream.
     for (const root of roots) {
       const sheet = root.ownerDocument?.createElement('style') || root.createElement('style');
-      sheet.textContent = '* { visibility: hidden !important; } *::before, *::after { visibility: hidden !important; }';
+      sheet.textContent = '* { visibility: hidden !important; } *::before, *::after { visibility: hidden !important; }'
+        + '[data-elix-volume-control]::-webkit-media-controls-volume-slider { display: none !important; }';
+
       (root.head || root).appendChild(sheet); styles.push(sheet);
     }
     for (const doc of documents) {
@@ -126,7 +136,9 @@
     trackBar.style.cssText = 'all:initial!important;position:fixed!important;right:12px!important;top:12px!important;z-index:2147483647!important;visibility:visible!important;display:block!important;';
     const shadow = trackBar.attachShadow({mode: 'open'});
     const trackStyle = mediaDoc.createElement('style');
-    trackStyle.textContent = 'button{color:white;background:#172231eb;border:1px solid #587084;border-radius:6px;padding:6px 9px;margin-left:4px;cursor:pointer;font:600 13px system-ui}button:focus-visible{outline:2px solid white}button[hidden]{display:none}';
+    trackStyle.textContent = 'button{color:white;background:#172231eb;border:1px solid #587084;border-radius:6px;padding:6px 9px;margin-left:4px;cursor:pointer;font:600 13px system-ui}button:focus-visible{outline:2px solid white}button[hidden]{display:none}'
+      + 'label{display:inline-flex;align-items:center;gap:6px;color:#fff;background:#172231eb;border:1px solid #587084;border-radius:6px;padding:4px 7px;margin-left:4px;font:600 13px system-ui}input{width:clamp(48px,16vw,110px);margin:0;accent-color:#6bb8ff}input:focus-visible{outline:2px solid white}output{min-width:4ch;text-align:right}';
+
     shadow.append(trackStyle);
     const findPlaylist = action => {
       for (const doc of documents) {
@@ -144,6 +156,46 @@
       shadow.append(button);
       buttons.set(action, button);
     }
+    const volumeLabel = mediaDoc.createElement('label');
+    volumeLabel.textContent = 'Volum';
+    const volume = mediaDoc.createElement('input');
+    volume.type = 'range';
+    volume.min = '0'; volume.max = '100'; volume.step = '1';
+    volume.setAttribute('aria-label', 'Volum i minispiller');
+    const volumeValue = mediaDoc.createElement('output');
+    volumeValue.setAttribute('aria-hidden', 'true');
+    volumeLabel.append(volume, volumeValue);
+    shadow.append(volumeLabel);
+    const syncVolume = () => {
+      const level = Math.round(100 * (volumeChoice.value ?? media.volume));
+      volume.value = String(level);
+      volumeValue.textContent = level + '%';
+    };
+    const applyVolume = () => {
+      if (!stopped && !frameExited && media.isConnected && volumeChoice.value !== null
+        && Math.abs(media.volume - volumeChoice.value) > 0.001) media.volume = volumeChoice.value;
+    };
+    volume.addEventListener('input', () => {
+      volumeChoice.value = volume.valueAsNumber / 100;
+      applyVolume();
+      syncVolume();
+    });
+    // Native media volume events do not identify a website write versus a
+    // user gesture. Give the explicit popout slider priority for this session
+    // only, and cap correction frequency to avoid synchronous listener loops.
+    onVolumeChange = () => {
+      if (volumeChoice.value === null) syncVolume();
+      else if (!volumeTimer && Math.abs(media.volume - volumeChoice.value) > 0.001) {
+        volumeTimer = window.setTimeout(() => {
+          volumeTimer = 0;
+          applyVolume();
+        }, 80);
+      }
+    };
+    media.setAttribute(volumeMarker, '');
+    media.addEventListener('volumechange', onVolumeChange);
+    applyVolume();
+    syncVolume();
     // The player and buttons share a stacking context even inside a transformed
     // ancestor. The controls follow the media in painting order.
     (media.assignedSlot?.parentNode || media.parentNode).appendChild(trackBar);
@@ -164,6 +216,7 @@
     };
     const markUnavailable = () => {
       for (const button of buttons.values()) button.hidden = true;
+      trackBar.remove();
       for (const ancestor of path) if (ancestor.localName === 'iframe') style(ancestor, {visibility: 'hidden'});
       for (const surface of surfaces) surface.textContent = 'Spilleren ble endret. Gå tilbake til fanen og åpne minispilleren igjen.';
     };
@@ -188,7 +241,7 @@
         // Independent frame navigation/replacement cannot expose a whole site.
         // A playlist can replace its media element between songs. Adopt the
         // replacement without starting, pausing or copying either stream.
-        if (!frameExited && currentDocument && !media.isConnected && roots.some(root => root.querySelector('audio,video')) && present().ok) return;
+        if (!frameExited && currentDocument && !media.isConnected && roots.some(root => root.querySelector('audio,video')) && present(undefined, volumeChoice).ok) return;
         markUnavailable();
         return;
       }

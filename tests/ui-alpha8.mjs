@@ -499,6 +499,22 @@ try {
  const rails=page.getByRole('complementary',{name:'Vertikale faner',exact:true});
  await rails.waitFor();
  assert.equal(await page.locator('.tab-scroll').count(),0);
+ assert.equal(await rails.getByRole('heading',{name:'Faner',exact:true}).count(),1);
+ assert.equal(await rails.locator('.vertical-tab-heading-label span').textContent(),'Personlig');
+ const selectedRailTab=rails.locator('[aria-current=page]');
+ assert.equal(await selectedRailTab.count(),1);
+ assert.notEqual(await selectedRailTab.evaluate(el=>getComputedStyle(el.parentElement).boxShadow),'none');
+ const previousActive=await rails.locator('.selected[data-tab-id]').getAttribute('data-tab-id');
+ const initialTabCount=await rails.locator('[data-tab-id]').count();
+ await rails.getByRole('button',{name:'Åpne ny fane i fanelisten',exact:true}).click();
+ await page.waitForFunction(expected=>document.querySelectorAll('.vertical-tab-rail [data-tab-id]').length===expected,initialTabCount+1);
+ await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Adressefelt');
+ await rails.locator('.selected').getByRole('button',{name:/^Lukk /}).click();
+ await page.waitForFunction(expected=>document.querySelectorAll('.vertical-tab-rail [data-tab-id]').length===expected,initialTabCount);
+ await rails.locator(`[data-tab-id="${previousActive}"]`).getByRole('button',{name:/^Åpne /}).click();
+ await page.waitForFunction(id=>window.__uiTest.state.session.active===id,previousActive);
+ await page.screenshot({path:join(output,'vertical-tabs-redesign.png')});
+
  const currentRows=()=>rails.locator('[data-tab-id]').evaluateAll(items=>items.map(item=>item.dataset.tabId));
  const assertModel=async()=>{
   const session=await page.evaluate(()=>window.__uiTest.state.session);

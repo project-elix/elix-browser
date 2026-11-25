@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState,type KeyboardEvent,type PointerEvent,type ReactNode} from 'react';
-import {PanelLeftClose,PanelRightClose} from 'lucide-react';
+import {PanelLeftClose,PanelRightClose,Plus} from 'lucide-react';
 import type {TabLayout} from '../types';
 
 export const defaultTabLayout:TabLayout={vertical:false,side:'left',width:240};
@@ -25,7 +25,7 @@ export function TabLayoutSettings({value,onSave,onError}:{value:TabLayout;onSave
  </section>;
 }
 
-export function VerticalTabRail({value,onSave,onError,children}:{value:TabLayout;onSave:(next:TabLayout)=>Promise<void>;onError:(e:unknown)=>void;children:ReactNode}){
+export function VerticalTabRail({value,workspace,onNewTab,onSave,onError,children}:{value:TabLayout;workspace:string;onNewTab:()=>void;onSave:(next:TabLayout)=>Promise<void>;onError:(e:unknown)=>void;children:ReactNode}){
  const [width,setWidth]=useState<number|null>(null);
  const drag=useRef<{pointer:number;x:number;width:number}|null>(null);
  const direction=value.side==='left'?1:-1;
@@ -52,8 +52,10 @@ export function VerticalTabRail({value,onSave,onError,children}:{value:TabLayout
   save({width:e.key==='Home'?160:e.key==='End'?420:clamp(value.width+(e.key==='ArrowLeft'?-1:1)*direction*10)});
  }
  return <aside className={`vertical-tab-rail rail-${value.side}`} aria-label="Vertikale faner" style={{width:width??value.width}}>
-  <div className="vertical-tab-heading"><button title="Vis fanene øverst" aria-label="Skjul vertikale faner" onClick={()=>save({vertical:false})}>{value.side==='left'?<PanelLeftClose size={17}/>:<PanelRightClose size={17}/>}</button></div>
+  <div className="vertical-tab-heading"><div className="vertical-tab-heading-label"><h2>Faner</h2><span title={workspace}>{workspace}</span></div><button title="Vis fanene øverst" aria-label="Skjul vertikale faner" onClick={()=>save({vertical:false})}>{value.side==='left'?<PanelLeftClose size={17}/>:<PanelRightClose size={17}/>}</button></div>
+  <button className="vertical-new-tab" aria-label="Åpne ny fane i fanelisten" title="Ny fane · Ctrl+T" onClick={onNewTab}><Plus aria-hidden="true" size={16}/><span>Ny fane</span></button>
   <div className="rail-scroll">{children}</div>
+  <footer className="vertical-tab-footer">Alt + ↑ / ↓ for å sortere</footer>
   <div role="separator" aria-label="Endre bredde på fanelisten" aria-orientation="vertical" aria-valuemin={160} aria-valuemax={420} aria-valuenow={width??value.width} tabIndex={0} className="tab-width-handle" onKeyDown={key}
    onPointerDown={start} onPointerMove={e=>resize(e,false)} onPointerUp={e=>resize(e,true)} onPointerCancel={cancel} onLostPointerCapture={cancel}/>
  </aside>;
