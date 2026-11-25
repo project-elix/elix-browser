@@ -99,7 +99,20 @@ try {
     window.trackLog = [];
     navigator.mediaSession.setActionHandler('nexttrack', details => window.trackLog.push(details.action));
   });
+  await page.evaluate(()=>{window.__fixture.media.volume = .3});
   await run();
+  const volume = page.getByRole('slider',{name:'Volum i minispiller'});
+  assert.equal(await volume.inputValue(), '30', 'Starts at the website volume');
+  await page.evaluate(()=>{window.__fixture.media.volume = .4});
+  await page.waitForFunction(()=>document.querySelector('[data-elix-track-controls]').shadowRoot.querySelector('input').value === '40');
+  // Exercise the visible, keyboard-accessible control as the user does.
+  await volume.press('End');
+  await volume.press('ArrowLeft');
+  assert.equal(await volume.inputValue(), '99');
+  await page.evaluate(()=>{window.__fixture.media.volume = .15});
+  await page.waitForFunction(()=>window.__fixture.media.volume === .99);
+  assert.equal(await volume.inputValue(),'99','Site writes cannot reset the explicit popout level');
+  assert.equal(await page.evaluate(()=>window.__fixture.media.muted),true,'Volume does not toggle mute');
   const next = page.getByRole('button',{name:'Neste spor'});
   const prev = page.getByRole('button',{name:'Forrige spor'});
   assert.equal(await prev.isVisible(),false);
@@ -119,14 +132,20 @@ try {
     fixture.media.pause();
     const replacement = document.createElement('video');
     replacement.muted=true;
+    replacement.volume=.2;
     replacement.srcObject=fixture.stream;
     fixture.media.replaceWith(replacement);
     window.nextMedia=replacement;
   });
   await page.waitForFunction(()=>window.nextMedia.controls);
   assert.equal(await page.evaluate(()=>window.nextMedia.paused && !window.__fixture.media.controls),true);
+  assert.equal(await volume.inputValue(),'99','The active volume follows a replacement track');
+  assert.equal(await page.evaluate(()=>window.nextMedia.volume),.99);
   await restore();
+  assert.equal(await volume.count(),0);
+  await page.evaluate(()=>{window.nextMedia.volume = .2});
+  await page.waitForFunction(()=>window.nextMedia.volume === .2 && !window.nextMedia.hasAttribute('data-elix-volume-control'));
   assert.equal(await page.evaluate(()=>!window.nextMedia.controls && !document.querySelector('[data-elix-track-controls]')),true);
   assert.deepEqual(errors,[]);
-  console.log('PASS: media-only video/audio, native Chromium play/pause controls, resize, same-origin iframe and shadow DOM, stream identity, playlist actions, media replacement, no-media rejection and CSS restoration. Native hosting remains covered by Windows smoke tests.');
+  console.log('PASS: media-only video/audio, native Chromium play/pause controls, resize, same-origin iframe and shadow DOM, stream identity, playlist actions, explicit popout volume, media replacement, no-media rejection and CSS restoration. Native hosting remains covered by Windows smoke tests.');
 } finally {await browser.close();}
